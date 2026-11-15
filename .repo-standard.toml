@@ -1,0 +1,33 @@
+# Repository standard (repoboot). `repoboot check` measures drift against it; change it with
+# `repoboot answer KEY=VALUE`, then `repoboot plan` and `repoboot render` on a branch.
+
+[repo]
+description = "Render and validate install artefacts for Linux distros (Ubuntu, Proxmox VE, NixOS, Talos) from one host schema"
+host = "github"
+license = "MIT"
+license_holder = "matt-kh"
+license_year = "2026"
+name = "provision-hub"
+owner = "matt-kh"
+visibility = "public"
+
+[workflow]
+agent_labels = true
+codeowners = ["@matt-kh"]
+default_branch = "main"
+merge_method = "squash"
+required_approvals = 0
+tracker = "github-issues"
+
+[architecture]
+container = false
+deploy = "none"
+kind = "cli"
+languages = ["python"]
+notes = "prov CLI: versioned host.toml schema, per-distro renderer plugins (render/validate/plan), never applies; synthetic examples only (RFC 5737/3849 IPs, example.com); Python 3.10+ with uv."
+toolchain = "uv"
+
+[quality]
+ci_jobs = ["lint", "test"]
+precommit = true
+required_checks = ["lint"]
