@@ -1,0 +1,51 @@
+# .harness.toml - repository-level harness declaration (harness-hub, principle 8).
+# Provider-neutral: the hub's guard reads it from the hook's cwd, its skills at preflight.
+# Commit it; nothing in it is a secret. `harness repo` shows what it changes.
+# Subset: one statement per line, whole-line comments only (no inline comments, escapes
+# or multi-line arrays), each key once, at most 16 KiB and 400 lines - the guard parses it in bash.
+[repo]
+name = "provision-hub"
+# harness = "docs/agent-workflow.md"   # where your own harness is described
+# Where tickets live (wins over the user's ticket_workflow.trackers and the host): github-issues | jira.
+tracker = "github-issues"
+# project = "PROJ"   # default Jira project for /create-ticket (tracker = jira only)
+
+[owns]
+# Domains your harness covers: every hub component in them yields here.
+# Values: base, scm, tracker, delivery, kubernetes, workspace, operations, security.
+# domains = ["delivery"]
+# Single components by id (`harness catalog`), e.g.:
+#   core/guard.d/30-git
+#   core/guard.d/35-shell-hygiene
+#   gdoc/guard.d/80-gdoc
+#   gdoc/skills/gdoc
+#   github/guard.d/41-github-closing
+#   github/guard.d/60-github
+#   gitlab/guard.d/40-gitlab-closing
+#   gitlab/guard.d/50-gitlab
+#   jira/guard.d/70-jira
+#   jira/skills/jira
+#   k8s/guard.d/25-k8s-rules
+#   k8s/skills/k8s
+#   lessons/guard.d/15-lessons
+#   lessons/skills/retro
+#   obs/guard.d/32-obs
+#   obs/skills/obs
+#   repo-bootstrap/guard.d/67-repo-bootstrap
+#   repo-bootstrap/skills/bootstrap-repo
+#   stack/guard.d/65-stack
+#   stack/skills/stk
+#   supply-chain/guard.d/38-supply-chain
+#   supply-chain/skills/audit-deps
+#   supply-chain/skills/pin-deps
+#   supply-chain/skills/supply
+#   ticket-workflow/guard.d/75-ticket-workflow
+#   ticket-workflow/skills/create-ticket
+#   ticket-workflow/skills/work-ticket
+# components = ["core/guard.d/30-git"]
+
+[overrides]
+# Allow-listed WORK_TICKET_* guard settings (docs/reference/hook-policy.md#repo-overrides); a provider env
+# override of the same name (e.g. .claude/settings.json "env") wins per key.
+# WORK_TICKET_KEY_IN_BRANCH = "1"
+
