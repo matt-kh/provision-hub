@@ -48,4 +48,3 @@ tracker = "github-issues"
 # Allow-listed WORK_TICKET_* guard settings (docs/reference/hook-policy.md#repo-overrides); a provider env
 # override of the same name (e.g. .claude/settings.json "env") wins per key.
 # WORK_TICKET_KEY_IN_BRANCH = "1"
-
