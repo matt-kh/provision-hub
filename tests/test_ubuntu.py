@@ -1,0 +1,89 @@
+"""Ubuntu plugin: rendered-output validation, optional external tools, registry contract."""
+
+from __future__ import annotations
+
+import subprocess
+import types
+
+import pytest
+
+from prov.distros import ubuntu
+from prov.registry import ENTRY_POINT_GROUP, check_contract, discover
+from prov.schema import ConfigError, tomllib
+from prov.validate import ERROR, SKIPPED, check_host
+
+
+@pytest.fixture
+def rendered(tmp_path):
+    host, _ = check_host(tomllib.loads(ubuntu.starter("demo")), discover())
+    for name, text in ubuntu.render(host).items():
+        (tmp_path / name).write_text(text)
+    return tmp_path
+
+
+def messages(findings, level=ERROR):
+    return [f.message for f in findings if f.level == level]
+
+
+def test_clean_render_validates(rendered):
+    findings = ubuntu.validate(rendered)
+    assert messages(findings) == []
+    assert messages(findings, SKIPPED) == ["cloud-init not installed (cloud-init schema)"]
+
+
+@pytest.mark.parametrize(
+    "edit,needle",
+    [
+        (lambda t: t.replace("#cloud-config\n", ""), "#cloud-config"),
+        (lambda t: t.replace("  version: 1\n", "  version: 2\n"), "version must be 1"),
+        (lambda t: t.replace("autoinstall:", "autoinstal:"), "'autoinstall' mapping"),
+        (lambda t: t.replace("id: vg0", "id: vg9"), "'vg0' is not defined"),
+        (lambda t: t.replace("path: /\n", "path: /srv\n"), "exactly one root"),
+        (lambda t: t + "  : [\n", "invalid YAML"),
+    ],
+)
+def test_broken_user_data(rendered, edit, needle):
+    path = rendered / "user-data"
+    path.write_text(edit(path.read_text()))
+    assert any(needle in m for m in messages(ubuntu.validate(rendered))), messages(ubuntu.validate(rendered))
+
+
+def test_missing_files(tmp_path):
+    msgs = [str(f) for f in ubuntu.validate(tmp_path)]
+    assert "error: user-data: missing; run prov render" in msgs
+    assert "error: meta-data: missing; run prov render" in msgs
+    assert "error: kernel-cmdline: missing; run prov render" in msgs
+
+
+def test_external_validator_runs_when_present(rendered, monkeypatch):
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="Error: bad key")
+
+    monkeypatch.setattr(ubuntu.shutil, "which", lambda name: "/usr/bin/cloud-init")
+    monkeypatch.setattr(ubuntu.subprocess, "run", fake_run)
+    findings = ubuntu.validate(rendered)
+    assert calls == [["/usr/bin/cloud-init", "schema", "--config-file", str(rendered / "user-data")]]
+    assert messages(findings) == ["cloud-init schema: Error: bad key"]
+
+
+def test_ubuntu_registered_via_entry_point():
+    from importlib.metadata import entry_points
+
+    names = {ep.name: ep.value for ep in entry_points(group=ENTRY_POINT_GROUP)}
+    assert names.get("ubuntu") == "prov.distros.ubuntu"
+    assert discover()["ubuntu"] is ubuntu
+
+
+def test_contract_check_rejects_incomplete_plugin():
+    fake = types.SimpleNamespace(NAME="talos", SCHEMA={}, render=lambda h: {})
+    with pytest.raises(ConfigError, match="validate, plan"):
+        check_contract(fake, "talos = fake")
+
+
+def test_render_paths_and_newlines(rendered):
+    for path in rendered.iterdir():
+        text = path.read_text()
+        assert text.endswith("\n") and not any(line != line.rstrip() for line in text.splitlines())
