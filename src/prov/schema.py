@@ -70,7 +70,7 @@ USER = {
         ),
         "password_hash": _string(
             "Optional crypt(3) hash (yescrypt, SHA-512 or SHA-256). Plain passwords are never accepted.",
-            pattern="^\\$(y|gy|6|5)\\$[^\\s:]+$",
+            pattern="^\\$(y|gy|6|5)\\$[./0-9A-Za-z$=,]+$",
         ),
     },
 }
@@ -133,6 +133,9 @@ COMMON_PROPERTIES: Dict[str, Any] = {
     },
 }
 
+# Shared definitions every distro fragment may reference as "#/$defs/<name>".
+DEFS: Dict[str, Any] = {"interface": INTERFACE, "user": USER}
+
 COMMON_REQUIRED = ["schema_version", "hostname", "distro", "network", "storage"]
 
 
@@ -159,7 +162,7 @@ def host_schema(distros: Mapping[str, Any]) -> Dict[str, Any]:
             }
             for name in names
         ],
-        "$defs": {"interface": copy.deepcopy(INTERFACE), "user": copy.deepcopy(USER)},
+        "$defs": copy.deepcopy(DEFS),
     }
 
 
@@ -168,15 +171,27 @@ def schema_json(schema: Mapping[str, Any]) -> str:
     return json.dumps(schema, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
 
 
+MAX_HOST_FILE_BYTES = 1024 * 1024
+
+
 def read_toml(path: Path) -> Dict[str, Any]:
-    """Parse a host.toml; syntax errors and missing files become ConfigError."""
+    """Parse a host.toml; every failure becomes a ConfigError (exit 2).
+
+    host.toml must be a regular file of at most 1 MiB. Symlinks are refused outright (as are
+    FIFOs and devices, which would block or never end): keep host files as plain files.
+    """
+    from .util import FileTooLargeError, NotRegularFileError, read_regular_bytes
+
     try:
-        with path.open("rb") as fh:
-            return tomllib.load(fh)
+        return tomllib.loads(read_regular_bytes(path, MAX_HOST_FILE_BYTES).decode("utf-8"))
     except FileNotFoundError:
         raise ConfigError(f"{path}: not found") from None
     except IsADirectoryError:
         raise ConfigError(f"{path}: is a directory, expected a file") from None
+    except NotRegularFileError:
+        raise ConfigError(f"{path}: not a regular file; symlinks and special files are refused") from None
+    except FileTooLargeError:
+        raise ConfigError(f"{path}: larger than {MAX_HOST_FILE_BYTES} bytes") from None
     except UnicodeDecodeError as exc:
         raise ConfigError(f"{path}: not valid UTF-8: {exc}") from None
     except tomllib.TOMLDecodeError as exc:

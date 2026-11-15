@@ -92,11 +92,21 @@ def atomic_write(target: Path, text: str) -> None:
     """Write via a fresh temp file in the same directory, then rename over ``target``.
 
     The temp file is created with O_EXCL|O_NOFOLLOW (``tempfile.mkstemp``), and the rename
-    replaces a symlink or hard link at ``target`` instead of writing through it.
+    replaces a symlink or hard link at ``target`` instead of writing through it. The mode is
+    the replaced regular file's mode, else ``0o666`` minus the umask (like a plain open).
     """
+    try:
+        st = os.lstat(target)
+        mode = stat.S_IMODE(st.st_mode) if stat.S_ISREG(st.st_mode) else None
+    except FileNotFoundError:
+        mode = None
+    if mode is None:
+        umask = os.umask(0)
+        os.umask(umask)
+        mode = 0o666 & ~umask
     fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".prov-tmp")
     try:
-        os.fchmod(fd, 0o644)
+        os.fchmod(fd, mode)
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(text)
         os.replace(tmp, target)

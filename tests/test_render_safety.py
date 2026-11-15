@@ -122,7 +122,11 @@ def test_render_breaks_hard_links_instead_of_writing_through(tmp_path, capsys, o
 
 
 def test_atomic_write_leaves_no_temp_files(tmp_path, capsys):
-    _seed_host(capsys, tmp_path)
+    old_umask = os.umask(0o022)
+    try:
+        _seed_host(capsys, tmp_path)
+    finally:
+        os.umask(old_umask)
     run(capsys, "--root", str(tmp_path), "render", "demo")
     names = [p.name for p in (tmp_path / "hosts/demo").rglob("*")]
     assert not [n for n in names if n.endswith(".prov-tmp")]
@@ -194,3 +198,81 @@ def test_stale_files_and_empty_dirs_are_pruned(tmp_path):
     changes = write_rendered(rendered, {"keep/new": "y\n"})
     assert "removed old/deeper/file" in changes and "wrote keep/new" in changes
     assert sorted(os.listdir(rendered)) == ["keep"]
+
+
+@pytest.fixture
+def alarm():
+    """Fail instead of hanging forever if a read blocks (e.g. on a FIFO)."""
+    import signal
+
+    def on_alarm(signum, frame):
+        raise TimeoutError("blocked on a read")
+
+    old = signal.signal(signal.SIGALRM, on_alarm)
+    signal.alarm(10)
+    yield
+    signal.alarm(0)
+    signal.signal(signal.SIGALRM, old)
+
+
+@pytest.mark.parametrize("verb", ["validate", "render", "plan", "diff"])
+def test_host_toml_fifo_is_refused_without_blocking(tmp_path, capsys, alarm, verb):
+    hdir = tmp_path / "hosts/f2"
+    hdir.mkdir(parents=True)
+    os.mkfifo(hdir / "host.toml")
+    code, _, err = run(capsys, "--root", str(tmp_path), verb, "f2")
+    assert code == 2 and "not a regular file" in err
+
+
+@pytest.mark.parametrize("target", ["/dev/zero", "inside"])
+def test_host_toml_symlinks_are_refused(tmp_path, capsys, alarm, target):
+    _seed_host(capsys, tmp_path)
+    hdir = tmp_path / "hosts/demo"
+    real = hdir / "real.toml"
+    (hdir / "host.toml").rename(real)
+    (hdir / "host.toml").symlink_to("/dev/zero" if target == "/dev/zero" else real)
+    code, _, err = run(capsys, "--root", str(tmp_path), "validate", "demo")
+    assert code == 2 and "symlinks and special files are refused" in err
+
+
+def test_host_toml_size_is_capped(tmp_path, capsys):
+    from prov.schema import MAX_HOST_FILE_BYTES
+
+    _seed_host(capsys, tmp_path)
+    toml = tmp_path / "hosts/demo/host.toml"
+    toml.write_text(toml.read_text() + "#" * MAX_HOST_FILE_BYTES + "\n")
+    code, _, err = run(capsys, "--root", str(tmp_path), "render", "demo")
+    assert code == 2 and "larger than 1048576 bytes" in err
+
+
+@pytest.fixture
+def umask():
+    def set_umask(value):
+        old = os.umask(value)
+        restore.append(old)
+
+    restore = []
+    yield set_umask
+    for old in restore:
+        os.umask(old)
+
+
+def test_new_files_honour_the_umask(tmp_path, capsys, umask):
+    umask(0o027)
+    _seed_host(capsys, tmp_path)
+    run(capsys, "--root", str(tmp_path), "render", "demo")
+    assert oct((tmp_path / "hosts/demo/host.toml").stat().st_mode & 0o777) == "0o640"
+    assert oct((tmp_path / "hosts/demo/rendered/user-data").stat().st_mode & 0o777) == "0o640"
+
+
+def test_replacing_a_file_keeps_its_mode(tmp_path, capsys, umask):
+    umask(0o022)
+    _seed_host(capsys, tmp_path)
+    run(capsys, "--root", str(tmp_path), "render", "demo")
+    user_data = tmp_path / "hosts/demo/rendered/user-data"
+    user_data.chmod(0o600)
+    toml = tmp_path / "hosts/demo/host.toml"
+    toml.write_text(toml.read_text().replace('"Etc/UTC"', '"Europe/Berlin"'))
+    code, out, _ = run(capsys, "--root", str(tmp_path), "render", "demo")
+    assert code == 0 and "updated user-data" in out
+    assert oct(user_data.stat().st_mode & 0o777) == "0o600"

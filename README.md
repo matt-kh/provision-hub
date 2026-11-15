@@ -77,7 +77,9 @@ one.
 
 **Safety.** `render` and `init` refuse to write through symlinks (`hosts/`, the host
 directory, `rendered/`, files inside it); symlinks found inside `rendered/` are removed,
-never followed. Host values may not contain control characters, and `plan` shell-quotes
+never followed. `host.toml` itself must be a regular file of at most 1 MiB: symlinks,
+FIFOs and devices are refused. Written files get the umask's mode, or keep the mode of the
+file they replace. Host values may not contain control characters, and `plan` shell-quotes
 every host value it prints.
 
 **External validators** are optional: `prov validate` runs `cloud-init schema` when
