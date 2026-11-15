@@ -126,7 +126,7 @@ COMMON_PROPERTIES: Dict[str, Any] = {
         "properties": {
             "disks": _string_list(
                 "Whole disks the installer may claim and wipe, in order (first = boot disk).",
-                item={"type": "string", "pattern": "^/dev/\\S+$"},
+                item={"type": "string", "pattern": "^/dev/[A-Za-z0-9._:+/-]+$"},
                 minItems=1,
             ),
         },
@@ -175,5 +175,11 @@ def read_toml(path: Path) -> Dict[str, Any]:
             return tomllib.load(fh)
     except FileNotFoundError:
         raise ConfigError(f"{path}: not found") from None
+    except IsADirectoryError:
+        raise ConfigError(f"{path}: is a directory, expected a file") from None
+    except UnicodeDecodeError as exc:
+        raise ConfigError(f"{path}: not valid UTF-8: {exc}") from None
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"{path}: invalid TOML: {exc}") from None
+    except OSError as exc:
+        raise ConfigError(f"{path}: cannot read: {exc.strerror or exc}") from None

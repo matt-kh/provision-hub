@@ -47,14 +47,44 @@ def has_errors(findings: List[Finding]) -> bool:
 
 # --- JSON Schema subset -----------------------------------------------------------------
 
+def _is_number(v: Any) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
 _TYPES = {
     "object": lambda v: isinstance(v, dict),
     "array": lambda v: isinstance(v, list),
     "string": lambda v: isinstance(v, str),
     "boolean": lambda v: isinstance(v, bool),
-    "integer": lambda v: isinstance(v, int) and not isinstance(v, bool),
-    "number": lambda v: isinstance(v, (int, float)) and not isinstance(v, bool),
+    # JSON Schema 2020-12: a number with a zero fractional part is an integer (1.0 is valid).
+    "integer": lambda v: _is_number(v) and float(v).is_integer(),
+    "number": _is_number,
 }
+
+_CONTROL = re.compile("[\x00-\x1f\x7f]")
+_DOLLAR = re.compile(r"(?<!\\)\$")
+
+
+def json_equal(a: Any, b: Any) -> bool:
+    """JSON equality: true != 1, 1 == 1.0, containers compared element-wise."""
+    if isinstance(a, bool) or isinstance(b, bool):
+        return isinstance(a, bool) and isinstance(b, bool) and a == b
+    if _is_number(a) and _is_number(b):
+        return a == b
+    if isinstance(a, dict) and isinstance(b, dict):
+        return a.keys() == b.keys() and all(json_equal(a[k], b[k]) for k in a)
+    if isinstance(a, list) and isinstance(b, list):
+        return len(a) == len(b) and all(json_equal(x, y) for x, y in zip(a, b))
+    return type(a) is type(b) and a == b
+
+
+def ecma_search(pattern: str, text: str) -> bool:
+    """``re.search`` with ECMA-262 ``$`` semantics: ``$`` matches only at the very end.
+
+    Python's ``$`` also matches before a trailing newline, so ``^[a-z]+$`` would accept
+    ``"demo\\n"``; translating unescaped ``$`` to ``\\Z`` closes that gap.
+    """
+    return re.search(_DOLLAR.sub(r"\\Z", pattern), text) is not None
 
 
 def _join(path: str, key: Any) -> str:
@@ -87,19 +117,21 @@ def schema_errors(instance: Any, schema: Mapping[str, Any], root: Mapping[str, A
         types = schema["type"] if isinstance(schema["type"], list) else [schema["type"]]
         if not any(_TYPES[t](instance) for t in types):
             return [f"{where}: expected {' or '.join(types)}, got {type(instance).__name__}"]
-    if "const" in schema and instance != schema["const"]:
+    if "const" in schema and not json_equal(instance, schema["const"]):
         errors.append(f"{where}: must be {schema['const']!r}")
-    if "enum" in schema and instance not in schema["enum"]:
+    if "enum" in schema and not any(json_equal(instance, e) for e in schema["enum"]):
         errors.append(f"{where}: {instance!r} is not one of {schema['enum']}")
 
     if isinstance(instance, str):
-        if "pattern" in schema and not re.search(schema["pattern"], instance):
+        if _CONTROL.search(instance):
+            errors.append(f"{where}: control characters (newline, tab, ...) are not allowed")
+        elif "pattern" in schema and not ecma_search(schema["pattern"], instance):
             errors.append(f"{where}: {instance!r} does not match {schema['pattern']}")
         if "minLength" in schema and len(instance) < schema["minLength"]:
             errors.append(f"{where}: shorter than {schema['minLength']}")
         if "maxLength" in schema and len(instance) > schema["maxLength"]:
             errors.append(f"{where}: longer than {schema['maxLength']}")
-    if _TYPES["number"](instance):
+    if _is_number(instance):
         if "minimum" in schema and instance < schema["minimum"]:
             errors.append(f"{where}: {instance} is less than {schema['minimum']}")
         if "maximum" in schema and instance > schema["maximum"]:
@@ -113,7 +145,7 @@ def schema_errors(instance: Any, schema: Mapping[str, Any], root: Mapping[str, A
         if schema.get("uniqueItems"):
             seen: List[Any] = []
             for item in instance:
-                if item in seen:
+                if any(json_equal(item, other) for other in seen):
                     errors.append(f"{where}: duplicate item {item!r}")
                     break
                 seen.append(item)
@@ -128,7 +160,9 @@ def schema_errors(instance: Any, schema: Mapping[str, Any], root: Mapping[str, A
         props = schema.get("properties", {})
         extra = schema.get("additionalProperties", True)
         for key in sorted(instance):
-            if key in props:
+            if _CONTROL.search(key):
+                errors.append(f"{_join(path, key)!r}: control characters in key")
+            elif key in props:
                 errors += schema_errors(instance[key], props[key], root, _join(path, key))
             elif extra is False:
                 errors.append(f"{_join(path, key)}: unknown key")
@@ -143,11 +177,21 @@ def schema_errors(instance: Any, schema: Mapping[str, Any], root: Mapping[str, A
 
 
 def apply_defaults(instance: Any, schema: Mapping[str, Any], root: Mapping[str, Any] | None = None) -> Any:
-    """Return a deep copy of a *valid* instance with schema ``default`` values filled in."""
+    """Return a deep copy of a *valid* instance with schema ``default`` values filled in.
+
+    Integral floats where the schema wants an integer (``mtu = 1500.0``, ``raid_level = 5.0``)
+    are normalised to ``int``.
+    """
     root = schema if root is None else root
     if "$ref" in schema:
         return apply_defaults(instance, _resolve(schema["$ref"], root), root)
     result = copy.deepcopy(instance)
+    if isinstance(result, float) and result.is_integer():
+        wants_int = schema.get("type") == "integer" or (
+            "enum" in schema and all(_is_number(e) and float(e).is_integer() for e in schema["enum"])
+        )
+        if wants_int:
+            return int(result)
     if isinstance(result, dict):
         for key, sub in schema.get("properties", {}).items():
             if key not in result and "default" in sub:

@@ -93,7 +93,7 @@ INVALID = {
 
 
 @pytest.mark.parametrize("name", sorted(INVALID))
-def test_invalid_hosts_agree_with_reference_validator(name):
+def test_invalid_hosts_rejected_by_both_validators(name):
     raw = _mutate(INVALID[name])
     assert not jsonschema.Draft202012Validator(published()).is_valid(raw)
     assert schema_errors(raw, published())
@@ -131,3 +131,66 @@ def test_defaults_are_applied():
         "amd64", "uefi", "Etc/UTC", "en_US.UTF-8", "us",
     )
     assert host["users"][0]["shell"] == "/bin/bash" and host["ubuntu"]["updates"] == "security"
+
+
+# Differential test: prov's validator and the jsonschema reference must agree on every
+# mutated host, in both directions. The only allowed disagreement is STRICTER: prov applies
+# ECMA-262 `$` semantics (Python's `$` also matches before a trailing newline, which the
+# reference inherits) and rejects control characters in every string.
+DIFFERENTIAL = {
+    # accept direction
+    "starter": (lambda r: None, True),
+    "mtu_integral_float": (lambda r: r["network"]["interfaces"][0].update(mtu=1500.0), True),
+    "mtu_int": (lambda r: r["network"]["interfaces"][0].update(mtu=1500), True),
+    "raid_level_5": (lambda r: (r["ubuntu"]["storage"].update(layout="mdraid", raid_level=5), r["storage"].update(disks=["/dev/sda", "/dev/sdb", "/dev/sdc"])), True),
+    "raid_level_float": (lambda r: (r["ubuntu"]["storage"].update(layout="mdraid", raid_level=1.0), r["storage"].update(disks=["/dev/sda", "/dev/sdb"])), True),
+    "password_hash": (lambda r: r["users"][0].update(password_hash="$6$EXAMPLEsalt$EXAMPLEhash"), True),
+    "disk_by_id": (lambda r: r["storage"].update(disks=["/dev/disk/by-id/nvme-EXAMPLE_SERIAL-part1"]), True),
+    "no_dns": (lambda r: r["network"].pop("dns"), True),
+    "minimal_users": (lambda r: r.update(users=[{"name": "ops", "ssh_authorized_keys": r["users"][0]["ssh_authorized_keys"]}]), True),
+    # reject direction
+    "raid_level_true": (lambda r: r["ubuntu"]["storage"].update(layout="mdraid", raid_level=True), False),
+    "mtu_fraction": (lambda r: r["network"]["interfaces"][0].update(mtu=1500.5), False),
+    "dhcp4_int": (lambda r: r["network"]["interfaces"][0].update(dhcp4=1), False),
+    "schema_version_float_ok": (lambda r: r.update(schema_version=1.0), True),
+    "duplicate_groups": (lambda r: r["users"][0].update(groups=["sudo", "sudo"]), False),
+    "disk_shell_metachar": (lambda r: r["storage"].update(disks=["/dev/x;rm${IFS}-rf${IFS}~;#"]), False),
+    "disk_space": (lambda r: r["storage"].update(disks=["/dev/sd a"]), False),
+    # prov stricter than the (Python-regex based) reference
+    "hostname_trailing_newline": (lambda r: r.update(hostname="demo\n"), False),
+    "disk_trailing_newline": (lambda r: r["storage"].update(disks=["/dev/vda\n"]), False),
+    "gecos_tab": (lambda r: r["users"][0].update(gecos="a\tb"), False),
+    "gecos_escape": (lambda r: r["users"][0].update(gecos="a\x1b[2Jb"), False),
+}
+STRICTER = {"hostname_trailing_newline", "disk_trailing_newline", "gecos_tab", "gecos_escape"}
+
+
+@pytest.mark.parametrize("name", sorted(DIFFERENTIAL))
+def test_differential_against_reference_validator(name):
+    fn, expected = DIFFERENTIAL[name]
+    raw = _mutate(fn)
+    ours = not schema_errors(raw, published())
+    reference = jsonschema.Draft202012Validator(published()).is_valid(raw)
+    assert ours is expected
+    if name in STRICTER:
+        assert reference is True and ours is False
+    else:
+        assert reference is ours
+
+
+def test_integral_floats_are_normalised_to_int():
+    raw = _mutate(DIFFERENTIAL["raid_level_float"][0])
+    raw["network"]["interfaces"][0]["mtu"] = 9000.0
+    host, findings = check_host(raw, discover())
+    assert host is not None, findings
+    assert type(host["ubuntu"]["storage"]["raid_level"]) is int
+    assert type(host["network"]["interfaces"][0]["mtu"]) is int
+    assert "raidlevel: 1\n" in ubuntu.render(host)["user-data"]
+
+
+def test_control_characters_rejected_everywhere():
+    for value in ("demo\n", "de\rmo", "de\x00mo"):
+        host, findings = check_host(dict(STARTER, hostname=value), discover())
+        assert host is None and any("control characters" in f.message for f in findings)
+    host, findings = check_host(_mutate(lambda r: r["network"].update({"dns": {"search": ["example.com\n"]}})), discover())
+    assert host is None

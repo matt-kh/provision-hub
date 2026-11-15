@@ -221,7 +221,7 @@
         "disks": {
           "description": "Whole disks the installer may claim and wipe, in order (first = boot disk).",
           "items": {
-            "pattern": "^/dev/\\S+$",
+            "pattern": "^/dev/[A-Za-z0-9._:+/-]+$",
             "type": "string"
           },
           "minItems": 1,
