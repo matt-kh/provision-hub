@@ -13,7 +13,7 @@ import ipaddress
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .schema import SUPPORTED_SCHEMA_VERSIONS, ConfigError, host_schema, read_toml
 
@@ -62,7 +62,8 @@ _TYPES = {
     "number": _is_number,
 }
 
-_CONTROL = re.compile("[\x00-\x1f\x7f]")
+# C0 and C1 controls, DEL, and the Unicode line/paragraph separators.
+_CONTROL = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029]")
 
 
 def json_equal(a: Any, b: Any) -> bool:
@@ -121,8 +122,12 @@ def ecma_to_python(pattern: str) -> str:
 
 @functools.lru_cache(maxsize=None)
 def compile_pattern(pattern: str) -> "re.Pattern[str]":
-    """Compile a JSON Schema ``pattern`` with ECMA ``$`` semantics (cached)."""
-    return re.compile(ecma_to_python(pattern))
+    """Compile a JSON Schema ``pattern`` with ECMA ``$`` semantics (cached).
+
+    ``re.ASCII`` keeps ``\\d`` and ``\\w`` to ASCII as in ECMA-262; prov's own patterns use
+    explicit character classes only, so the flag never makes them looser.
+    """
+    return re.compile(ecma_to_python(pattern), re.ASCII)
 
 
 def ecma_search(pattern: str, text: str) -> bool:
@@ -130,9 +135,20 @@ def ecma_search(pattern: str, text: str) -> bool:
     return compile_pattern(pattern).search(text) is not None
 
 
-def check_schema_fragment(schema: Any, where: str = "<schema>") -> None:
-    """Raise ValueError if a schema uses unsupported keywords or an invalid pattern.
+_COUNT_KEYWORDS = ("minLength", "maxLength", "minItems", "maxItems")
 
+
+def check_schema_fragment(
+    schema: Any,
+    where: str = "<schema>",
+    defs: Optional[Mapping[str, Any]] = None,
+    allow_defs: bool = True,
+) -> None:
+    """Raise ValueError if a schema is not one prov's validator can evaluate safely.
+
+    Checks keyword names *and* values (types, counts, patterns). ``defs`` are the
+    definitions ``$ref`` may point at; with ``allow_defs=False`` (distro fragments) a
+    ``$defs`` of its own is refused, because only the host schema's ``$defs`` are composed.
     Run at plugin load so a broken distro ``SCHEMA`` is a clear error, not a crash later.
     """
     if not isinstance(schema, dict):
@@ -140,25 +156,66 @@ def check_schema_fragment(schema: Any, where: str = "<schema>") -> None:
     unknown = set(schema) - SUPPORTED_KEYWORDS
     if unknown:
         raise ValueError(f"{where}: unsupported keyword(s) {sorted(unknown)}")
+
+    def fail(key: str, why: str) -> None:
+        raise ValueError(f"{where}.{key}: {why}")
+
+    if "type" in schema:
+        types = schema["type"] if isinstance(schema["type"], list) else [schema["type"]]
+        if not types or not all(isinstance(t, str) and t in _TYPES for t in types):
+            fail("type", f"must be one of {sorted(_TYPES)} or a non-empty list of them")
+    for key in _COUNT_KEYWORDS:
+        if key in schema and not (type(schema[key]) is int and schema[key] >= 0):
+            fail(key, "must be a non-negative integer")
+    for key in ("minimum", "maximum"):
+        if key in schema and not _is_number(schema[key]):
+            fail(key, "must be a number")
+    if "required" in schema and not (isinstance(schema["required"], list) and all(isinstance(k, str) for k in schema["required"])):
+        fail("required", "must be a list of strings")
+    if "enum" in schema and not (isinstance(schema["enum"], list) and schema["enum"]):
+        fail("enum", "must be a non-empty list")
+    if "allOf" in schema and not isinstance(schema["allOf"], list):
+        fail("allOf", "must be a list")
+    if "uniqueItems" in schema and not isinstance(schema["uniqueItems"], bool):
+        fail("uniqueItems", "must be a boolean")
+    if "additionalProperties" in schema and not isinstance(schema["additionalProperties"], (bool, dict)):
+        fail("additionalProperties", "must be a boolean or a schema")
+    for key in ("title", "description", "$schema", "$id"):
+        if key in schema and not isinstance(schema[key], str):
+            fail(key, "must be a string")
+    for key in ("properties", "$defs"):
+        if key in schema and not (isinstance(schema[key], dict) and all(isinstance(k, str) for k in schema[key])):
+            fail(key, "must be an object keyed by strings")
+    if "$defs" in schema and not allow_defs:
+        fail("$defs", "distro fragments may not define $defs; reference the host schema's #/$defs/<name>")
     if "pattern" in schema:
         if not isinstance(schema["pattern"], str):
-            raise ValueError(f"{where}.pattern: must be a string")
+            fail("pattern", "must be a string")
         try:
             compile_pattern(schema["pattern"])
         except re.error as exc:
-            raise ValueError(f"{where}.pattern: invalid regular expression {schema['pattern']!r}: {exc}") from None
-    if "$ref" in schema and not str(schema["$ref"]).startswith("#/$defs/"):
-        raise ValueError(f"{where}.$ref: only '#/$defs/...' references are supported")
-    for key in ("properties", "$defs"):
-        for name, sub in schema.get(key, {}).items():
-            check_schema_fragment(sub, f"{where}.{key}.{name}")
+            fail("pattern", f"invalid regular expression {schema['pattern']!r}: {exc}")
+    if "$ref" in schema:
+        ref = schema["$ref"]
+        if not (isinstance(ref, str) and ref.startswith("#/$defs/")):
+            fail("$ref", "only '#/$defs/<name>' references are supported")
+        if defs is not None and ref[len("#/$defs/"):] not in defs:
+            fail("$ref", f"{ref!r} does not resolve (known: {sorted(defs)})")
+
+    def sub(child: Any, name: str) -> None:
+        check_schema_fragment(child, f"{where}.{name}", defs, allow_defs)
+
+    for name, child in schema.get("properties", {}).items():
+        sub(child, f"properties.{name}")
+    for name, child in schema.get("$defs", {}).items():
+        sub(child, f"$defs.{name}")
     for key in ("items", "if", "then"):
         if key in schema:
-            check_schema_fragment(schema[key], f"{where}.{key}")
+            sub(schema[key], key)
     if isinstance(schema.get("additionalProperties"), dict):
-        check_schema_fragment(schema["additionalProperties"], f"{where}.additionalProperties")
-    for n, sub in enumerate(schema.get("allOf", [])):
-        check_schema_fragment(sub, f"{where}.allOf[{n}]")
+        sub(schema["additionalProperties"], "additionalProperties")
+    for n, child in enumerate(schema.get("allOf", [])):
+        sub(child, f"allOf[{n}]")
 
 
 def _join(path: str, key: Any) -> str:
@@ -353,11 +410,16 @@ def check_host(raw: Mapping[str, Any], distros: Mapping[str, Any]) -> Tuple[Dict
     plugin = distros[host["distro"]]
     if hasattr(plugin, "check"):
         try:
-            findings += list(plugin.check(host))
+            extra = plugin.check(host)
         except ConfigError:
             raise
         except Exception as exc:
             raise ConfigError(f"distro plugin {plugin.NAME!r} failed in check: {type(exc).__name__}: {exc}") from exc
+        if not (isinstance(extra, list) and all(isinstance(f, Finding) for f in extra)):
+            raise ConfigError(
+                f"distro plugin {plugin.NAME!r} failed in check: returned {type(extra).__name__}, expected a list of prov.validate.Finding"
+            )
+        findings += extra
     if has_errors(findings):
         return None, findings
     return host, findings

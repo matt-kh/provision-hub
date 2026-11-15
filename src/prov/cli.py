@@ -38,14 +38,35 @@ def host_dir(root: Path, host: str) -> Path:
     return safe_host_dir(root, host)
 
 
+def _is_file_map(value: Any) -> bool:
+    return isinstance(value, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in value.items())
+
+
+def _is_findings(value: Any) -> bool:
+    return isinstance(value, list) and all(isinstance(f, Finding) for f in value)
+
+
+# What each plugin method must return; anything else is a plugin bug reported as exit 2.
+RETURN_CHECKS = {
+    "render": (_is_file_map, "a dict of str paths to str texts"),
+    "validate": (_is_findings, "a list of prov.validate.Finding"),
+    "starter": (lambda v: isinstance(v, str), "a str"),
+}
+
+
 def call_plugin(plugin: Any, method: str, *args: Any) -> Any:
-    """Run a plugin method; any exception it raises becomes a ConfigError naming it."""
+    """Run a plugin method; exceptions and wrongly typed results become a ConfigError."""
+    name = getattr(plugin, "NAME", "?")
     try:
-        return getattr(plugin, method)(*args)
+        result = getattr(plugin, method)(*args)
     except ConfigError:
         raise
     except Exception as exc:
-        raise ConfigError(f"distro plugin {getattr(plugin, 'NAME', '?')!r} failed in {method}: {type(exc).__name__}: {exc}") from exc
+        raise ConfigError(f"distro plugin {name!r} failed in {method}: {type(exc).__name__}: {exc}") from exc
+    check, expected = RETURN_CHECKS.get(method, (lambda v: True, ""))
+    if not check(result):
+        raise ConfigError(f"distro plugin {name!r} failed in {method}: returned {type(result).__name__}, expected {expected}")
+    return result
 
 
 def _name_warning(host: Any, dirname: str) -> List[Finding]:

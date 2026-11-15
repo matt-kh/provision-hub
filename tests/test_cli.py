@@ -242,3 +242,26 @@ def test_value_and_regex_errors_exit_2(tmp_path, capsys, monkeypatch, exc, needl
     monkeypatch.setattr(cli, "load_host", boom)
     code, _, err = run(capsys, "--root", str(tmp_path), "render", "demo")
     assert code == 2 and needle in err
+
+
+@pytest.mark.parametrize(
+    "method,value,needle",
+    [
+        ("render", ["user-data"], "failed in render: returned list"),
+        ("render", {"user-data": 1}, "failed in render: returned dict, expected a dict of str paths"),
+        ("validate", None, "failed in validate: returned NoneType"),
+        ("check", ("not", "findings"), "failed in check: returned tuple"),
+        ("plan", "echo hi", "failed in plan: returned str"),
+        ("plan", [b"bytes"], "failed in plan: returned list, expected a list of str"),
+    ],
+)
+def test_wrongly_typed_plugin_results_exit_2(tmp_path, capsys, monkeypatch, method, value, needle):
+    from prov.distros import ubuntu
+
+    root = str(tmp_path)
+    run(capsys, "--root", root, "init", "ubuntu", "demo")
+    run(capsys, "--root", root, "render", "demo")
+    monkeypatch.setattr(ubuntu, method, lambda *a: value)
+    verb = {"render": "render", "validate": "validate", "check": "validate", "plan": "plan"}[method]
+    code, _, err = run(capsys, "--root", root, verb, "demo")
+    assert code == 2 and f"distro plugin 'ubuntu' {needle}" in err, err

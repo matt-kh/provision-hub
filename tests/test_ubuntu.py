@@ -157,3 +157,70 @@ def test_contract_check_rejects_bad_schema(schema, needle):
     fake = types.SimpleNamespace(NAME="talos", SCHEMA=schema, render=lambda h: {}, validate=lambda d: [], plan=lambda h: [])
     with pytest.raises(ConfigError, match=re.escape(needle)):
         check_contract(fake, "talos = fake")
+
+
+BAD_SCHEMAS = {
+    "type_typo": ({"type": "strin"}, "type: must be one of"),
+    "type_empty_list": ({"type": []}, "type: must be one of"),
+    "minLength_string": ({"type": "string", "minLength": "3"}, "minLength: must be a non-negative integer"),
+    "minItems_bool": ({"type": "array", "minItems": True}, "minItems: must be a non-negative integer"),
+    "maxLength_negative": ({"type": "string", "maxLength": -1}, "maxLength: must be a non-negative integer"),
+    "minimum_string": ({"type": "integer", "minimum": "1"}, "minimum: must be a number"),
+    "properties_list": ({"type": "object", "properties": []}, "properties: must be an object"),
+    "required_string": ({"type": "object", "required": "x"}, "required: must be a list of strings"),
+    "enum_empty": ({"enum": []}, "enum: must be a non-empty list"),
+    "allOf_dict": ({"allOf": {}}, "allOf: must be a list"),
+    "uniqueItems_string": ({"type": "array", "uniqueItems": "yes"}, "uniqueItems: must be a boolean"),
+    "additionalProperties_string": ({"type": "object", "additionalProperties": "no"}, "additionalProperties: must be a boolean"),
+    "own_defs": ({"type": "object", "$defs": {"x": {"type": "string"}}, "properties": {"a": {"$ref": "#/$defs/x"}}}, "may not define $defs"),
+    "unresolved_ref": ({"type": "object", "properties": {"a": {"$ref": "#/$defs/disk"}}}, "does not resolve"),
+    "items_not_schema": ({"type": "array", "items": "string"}, "must be an object"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(BAD_SCHEMAS))
+def test_schema_values_are_validated_at_load(name):
+    schema, needle = BAD_SCHEMAS[name]
+    fake = types.SimpleNamespace(NAME="talos", SCHEMA=schema, render=lambda h: {}, validate=lambda d: [], plan=lambda h: [])
+    with pytest.raises(ConfigError, match=re.escape(needle)):
+        check_contract(fake, "talos = fake")
+
+
+def test_shared_defs_are_referenceable():
+    schema = {"type": "object", "properties": {"admins": {"type": "array", "items": {"$ref": "#/$defs/user"}}}}
+    fake = types.SimpleNamespace(NAME="talos", SCHEMA=schema, render=lambda h: {}, validate=lambda d: [], plan=lambda h: [])
+    check_contract(fake, "talos = fake")
+
+
+def test_composed_host_schema_passes_its_own_check():
+    from prov.registry import builtin
+    from prov.schema import host_schema
+    from prov.validate import check_schema_fragment
+
+    composed = host_schema(builtin())
+    check_schema_fragment(composed, "<host>", defs=composed["$defs"])
+
+
+def test_broken_third_party_plugin_breaks_no_command_with_a_traceback(monkeypatch, capsys):
+    import prov.registry as registry
+    from prov.cli import main
+
+    bad = types.SimpleNamespace(NAME="talos", SCHEMA={"type": "object", "properties": []}, render=lambda h: {}, validate=lambda d: [], plan=lambda h: [])
+    ep = types.SimpleNamespace(name="talos", value="prov_talos", load=lambda: bad)
+    monkeypatch.setattr(registry, "entry_points", lambda group: [ep])
+    assert main(["distros"]) == 2
+    assert "distro plugin talos = prov_talos: invalid SCHEMA" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "pattern,text,ok",
+    [
+        ("^[0-9]+$", "٣", False),
+        ("^\\d+$", "٣", False),  # re.ASCII: \d is ASCII-only, as in ECMA-262
+        ("^\\d+$", "3", True),
+    ],
+)
+def test_patterns_are_ascii(pattern, text, ok):
+    from prov.validate import ecma_search
+
+    assert ecma_search(pattern, text) is ok

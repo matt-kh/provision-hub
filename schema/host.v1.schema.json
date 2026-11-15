@@ -72,7 +72,7 @@
         },
         "password_hash": {
           "description": "Optional crypt(3) hash (yescrypt, SHA-512 or SHA-256). Plain passwords are never accepted.",
-          "pattern": "^\\$(y|gy|6|5)\\$[^\\s:]+$",
+          "pattern": "^\\$(y|gy|6|5)\\$[./0-9A-Za-z$=,]+$",
           "type": "string"
         },
         "shell": {

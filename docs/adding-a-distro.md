@@ -32,8 +32,10 @@ make `prov validate` exit 1. Printed form: `error: storage.disks: needs one disk
 
 The registry (`prov.registry.discover`) rejects a plugin that lacks a required member, whose
 `NAME` differs from its entry-point name, whose name is already registered, or whose `SCHEMA`
-uses an unsupported keyword or an invalid `pattern`. An exception escaping a plugin method is
-reported as `distro plugin '<NAME>' failed in <method>: ...` with exit code 2.
+uses an unsupported keyword or an invalid `pattern`. An exception escaping a plugin method, or a
+result of the wrong type (`render` not a `dict[str, str]`, `validate`/`check` not a
+`list[Finding]`, `plan` not a `list[str]`, `starter` not a `str`), is reported as
+`distro plugin '<NAME>' failed in <method>: ...` with exit code 2.
 
 ### What `host` contains
 
@@ -72,6 +74,10 @@ ignoring it.
 and makes the table required when `distro = "<NAME>"`. Rules:
 
 - `"type": "object"`, `"additionalProperties": false` on every object.
+- Keyword values are checked too (e.g. `type` must name a JSON type, counts are
+  non-negative integers, `required` is a list of strings). A fragment may not define its own
+  `$defs`; `$ref` may only point at the host schema's shared definitions
+  (`#/$defs/user`, `#/$defs/interface`).
 - Only these keywords (the built-in validator rejects others): `type`, `enum`, `const`,
   `pattern`, `minLength`, `maxLength`, `minimum`, `maximum`, `properties`, `required`,
   `additionalProperties`, `items`, `minItems`, `maxItems`, `uniqueItems`, `allOf`, `if`,
@@ -81,8 +87,10 @@ and makes the table required when `distro = "<NAME>"`. Rules:
   the very end (prov translates it for Python, where `$` also matches before a trailing
   newline). Anchor every pattern with `^...$` and use explicit character classes instead
   of `\S` or `.`.
-- prov rejects control characters (newline, tab, escape ...) in every string, so host values
-  are always single-line.
+- Patterns are compiled with `re.ASCII`, so `\d`, `\w` and `\s` are ASCII-only. Prefer
+  explicit classes; `[^\s]` would be looser than ECMA for non-ASCII spaces.
+- prov rejects control characters (C0, DEL, C1, U+2028/U+2029) in every string, so host
+  values are always single-line.
 - Numbers follow JSON: `1.0` is a valid `integer` and is normalised to `1`; `true` never
   equals `1`.
 - Use `default` for optional values so `render` can index them directly.

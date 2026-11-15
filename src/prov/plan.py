@@ -22,11 +22,14 @@ def plan_lines(plugin: Any, host: Dict[str, Any], rendered_dir: Path) -> List[st
         f"cd {shlex.quote(str(rendered_dir))}",
     ]
     try:
-        lines.extend(str(line) for line in plugin.plan(host))
+        steps = plugin.plan(host)
     except ConfigError:
         raise
     except Exception as exc:
         raise ConfigError(f"distro plugin {plugin.NAME!r} failed in plan: {type(exc).__name__}: {exc}") from exc
+    if not (isinstance(steps, list) and all(isinstance(line, str) for line in steps)):
+        raise ConfigError(f"distro plugin {plugin.NAME!r} failed in plan: returned {type(steps).__name__}, expected a list of str")
+    lines.extend(steps)
     for n, line in enumerate(lines):
         if "\n" in line or "\r" in line:
             raise ConfigError(f"plan line {n} contains a line break; refusing to print it: {line!r}")

@@ -219,3 +219,9 @@ def test_unknown_keys_are_echoed_with_repr():
     raw = _mutate(lambda r: r.update({"evil\u202ekey": 1}))
     errors = schema_errors(raw, published())
     assert errors == ["<root>: unknown key 'evil\\u202ekey'"]  # bidi control escaped, not echoed raw
+
+
+@pytest.mark.parametrize("char", ["\x85", "\x9b", " ", " ", "\x7f"])
+def test_c1_controls_and_unicode_line_separators_are_rejected(char):
+    host, findings = check_host(_mutate(lambda r: r["users"][0].update(gecos=f"a{char}b")), discover())
+    assert host is None and any("control characters" in f.message for f in findings)
