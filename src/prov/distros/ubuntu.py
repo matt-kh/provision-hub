@@ -158,7 +158,7 @@ def storage_config(host: Dict[str, Any]) -> List[Dict[str, Any]]:
             actions += _boot_partitions(i, firmware, mount_esp=(i == 0))
             actions.append(_partition(i, 2, "raid", -1))
             members.append(f"disk{i}-raid")
-        level = host["ubuntu"]["storage"].get("raid_level", 1)
+        level = int(host["ubuntu"]["storage"].get("raid_level", 1))
         actions.append({"type": "raid", "id": "md0", "name": "md0", "raidlevel": level, "devices": members, "spare_devices": [], "preserve": False})
         actions += _fs("md0", "ext4", "/")
 
@@ -175,12 +175,13 @@ def storage_config(host: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "vdevs": ["disk0-zfs"],
                 "mountpoint": "/",
                 "pool_properties": {"ashift": 12},
-                "fs_properties": {"acltype": "posixacl", "relatime": "on", "xattr": "sa"},
+                "fs_properties": {"acltype": "posixacl", "canmount": "off", "relatime": "on", "xattr": "sa"},
             }
         )
-        actions.append(
-            {"type": "zfs", "id": "zfs-root", "pool": "zpool-rpool", "volume": "/ROOT/ubuntu", "properties": {"canmount": "noauto", "mountpoint": "/"}}
-        )
+        # Container dataset first, then the root filesystem (curtin "ZFS Root" example and
+        # subiquity's guided ZFS layout: ROOT canmount=off mountpoint=none, ROOT/<name> at /).
+        actions.append({"type": "zfs", "id": "zfs-root-container", "pool": "zpool-rpool", "volume": "ROOT", "properties": {"canmount": "off", "mountpoint": "none"}})
+        actions.append({"type": "zfs", "id": "zfs-root", "pool": "zpool-rpool", "volume": "ROOT/ubuntu", "properties": {"mountpoint": "/"}})
         actions += _fs("disk0-boot", "ext4", "/boot")
     else:  # pragma: no cover - the schema enum prevents it
         raise ValueError(f"unknown layout {layout!r}")
@@ -292,14 +293,21 @@ def _check_storage(config: Any) -> List[str]:
         if not isinstance(action, dict) or "type" not in action or "id" not in action:
             problems.append(f"autoinstall.storage.config[{n}] needs 'type' and 'id'")
             continue
+        if not isinstance(action["id"], str) or not isinstance(action["type"], str):
+            problems.append(f"autoinstall.storage.config[{n}]: 'type' and 'id' must be strings")
+            continue
         if action["id"] in ids:
             problems.append(f"autoinstall.storage.config[{n}]: duplicate id {action['id']!r}")
         for key in _REFS.get(action["type"], ()):
-            if key in action and action[key] not in ids:
+            if key in action and (not isinstance(action[key], str) or action[key] not in ids):
                 problems.append(f"autoinstall.storage.config[{n}].{key}: {action[key]!r} is not defined earlier")
         for key in _LIST_REFS.get(action["type"], ()):
-            for ref in action.get(key, []):
-                if ref not in ids:
+            refs = action.get(key, [])
+            if not isinstance(refs, list):
+                problems.append(f"autoinstall.storage.config[{n}].{key} must be a list")
+                continue
+            for ref in refs:
+                if not isinstance(ref, str) or ref not in ids:
                     problems.append(f"autoinstall.storage.config[{n}].{key}: {ref!r} is not defined earlier")
         ids.add(action["id"])
     roots = [a for a in config if isinstance(a, dict) and (a.get("type") == "mount" and a.get("path") == "/" or a.get("type") == "zpool" and a.get("mountpoint") == "/")]
@@ -314,6 +322,9 @@ def _load_yaml(path: Path, findings: List[Finding]) -> Any:
         return None
     try:
         return yaml.safe_load(path.read_text(encoding="utf-8"))
+    except UnicodeDecodeError as exc:
+        findings.append(Finding(ERROR, f"not valid UTF-8: {exc}", path.name))
+        return None
     except yaml.YAMLError as exc:
         findings.append(Finding(ERROR, f"invalid YAML: {exc}", path.name))
         return None
@@ -324,13 +335,18 @@ def _external(path: Path) -> List[Finding]:
     tool = shutil.which("cloud-init")
     if tool is None:
         return [Finding(SKIPPED, "cloud-init not installed (cloud-init schema)")]
-    proc = subprocess.run(
-        [tool, "schema", "--config-file", str(path)],
-        capture_output=True,
-        text=True,
-        timeout=120,
-        check=False,
-    )
+    try:
+        proc = subprocess.run(
+            [tool, "schema", "--config-file", str(path)],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return [Finding(ERROR, "cloud-init schema timed out after 120 s; output not checked", path.name)]
+    except OSError as exc:
+        return [Finding(ERROR, f"cloud-init schema could not run: {exc.strerror or exc}", path.name)]
     if proc.returncode != 0:
         detail = (proc.stdout + proc.stderr).strip().splitlines()
         return [Finding(ERROR, "cloud-init schema: " + " | ".join(detail[-5:]), path.name)]
@@ -344,7 +360,7 @@ def validate(rendered_dir: Path) -> List[Finding]:
     ud_path = rendered_dir / "user-data"
     data = _load_yaml(ud_path, findings)
     if data is not None:
-        first = ud_path.read_text(encoding="utf-8").splitlines()[:1]
+        first = ud_path.read_text(encoding="utf-8").splitlines()[:1]  # decodable: parsed above
         if first != ["#cloud-config"]:
             findings.append(Finding(ERROR, "first line must be '#cloud-config'", "user-data"))
         ai = data.get("autoinstall") if isinstance(data, dict) else None
@@ -366,7 +382,10 @@ def validate(rendered_dir: Path) -> List[Finding]:
                 findings += [Finding(ERROR, p, "user-data") for p in _check_storage(storage["config"])]
             elif "layout" not in storage:
                 findings.append(Finding(ERROR, "autoinstall.storage needs 'config' or 'layout'", "user-data"))
-            if ai.get("ssh", {}).get("allow-pw", False):
+            ssh = ai.get("ssh", {})
+            if not isinstance(ssh, dict):
+                findings.append(Finding(ERROR, "autoinstall.ssh must be a mapping", "user-data"))
+            elif ssh.get("allow-pw", False):
                 findings.append(Finding(WARNING, "ssh password authentication is enabled", "user-data"))
 
     meta = _load_yaml(rendered_dir / "meta-data", findings)
@@ -378,7 +397,7 @@ def validate(rendered_dir: Path) -> List[Finding]:
     cmdline = rendered_dir / "kernel-cmdline"
     if not cmdline.is_file():
         findings.append(Finding(ERROR, "missing; run prov render", "kernel-cmdline"))
-    elif not set(KERNEL_CMDLINE.split()) <= set(cmdline.read_text(encoding="utf-8").split()):
+    elif not set(KERNEL_CMDLINE.split()) <= set(cmdline.read_bytes().decode("utf-8", errors="replace").split()):
         findings.append(Finding(ERROR, f"must contain {KERNEL_CMDLINE!r}", "kernel-cmdline"))
 
     if not any(f.level == ERROR for f in findings):
@@ -390,15 +409,20 @@ def validate(rendered_dir: Path) -> List[Finding]:
 
 
 def plan(host: Dict[str, Any]) -> List[str]:
-    """Seed-ISO and boot steps for a human, relative to the rendered directory."""
+    """Seed-ISO and boot steps for a human, relative to the rendered directory.
+
+    Every host value is shell-quoted, in comments too, so a copied line never splits.
+    """
+    q = shlex.quote
     name = host["hostname"]
     release = host["ubuntu"]["release"]
     arch = host["arch"]
-    iso = f"ubuntu-{release}-live-server-{arch}.iso"
+    iso = q(f"ubuntu-{release}-live-server-{arch}.iso")
     disks = host["storage"]["disks"]
+    logins = [q(u["name"]) for u in host["users"] if u["ssh_authorized_keys"]]
     boot = "--boot uefi " if host["firmware"] == "uefi" else ""
     disk_args = " ".join("--disk size=32" for _ in disks)
-    os_variant = "ubuntu" + release
+    os_variant = q("ubuntu" + release)
     return [
         "",
         "# 1. Build the NoCloud seed ISO (volume label must be 'cidata'), either with cloud-image-utils:",
@@ -406,24 +430,24 @@ def plan(host: Dict[str, Any]) -> List[str]:
         "#    or with xorriso:",
         "xorriso -as genisoimage -output seed.iso -volid cidata -joliet -rock user-data meta-data",
         "",
-        f"# 2. Download the Ubuntu {release} live-server ISO for {arch} (latest point release) from",
-        f"#    https://releases.ubuntu.com/{release}/ (arm64: https://cdimage.ubuntu.com/releases/{release}/release/)",
+        f"# 2. Download the Ubuntu {q(release)} live-server ISO for {q(arch)} (latest point release) from",
+        f"#    https://releases.ubuntu.com/{q(release)}/ (arm64: https://cdimage.ubuntu.com/releases/{q(release)}/release/)",
         f"#    and verify it against SHA256SUMS; below it is called {iso}.",
         "",
-        f"# 3. WARNING: the install wipes {', '.join(disks)} on the target machine.",
+        f"# 3. WARNING: the install wipes {' '.join(q(d) for d in disks)} on the target machine.",
         "#    Boot the target from the live-server ISO with seed.iso attached as a second drive",
         "#    (VM: second CD-ROM; bare metal: seed.iso written to a USB stick).",
         "#    Option A - libvirt VM (adjust memory, disk sizes and network):",
-        f"virt-install --name {shlex.quote(name)} --memory 4096 --vcpus 2 {boot}--os-variant {os_variant} "
+        f"virt-install --name {q(name)} --memory 4096 --vcpus 2 {boot}--os-variant {os_variant} "
         f"{disk_args} --disk path=seed.iso,device=cdrom "
         f"--location {iso},kernel=casper/vmlinuz,initrd=casper/initrd "
-        f"--extra-args {shlex.quote(KERNEL_CMDLINE)} --graphics none --network network=default",
+        f"--extra-args {q(KERNEL_CMDLINE + ' console=ttyS0')} --graphics none --network network=default",
         "#    Option B - any other machine: at the GRUB menu press 'e', append to the 'linux' line:",
         f"#        {KERNEL_CMDLINE}",
         "#    then boot with Ctrl-X / F10. Without these arguments the installer asks for confirmation.",
         "",
         f"# 4. The installer partitions, installs and reboots; remove both ISOs, then log in with ssh",
-        f"#    as one of: {', '.join(u['name'] for u in host['users'] if u['ssh_authorized_keys'])}.",
+        f"#    as one of: {' '.join(logins)}.",
     ]
 
 

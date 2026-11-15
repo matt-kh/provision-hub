@@ -87,3 +87,51 @@ def test_render_paths_and_newlines(rendered):
     for path in rendered.iterdir():
         text = path.read_text()
         assert text.endswith("\n") and not any(line != line.rstrip() for line in text.splitlines())
+
+
+@pytest.mark.parametrize(
+    "exc,needle",
+    [
+        (subprocess.TimeoutExpired(["cloud-init"], 120), "timed out"),
+        (PermissionError(13, "Permission denied"), "could not run: Permission denied"),
+    ],
+)
+def test_external_validator_failures_are_findings(rendered, monkeypatch, exc, needle):
+    def fake_run(argv, **kwargs):
+        raise exc
+
+    monkeypatch.setattr(ubuntu.shutil, "which", lambda name: "/usr/bin/cloud-init")
+    monkeypatch.setattr(ubuntu.subprocess, "run", fake_run)
+    assert any(needle in m for m in messages(ubuntu.validate(rendered)))
+
+
+@pytest.mark.parametrize(
+    "user_data",
+    [
+        "#cloud-config\n- a list\n",
+        "#cloud-config\nautoinstall: [1, 2]\n",
+        "#cloud-config\nautoinstall:\n  version: 1\n  user-data: [x]\n  ssh: [x]\n  network: [x]\n  storage: [x]\n",
+        "#cloud-config\nautoinstall:\n  version: 1\n  user-data: {users: [x]}\n  storage:\n    config:\n"
+        "    - {type: disk, id: [x]}\n    - {type: partition, id: p, device: [x]}\n"
+        "    - {type: raid, id: r, devices: notalist}\n    - {type: raid, id: r2, devices: [[x]]}\n    - 5\n",
+    ],
+)
+def test_hand_edited_shapes_never_crash(rendered, user_data):
+    (rendered / "user-data").write_text(user_data)
+    assert messages(ubuntu.validate(rendered))  # findings, no exception
+
+
+def test_zfs_layout_matches_curtin_and_subiquity():
+    raw = tomllib.loads(ubuntu.starter("demo"))
+    raw["ubuntu"]["storage"]["layout"] = "zfs"
+    host, findings = check_host(raw, discover())
+    assert host is not None, findings
+    config = ubuntu.storage_config(host)
+    pool = next(a for a in config if a["type"] == "zpool")
+    datasets = [a for a in config if a["type"] == "zfs"]
+    assert pool["mountpoint"] == "/" and pool["fs_properties"]["canmount"] == "off"
+    assert [(d["volume"], d["properties"]) for d in datasets] == [
+        ("ROOT", {"canmount": "off", "mountpoint": "none"}),
+        ("ROOT/ubuntu", {"mountpoint": "/"}),
+    ]
+    assert [a["path"] for a in config if a["type"] == "mount"] == ["/boot", "/boot/efi"]

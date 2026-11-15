@@ -63,6 +63,7 @@ autoinstall:
       type: partition
     - fs_properties:
         acltype: posixacl
+        canmount: 'off'
         relatime: 'on'
         xattr: sa
       id: zpool-rpool
@@ -73,13 +74,19 @@ autoinstall:
       type: zpool
       vdevs:
       - disk0-zfs
+    - id: zfs-root-container
+      pool: zpool-rpool
+      properties:
+        canmount: 'off'
+        mountpoint: none
+      type: zfs
+      volume: ROOT
     - id: zfs-root
       pool: zpool-rpool
       properties:
-        canmount: noauto
         mountpoint: /
       type: zfs
-      volume: /ROOT/ubuntu
+      volume: ROOT/ubuntu
     - fstype: ext4
       id: disk0-boot-fs
       preserve: false
