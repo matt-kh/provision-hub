@@ -8,6 +8,7 @@ library. The test suite cross-checks it against the ``jsonschema`` reference val
 from __future__ import annotations
 
 import copy
+import functools
 import ipaddress
 import re
 from dataclasses import dataclass
@@ -62,7 +63,6 @@ _TYPES = {
 }
 
 _CONTROL = re.compile("[\x00-\x1f\x7f]")
-_DOLLAR = re.compile(r"(?<!\\)\$")
 
 
 def json_equal(a: Any, b: Any) -> bool:
@@ -78,13 +78,87 @@ def json_equal(a: Any, b: Any) -> bool:
     return type(a) is type(b) and a == b
 
 
-def ecma_search(pattern: str, text: str) -> bool:
-    """``re.search`` with ECMA-262 ``$`` semantics: ``$`` matches only at the very end.
+def ecma_to_python(pattern: str) -> str:
+    """Translate an ECMA-262 pattern's ``$`` to Python's end-of-string ``\\Z``.
 
     Python's ``$`` also matches before a trailing newline, so ``^[a-z]+$`` would accept
-    ``"demo\\n"``; translating unescaped ``$`` to ``\\Z`` closes that gap.
+    ``"demo\\n"``. Only an unescaped ``$`` outside a character class is an anchor: a ``$``
+    inside ``[...]`` or after an odd number of backslashes is a literal and stays as is.
     """
-    return re.search(_DOLLAR.sub(r"\\Z", pattern), text) is not None
+    out: List[str] = []
+    in_class = False
+    i = 0
+    while i < len(pattern):
+        c = pattern[i]
+        if c == "\\":
+            out.append(pattern[i : i + 2])  # escape pair: copied verbatim, never an anchor
+            i += 2
+            continue
+        if in_class:
+            if c == "]":
+                in_class = False
+        elif c == "[":
+            in_class = True
+            if pattern[i + 1 : i + 2] == "^":
+                out.append("[^")
+                i += 2
+                if pattern[i : i + 1] == "]":  # leading ] is a literal in a class
+                    out.append("]")
+                    i += 1
+                continue
+            if pattern[i + 1 : i + 2] == "]":
+                out.append("[]")
+                i += 2
+                continue
+        elif c == "$":
+            out.append("\\Z")
+            i += 1
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+@functools.lru_cache(maxsize=None)
+def compile_pattern(pattern: str) -> "re.Pattern[str]":
+    """Compile a JSON Schema ``pattern`` with ECMA ``$`` semantics (cached)."""
+    return re.compile(ecma_to_python(pattern))
+
+
+def ecma_search(pattern: str, text: str) -> bool:
+    """``re.search`` with ECMA-262 ``$`` semantics."""
+    return compile_pattern(pattern).search(text) is not None
+
+
+def check_schema_fragment(schema: Any, where: str = "<schema>") -> None:
+    """Raise ValueError if a schema uses unsupported keywords or an invalid pattern.
+
+    Run at plugin load so a broken distro ``SCHEMA`` is a clear error, not a crash later.
+    """
+    if not isinstance(schema, dict):
+        raise ValueError(f"{where}: a schema must be an object, got {type(schema).__name__}")
+    unknown = set(schema) - SUPPORTED_KEYWORDS
+    if unknown:
+        raise ValueError(f"{where}: unsupported keyword(s) {sorted(unknown)}")
+    if "pattern" in schema:
+        if not isinstance(schema["pattern"], str):
+            raise ValueError(f"{where}.pattern: must be a string")
+        try:
+            compile_pattern(schema["pattern"])
+        except re.error as exc:
+            raise ValueError(f"{where}.pattern: invalid regular expression {schema['pattern']!r}: {exc}") from None
+    if "$ref" in schema and not str(schema["$ref"]).startswith("#/$defs/"):
+        raise ValueError(f"{where}.$ref: only '#/$defs/...' references are supported")
+    for key in ("properties", "$defs"):
+        for name, sub in schema.get(key, {}).items():
+            check_schema_fragment(sub, f"{where}.{key}.{name}")
+    for key in ("items", "if", "then"):
+        if key in schema:
+            check_schema_fragment(schema[key], f"{where}.{key}")
+    if isinstance(schema.get("additionalProperties"), dict):
+        check_schema_fragment(schema["additionalProperties"], f"{where}.additionalProperties")
+    for n, sub in enumerate(schema.get("allOf", [])):
+        check_schema_fragment(sub, f"{where}.allOf[{n}]")
 
 
 def _join(path: str, key: Any) -> str:
@@ -161,11 +235,11 @@ def schema_errors(instance: Any, schema: Mapping[str, Any], root: Mapping[str, A
         extra = schema.get("additionalProperties", True)
         for key in sorted(instance):
             if _CONTROL.search(key):
-                errors.append(f"{_join(path, key)!r}: control characters in key")
+                errors.append(f"{where}: control characters in key {key!r}")
             elif key in props:
                 errors += schema_errors(instance[key], props[key], root, _join(path, key))
             elif extra is False:
-                errors.append(f"{_join(path, key)}: unknown key")
+                errors.append(f"{where}: unknown key {key!r}")
             elif isinstance(extra, dict):
                 errors += schema_errors(instance[key], extra, root, _join(path, key))
 
@@ -278,7 +352,12 @@ def check_host(raw: Mapping[str, Any], distros: Mapping[str, Any]) -> Tuple[Dict
     findings = _semantic(host)
     plugin = distros[host["distro"]]
     if hasattr(plugin, "check"):
-        findings += list(plugin.check(host))
+        try:
+            findings += list(plugin.check(host))
+        except ConfigError:
+            raise
+        except Exception as exc:
+            raise ConfigError(f"distro plugin {plugin.NAME!r} failed in check: {type(exc).__name__}: {exc}") from exc
     if has_errors(findings):
         return None, findings
     return host, findings

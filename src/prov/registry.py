@@ -29,6 +29,12 @@ def check_contract(plugin: Distro, origin: str) -> None:
             raise ConfigError(f"distro plugin {origin}: {fn} is not callable")
     if not isinstance(plugin.NAME, str) or not isinstance(plugin.SCHEMA, dict):
         raise ConfigError(f"distro plugin {origin}: NAME must be a str and SCHEMA a dict")
+    from .validate import check_schema_fragment  # local: validate imports nothing from here
+
+    try:
+        check_schema_fragment(plugin.SCHEMA, f"[{plugin.NAME}]")
+    except ValueError as exc:
+        raise ConfigError(f"distro plugin {origin}: invalid SCHEMA: {exc}") from None
 
 
 def discover() -> Dict[str, Distro]:

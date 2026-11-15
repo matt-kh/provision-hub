@@ -194,3 +194,28 @@ def test_control_characters_rejected_everywhere():
         assert host is None and any("control characters" in f.message for f in findings)
     host, findings = check_host(_mutate(lambda r: r["network"].update({"dns": {"search": ["example.com\n"]}})), discover())
     assert host is None
+
+
+@pytest.mark.parametrize(
+    "pattern,text,ok",
+    [
+        ("^[$]$", "$", True),  # $ inside a class is a literal (was: re.error bad escape \\Z)
+        ("^[$]$", "$\n", False),
+        ("^a\\$$", "a$", True),  # escaped $ is a literal, the final $ an anchor
+        ("^\\\\$", "\\", True),  # escaped backslash, then an anchor (review S-1)
+        ("^\\\\$", "\\\n", False),
+        ("^[]a]$", "]", True),
+        ("^[^]x]$", "y", True),
+        ("^[a-z]+$", "demo\n", False),
+    ],
+)
+def test_ecma_dollar_semantics(pattern, text, ok):
+    from prov.validate import ecma_search
+
+    assert ecma_search(pattern, text) is ok
+
+
+def test_unknown_keys_are_echoed_with_repr():
+    raw = _mutate(lambda r: r.update({"evil\u202ekey": 1}))
+    errors = schema_errors(raw, published())
+    assert errors == ["<root>: unknown key 'evil\\u202ekey'"]  # bidi control escaped, not echoed raw
