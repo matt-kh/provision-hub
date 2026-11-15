@@ -1,0 +1,38 @@
+# Synthetic example: ZFS root on one disk, UEFI, NIC matched by a locally administered MAC.
+# Documentation addresses only (RFC 5737 / RFC 3849); example.org is reserved (RFC 2606).
+schema_version = 1
+hostname = "demo-zfs"
+domain = "example.org"
+distro = "ubuntu"
+timezone = "Europe/Berlin"
+locale = "de_DE.UTF-8"
+keyboard = "de"
+
+[[users]]
+name = "ops"
+groups = ["sudo"]
+sudo = true
+ssh_authorized_keys = [
+  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE ops@example.org",
+]
+
+[network.dns]
+nameservers = ["198.51.100.53"]
+
+[[network.interfaces]]
+name = "lan0"
+macaddress = "02:00:00:00:00:01"
+mtu = 9000
+addresses = ["198.51.100.30/24"]
+gateway4 = "198.51.100.1"
+
+[storage]
+disks = ["/dev/nvme0n1"]
+
+[ubuntu]
+release = "24.04"
+packages = ["zfsutils-linux"]
+updates = "all"
+
+[ubuntu.storage]
+layout = "zfs"

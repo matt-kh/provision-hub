@@ -1,0 +1,145 @@
+#cloud-config
+autoinstall:
+  keyboard:
+    layout: us
+  locale: en_US.UTF-8
+  network:
+    ethernets:
+      eth0:
+        addresses:
+        - 192.0.2.20/24
+        - 2001:db8:0:1::20/64
+        dhcp4: false
+        dhcp6: false
+        nameservers:
+          addresses:
+          - 192.0.2.53
+          - 2001:db8::53
+          search:
+          - example.com
+        routes:
+        - to: default
+          via: 192.0.2.1
+        - to: default
+          via: 2001:db8:0:1::1
+      eth1:
+        dhcp4: true
+        dhcp6: false
+        nameservers:
+          addresses:
+          - 192.0.2.53
+          - 2001:db8::53
+          search:
+          - example.com
+    version: 2
+  packages:
+  - qemu-guest-agent
+  - lvm2
+  shutdown: reboot
+  ssh:
+    allow-pw: false
+    install-server: true
+  storage:
+    config:
+    - grub_device: false
+      id: disk0
+      path: /dev/vda
+      preserve: false
+      ptable: gpt
+      type: disk
+      wipe: superblock-recursive
+    - device: disk0
+      flag: boot
+      grub_device: true
+      id: disk0-esp
+      number: 1
+      preserve: false
+      size: 1073741824
+      type: partition
+    - fstype: fat32
+      id: disk0-esp-fs
+      preserve: false
+      type: format
+      volume: disk0-esp
+    - device: disk0
+      id: disk0-boot
+      number: 2
+      preserve: false
+      size: 2147483648
+      type: partition
+    - device: disk0
+      id: disk0-pv
+      number: 3
+      preserve: false
+      size: -1
+      type: partition
+    - grub_device: false
+      id: disk1
+      path: /dev/vdb
+      preserve: false
+      ptable: gpt
+      type: disk
+      wipe: superblock-recursive
+    - device: disk1
+      id: disk1-pv
+      number: 1
+      preserve: false
+      size: -1
+      type: partition
+    - devices:
+      - disk0-pv
+      - disk1-pv
+      id: vg0
+      name: vg0
+      preserve: false
+      type: lvm_volgroup
+    - id: lv-root
+      name: root
+      preserve: false
+      type: lvm_partition
+      volgroup: vg0
+    - fstype: ext4
+      id: disk0-boot-fs
+      preserve: false
+      type: format
+      volume: disk0-boot
+    - fstype: ext4
+      id: lv-root-fs
+      preserve: false
+      type: format
+      volume: lv-root
+    - device: lv-root-fs
+      id: lv-root-mount
+      path: /
+      type: mount
+    - device: disk0-boot-fs
+      id: disk0-boot-mount
+      path: /boot
+      type: mount
+    - device: disk0-esp-fs
+      id: disk0-esp-mount
+      path: /boot/efi
+      type: mount
+  updates: security
+  user-data:
+    disable_root: true
+    fqdn: demo-lvm.example.com
+    hostname: demo-lvm
+    timezone: Etc/UTC
+    users:
+    - gecos: Operator
+      groups:
+      - adm
+      - sudo
+      lock_passwd: true
+      name: ops
+      shell: /bin/bash
+      ssh_authorized_keys:
+      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE ops@example.com
+      sudo: ALL=(ALL) NOPASSWD:ALL
+    - lock_passwd: true
+      name: backup
+      shell: /bin/sh
+      ssh_authorized_keys:
+      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEKEYFORBACKUPEXAMPLEKEYFORBACKUP00 backup@example.org
+  version: 1

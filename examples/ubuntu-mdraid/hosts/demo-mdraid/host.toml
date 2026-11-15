@@ -1,0 +1,35 @@
+# Synthetic example: mdraid level 1 over two disks, legacy BIOS boot, Ubuntu 22.04.
+# Documentation addresses only (RFC 5737 / RFC 3849); example.com is reserved (RFC 2606).
+schema_version = 1
+hostname = "demo-mdraid"
+domain = "example.com"
+distro = "ubuntu"
+firmware = "bios"
+
+[[users]]
+name = "ops"
+groups = ["sudo"]
+sudo = true
+ssh_authorized_keys = [
+  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE ops@example.com",
+]
+
+[network.dns]
+nameservers = ["203.0.113.53"]
+search = ["example.com"]
+
+[[network.interfaces]]
+name = "eno1"
+addresses = ["203.0.113.40/24", "2001:db8:40::40/64"]
+gateway4 = "203.0.113.1"
+gateway6 = "2001:db8:40::1"
+
+[storage]
+disks = ["/dev/sda", "/dev/sdb"]
+
+[ubuntu]
+release = "22.04"
+
+[ubuntu.storage]
+layout = "mdraid"
+raid_level = 1
