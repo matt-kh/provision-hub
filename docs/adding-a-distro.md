@@ -31,7 +31,9 @@ one of `prov.validate.ERROR` (`"error"`), `WARNING` (`"warning"`) or `SKIPPED` (
 make `prov validate` exit 1. Printed form: `error: storage.disks: needs one disk`.
 
 The registry (`prov.registry.discover`) rejects a plugin that lacks a required member, whose
-`NAME` differs from its entry-point name, or whose name is already registered.
+`NAME` differs from its entry-point name, whose name is already registered, or whose `SCHEMA`
+uses an unsupported keyword or an invalid `pattern`. An exception escaping a plugin method is
+reported as `distro plugin '<NAME>' failed in <method>: ...` with exit code 2.
 
 ### What `host` contains
 
@@ -152,7 +154,10 @@ Requirements:
   byte-for-byte deterministic (use `prov.util.dump_yaml` or sorted JSON), end with a newline
   and carry no trailing whitespace. Never embed secrets that are not in `host`.
 - **validate** parses what is on disk (it may have been edited by hand): required files,
-  syntax, required keys, cross-references. It may run a local, read-only validator found via
+  syntax, required keys, cross-references. Read files with `prov.util.read_regular_text`
+  (refuses symlinks and special files, never follows links); core already reports any
+  symlink or special file in `rendered/` and then skips your `validate`. Guard every
+  access with `isinstance`: hand-edited YAML can have any shape. It may run a local, read-only validator found via
   `shutil.which`; when missing report `Finding(SKIPPED, "<tool> not installed (<what>)")`.
   No network, no writes. Core separately reports staleness against a fresh render.
 - **plan** only returns text; it must not run, write or download anything. Wrap every host

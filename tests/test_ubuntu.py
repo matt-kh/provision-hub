@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import subprocess
 import types
 
@@ -135,3 +136,24 @@ def test_zfs_layout_matches_curtin_and_subiquity():
         ("ROOT/ubuntu", {"mountpoint": "/"}),
     ]
     assert [a["path"] for a in config if a["type"] == "mount"] == ["/boot", "/boot/efi"]
+
+
+def test_version_true_is_not_version_1(rendered):
+    path = rendered / "user-data"
+    path.write_text(path.read_text().replace("  version: 1\n", "  version: true\n"))
+    assert "autoinstall.version must be 1" in messages(ubuntu.validate(rendered))
+
+
+@pytest.mark.parametrize(
+    "schema,needle",
+    [
+        ({"type": "object", "properties": {"x": {"type": "string", "pattern": "^[a-"}}}, "invalid regular expression"),
+        ({"type": "object", "format": "uri"}, "unsupported keyword"),
+        ({"type": "object", "properties": {"x": {"$ref": "https://example.com/s.json"}}}, "$ref"),
+        ({"type": "object", "properties": {"x": "string"}}, "must be an object"),
+    ],
+)
+def test_contract_check_rejects_bad_schema(schema, needle):
+    fake = types.SimpleNamespace(NAME="talos", SCHEMA=schema, render=lambda h: {}, validate=lambda d: [], plan=lambda h: [])
+    with pytest.raises(ConfigError, match=re.escape(needle)):
+        check_contract(fake, "talos = fake")

@@ -15,7 +15,7 @@ from typing import Any, Dict, List
 
 import yaml
 
-from ..util import dump_yaml
+from ..util import NotRegularFileError, dump_yaml, read_regular_text
 from ..validate import ERROR, SKIPPED, WARNING, Finding
 
 NAME = "ubuntu"
@@ -316,18 +316,31 @@ def _check_storage(config: Any) -> List[str]:
     return problems
 
 
-def _load_yaml(path: Path, findings: List[Finding]) -> Any:
-    if not path.is_file():
-        findings.append(Finding(ERROR, "missing; run prov render", path.name))
-        return None
+def _read(path: Path, findings: List[Finding]) -> str | None:
+    """Text of a regular file, or None with a finding (missing, symlink/special, not UTF-8)."""
     try:
-        return yaml.safe_load(path.read_text(encoding="utf-8"))
+        return read_regular_text(path)
+    except FileNotFoundError:
+        findings.append(Finding(ERROR, "missing; run prov render", path.name))
+    except NotRegularFileError:
+        findings.append(Finding(ERROR, "not a regular file (symlink or special file); not read", path.name))
     except UnicodeDecodeError as exc:
         findings.append(Finding(ERROR, f"not valid UTF-8: {exc}", path.name))
-        return None
+    except OSError as exc:
+        findings.append(Finding(ERROR, f"cannot read: {exc.strerror or exc}", path.name))
+    return None
+
+
+def _load_yaml(path: Path, findings: List[Finding]) -> tuple:
+    """(text, parsed YAML) of a regular file; (None, None) with a finding otherwise."""
+    text = _read(path, findings)
+    if text is None:
+        return None, None
+    try:
+        return text, yaml.safe_load(text)
     except yaml.YAMLError as exc:
         findings.append(Finding(ERROR, f"invalid YAML: {exc}", path.name))
-        return None
+        return None, None
 
 
 def _external(path: Path) -> List[Finding]:
@@ -358,16 +371,16 @@ def validate(rendered_dir: Path) -> List[Finding]:
     findings: List[Finding] = []
     rendered_dir = Path(rendered_dir)
     ud_path = rendered_dir / "user-data"
-    data = _load_yaml(ud_path, findings)
-    if data is not None:
-        first = ud_path.read_text(encoding="utf-8").splitlines()[:1]  # decodable: parsed above
-        if first != ["#cloud-config"]:
+    text, data = _load_yaml(ud_path, findings)
+    if text is not None:
+        if text.splitlines()[:1] != ["#cloud-config"]:
             findings.append(Finding(ERROR, "first line must be '#cloud-config'", "user-data"))
         ai = data.get("autoinstall") if isinstance(data, dict) else None
         if not isinstance(ai, dict):
             findings.append(Finding(ERROR, "top-level 'autoinstall' mapping is missing", "user-data"))
         else:
-            if ai.get("version") != 1:
+            version = ai.get("version")
+            if type(version) is not int or version != 1:  # true == 1 in Python; not here
                 findings.append(Finding(ERROR, "autoinstall.version must be 1", "user-data"))
             if "identity" not in ai and "user-data" not in ai:
                 findings.append(Finding(ERROR, "autoinstall needs 'identity' or 'user-data'", "user-data"))
@@ -388,16 +401,14 @@ def validate(rendered_dir: Path) -> List[Finding]:
             elif ssh.get("allow-pw", False):
                 findings.append(Finding(WARNING, "ssh password authentication is enabled", "user-data"))
 
-    meta = _load_yaml(rendered_dir / "meta-data", findings)
+    _, meta = _load_yaml(rendered_dir / "meta-data", findings)
     if meta is not None:
         for key in ("instance-id", "local-hostname"):
             if not (isinstance(meta, dict) and meta.get(key)):
                 findings.append(Finding(ERROR, f"{key} is missing", "meta-data"))
 
-    cmdline = rendered_dir / "kernel-cmdline"
-    if not cmdline.is_file():
-        findings.append(Finding(ERROR, "missing; run prov render", "kernel-cmdline"))
-    elif not set(KERNEL_CMDLINE.split()) <= set(cmdline.read_bytes().decode("utf-8", errors="replace").split()):
+    cmdline = _read(rendered_dir / "kernel-cmdline", findings)
+    if cmdline is not None and not set(KERNEL_CMDLINE.split()) <= set(cmdline.split()):
         findings.append(Finding(ERROR, f"must contain {KERNEL_CMDLINE!r}", "kernel-cmdline"))
 
     if not any(f.level == ERROR for f in findings):
