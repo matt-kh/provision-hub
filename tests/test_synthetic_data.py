@@ -15,18 +15,26 @@ DOC_NETS = [
     for n in ("192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24", "2001:db8::/32")
 ]
 RESERVED_DOMAINS = ("example.com", "example.org", "example.net")
-SCANNED = [EXAMPLES, REPO / "tests"]
+# Public project references allowed in docs and the schema; never host names.
+PUBLIC_REFERENCES = (
+    "json-schema.org",
+    "raw.githubusercontent.com",
+    "github.com",
+    "ghcr.io",
+    "openssh.com",  # part of the sk-* key type names
+)
+SCANNED = [EXAMPLES, REPO / "tests", REPO / "docs", REPO / "schema", REPO / "README.md", REPO / "CLAUDE.md"]
 SELF = Path(__file__).resolve()
 
 IPV4 = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?![\w.])")
 IPV6 = re.compile(r"(?<![\w:])[0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f]{0,4}){2,7}(?![\w:])")
 DOMAIN = re.compile(r"\b(?:[a-z0-9-]+\.)+(?:com|org|net|io|dev|my|local|lan|internal|cloud)\b", re.I)
-SSH_KEY = re.compile(r"(?:ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp\d+) [A-Za-z0-9+/=]+")
+SSH_KEY = re.compile(r"(?:ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp\d+|sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-nistp256@openssh\.com) [A-Za-z0-9+/=]+")
 
 
 def _files():
     for base in SCANNED:
-        for path in sorted(base.rglob("*")):
+        for path in [base] if base.is_file() else sorted(base.rglob("*")):
             # This file holds deliberate real addresses to prove the detector works.
             if path.is_file() and "__pycache__" not in path.parts and path != SELF:
                 yield path, path.read_text(encoding="utf-8")
@@ -59,7 +67,7 @@ def test_only_documentation_addresses():
 def test_only_reserved_domains():
     offenders = {}
     for path, text in _files():
-        bad = [d for d in DOMAIN.findall(text) if not d.lower().endswith(RESERVED_DOMAINS)]
+        bad = [d for d in DOMAIN.findall(text) if not d.lower().endswith(RESERVED_DOMAINS + PUBLIC_REFERENCES)]
         if bad:
             offenders[str(path.relative_to(REPO))] = bad
     assert not offenders

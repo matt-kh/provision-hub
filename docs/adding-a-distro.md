@@ -75,6 +75,14 @@ and makes the table required when `distro = "<NAME>"`. Rules:
   `additionalProperties`, `items`, `minItems`, `maxItems`, `uniqueItems`, `allOf`, `if`,
   `then`, `$ref` (to `#/$defs/...` of the host schema only), `title`, `description`,
   `default`.
+- `pattern` uses ECMA-262 semantics, as in every JSON Schema validator: `$` matches only at
+  the very end (prov translates it for Python, where `$` also matches before a trailing
+  newline). Anchor every pattern with `^...$` and use explicit character classes instead
+  of `\S` or `.`.
+- prov rejects control characters (newline, tab, escape ...) in every string, so host values
+  are always single-line.
+- Numbers follow JSON: `1.0` is a valid `integer` and is normalised to `1`; `true` never
+  equals `1`.
 - Use `default` for optional values so `render` can index them directly.
 - No secrets: no plain passwords, tokens or private keys. Reference them by path or hash, or
   leave them to the apply step.
@@ -147,7 +155,9 @@ Requirements:
   syntax, required keys, cross-references. It may run a local, read-only validator found via
   `shutil.which`; when missing report `Finding(SKIPPED, "<tool> not installed (<what>)")`.
   No network, no writes. Core separately reports staleness against a fresh render.
-- **plan** only returns text; it must not run, write or download anything. Core prints a
+- **plan** only returns text; it must not run, write or download anything. Wrap every host
+  value in `shlex.quote`, in comments too, so a pasted line never splits into extra
+  commands; core refuses any line containing `\n` or `\r`. Core prints a
   header and `cd <root>/hosts/<host>/rendered` first, so write commands relative to the
   rendered directory. Make them exact and copy-pastable, comment lines with `#`, warn about
   destructive steps (which disks are wiped), and use `<placeholders>` for values prov cannot

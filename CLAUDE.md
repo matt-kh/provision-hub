@@ -31,9 +31,13 @@ stay minimal (pyyaml; tomli on 3.10 only) — justify any new one in the PR.
   commit real hosts, keys or addresses.
 - **Schema compatibility.** Within `schema_version = 1` only additive, optional changes
   (new optional key, new enum value). Removing/renaming a key, tightening a constraint or
-  changing a meaning needs `schema_version = 2`, support for reading v1 or a migration note,
-  and a migration note in the PR. After any schema change regenerate `schema/host.v1.schema.json`
+  changing a meaning needs `schema_version = 2`, support for reading v1, and a migration
+  note in the PR. After any schema change regenerate `schema/host.v1.schema.json`
   (below); a test fails if it drifts from the code.
+- **Static validation only so far.** No layout has been installed in a VM; ZFS is the least
+  proven. Say so when changing layouts, and never claim an artefact "works" without an install.
+- **No writes through symlinks**; plan output shell-quotes every host value, comments
+  included (`tests/test_render_safety.py`, `tests/test_plan.py`).
 - **Deterministic output.** Sorted keys, stable ordering, no timestamps or random ids;
   goldens depend on it.
 - New distros follow [docs/adding-a-distro.md](docs/adding-a-distro.md).

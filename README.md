@@ -69,6 +69,17 @@ uv run prov --root examples/ubuntu-lvm diff demo-lvm
 They use only documentation addresses (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24,
 2001:db8::/32), reserved domains (example.com, example.org) and fake ssh keys.
 
+**Status of the layouts.** Rendered artefacts are validated statically only: prov's own
+checks plus `cloud-init schema` where installed. No layout has been exercised by a real
+install in a VM yet, ZFS least of all (it follows curtin's documented ZFS root example and
+subiquity's guided ZFS datasets, on a single disk). Test in a throwaway VM before relying on
+one.
+
+**Safety.** `render` and `init` refuse to write through symlinks (`hosts/`, the host
+directory, `rendered/`, files inside it); symlinks found inside `rendered/` are removed,
+never followed. Host values may not contain control characters, and `plan` shell-quotes
+every host value it prints.
+
 **External validators** are optional: `prov validate` runs `cloud-init schema` when
 cloud-init is installed and otherwise reports `skipped: cloud-init not installed`.
 
