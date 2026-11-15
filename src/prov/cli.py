@@ -13,7 +13,7 @@ from typing import Any, List, Optional, Sequence
 from . import __version__
 from .plan import plan_lines
 from .registry import discover
-from .render import diff_rendered, safe_host_dir, write_rendered
+from .render import atomic_write, diff_rendered, safe_host_dir, special_entries, write_rendered
 from .schema import HOSTNAME_PATTERN, ConfigError, host_schema, read_toml, schema_json, tomllib
 from .validate import ERROR, WARNING, Finding, check_host, has_errors, load_host
 
@@ -36,6 +36,16 @@ def host_dir(root: Path, host: str) -> Path:
     if not re.fullmatch(HOSTNAME_PATTERN.strip("^$"), host):
         raise ConfigError(f"invalid host name {host!r} (lowercase letters, digits, '-')")
     return safe_host_dir(root, host)
+
+
+def call_plugin(plugin: Any, method: str, *args: Any) -> Any:
+    """Run a plugin method; any exception it raises becomes a ConfigError naming it."""
+    try:
+        return getattr(plugin, method)(*args)
+    except ConfigError:
+        raise
+    except Exception as exc:
+        raise ConfigError(f"distro plugin {getattr(plugin, 'NAME', '?')!r} failed in {method}: {type(exc).__name__}: {exc}") from exc
 
 
 def _name_warning(host: Any, dirname: str) -> List[Finding]:
@@ -80,14 +90,12 @@ def cmd_init(args: argparse.Namespace) -> int:
         raise ConfigError(f"{path} is a symlink; prov refuses to write through symlinks")
     if path.exists() and not args.force:
         raise ConfigError(f"{path} exists (use --force to overwrite)")
-    text = plugin.starter(args.host)
+    text = call_plugin(plugin, "starter", args.host)
     host, findings = check_host(tomllib.loads(text), distros)
     if host is None:  # a broken starter is a plugin bug; never write it
         raise ConfigError("starter host.toml is invalid: " + "; ".join(str(f) for f in findings))
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o644)
-    with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
-        fh.write(text)
+    atomic_write(path, text)
     print(f"wrote {path}")
     return EXIT_OK
 
@@ -95,7 +103,7 @@ def cmd_init(args: argparse.Namespace) -> int:
 def cmd_render(args: argparse.Namespace) -> int:
     plugin, host, findings, hdir = _load(args)
     _print_findings(findings)
-    changes = write_rendered(hdir / "rendered", plugin.render(host))
+    changes = write_rendered(hdir / "rendered", call_plugin(plugin, "render", host))
     for line in changes:
         print(line)
     print(f"rendered {args.host} ({plugin.NAME}): {len(changes)} change(s) in {hdir / 'rendered'}")
@@ -104,7 +112,7 @@ def cmd_render(args: argparse.Namespace) -> int:
 
 def cmd_diff(args: argparse.Namespace) -> int:
     plugin, host, _, hdir = _load(args)
-    diff = diff_rendered(hdir / "rendered", plugin.render(host))
+    diff = diff_rendered(hdir / "rendered", call_plugin(plugin, "render", host))
     if diff:
         sys.stdout.write(diff)
         return EXIT_FINDINGS
@@ -123,8 +131,12 @@ def cmd_validate(args: argparse.Namespace) -> int:
         if not rendered.is_dir():
             findings.append(Finding(ERROR, "not rendered yet; run prov render " + args.host, "rendered"))
         else:
-            findings += list(plugin.validate(rendered))
-            if diff_rendered(rendered, plugin.render(host)):
+            special = special_entries(rendered)
+            for rel in special:  # never followed or read: could point anywhere
+                findings.append(Finding(ERROR, "symlink or special file inside rendered/; run prov render to remove it", f"rendered/{rel}"))
+            if not special:
+                findings += list(call_plugin(plugin, "validate", rendered))
+            if diff_rendered(rendered, call_plugin(plugin, "render", host)):
                 findings.append(Finding(ERROR, "out of date with host.toml; run prov diff / prov render", "rendered"))
     _print_findings(findings)
     if has_errors(findings):
@@ -185,6 +197,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         message = f"not valid UTF-8: {exc}"
     except subprocess.TimeoutExpired as exc:
         message = f"timed out: {exc}"
+    except re.error as exc:
+        message = f"invalid regular expression: {exc}"
+    except ValueError as exc:  # e.g. an unsupported schema keyword or $ref
+        message = str(exc)
     except OSError as exc:  # IsADirectoryError, PermissionError, ...
         message = f"{exc.filename + ': ' if exc.filename else ''}{exc.strerror or exc}"
     print(f"prov: error: {message}", file=sys.stderr)

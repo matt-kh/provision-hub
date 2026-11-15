@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from prov import __version__
@@ -186,3 +188,57 @@ def test_hostname_differs_from_directory_warns(tmp_path, capsys):
     run(capsys, "--root", root, "render", "demo")
     code, out, _ = run(capsys, "--root", root, "validate", "demo")
     assert code == 0 and "warning: hostname: hostname 'other' differs from the directory name 'demo'" in out
+
+
+
+@pytest.fixture
+def broken_plugin(monkeypatch):
+    """Make the ubuntu plugin's methods blow up the way a buggy third-party plugin might."""
+    from prov.distros import ubuntu
+
+    def boom(*args, **kwargs):
+        raise KeyError("oops")
+
+    def install(method):
+        monkeypatch.setattr(ubuntu, method, boom)
+
+    return install
+
+
+@pytest.mark.parametrize("verb,method", [("render", "render"), ("diff", "render"), ("plan", "plan"), ("validate", "validate"), ("validate", "check")])
+def test_plugin_exceptions_exit_2_naming_the_plugin(tmp_path, capsys, broken_plugin, verb, method):
+    root = str(tmp_path)
+    run(capsys, "--root", root, "init", "ubuntu", "demo")
+    run(capsys, "--root", root, "render", "demo")
+    broken_plugin(method)
+    code, _, err = run(capsys, "--root", root, verb, "demo")
+    assert code == 2 and f"distro plugin 'ubuntu' failed in {method}: KeyError" in err, err
+
+
+def test_init_plugin_starter_exception_exits_2(tmp_path, capsys, broken_plugin):
+    broken_plugin("starter")
+    code, _, err = run(capsys, "--root", str(tmp_path), "init", "ubuntu", "demo")
+    assert code == 2 and "failed in starter" in err
+
+
+def test_unsafe_plugin_output_path_exits_2(tmp_path, capsys, monkeypatch):
+    from prov.distros import ubuntu
+
+    run(capsys, "--root", str(tmp_path), "init", "ubuntu", "demo")
+    monkeypatch.setattr(ubuntu, "render", lambda host: {"../escape": "x\n"})
+    code, _, err = run(capsys, "--root", str(tmp_path), "render", "demo")
+    assert code == 2 and "unsafe output path" in err
+    assert not (tmp_path / "hosts/demo/escape").exists()
+
+
+@pytest.mark.parametrize("exc,needle", [(ValueError("unsupported keyword(s) ['format']"), "unsupported keyword"), (re.error("bad escape"), "invalid regular expression")])
+def test_value_and_regex_errors_exit_2(tmp_path, capsys, monkeypatch, exc, needle):
+    import prov.cli as cli
+
+    def boom(*args, **kwargs):
+        raise exc
+
+    run(capsys, "--root", str(tmp_path), "init", "ubuntu", "demo")
+    monkeypatch.setattr(cli, "load_host", boom)
+    code, _, err = run(capsys, "--root", str(tmp_path), "render", "demo")
+    assert code == 2 and needle in err

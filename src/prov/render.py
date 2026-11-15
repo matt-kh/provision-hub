@@ -10,12 +10,12 @@ from __future__ import annotations
 
 import difflib
 import os
+import stat
+import tempfile
 from pathlib import Path, PurePosixPath
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 from .schema import ConfigError
-
-_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 
 
 def safe_host_dir(root: Path, host: str) -> Path:
@@ -42,25 +42,42 @@ def check_paths(files: Dict[str, str]) -> None:
     for name in files:
         p = PurePosixPath(name)
         if p.is_absolute() or ".." in p.parts or not p.parts or any(ord(c) < 32 or c == "\x7f" for c in name):
-            raise ValueError(f"plugin returned an unsafe output path: {name!r}")
+            raise ConfigError(f"plugin returned an unsafe output path: {name!r}")
 
 
-def _walk(rendered_dir: Path):
-    """(regular files, symlinks, directories) under ``rendered_dir``, never following links."""
-    files, links, dirs = [], [], []
+def _walk(rendered_dir: Path) -> Tuple[List[Path], List[Path], List[Path]]:
+    """(regular files, others, directories) under ``rendered_dir``, classified by lstat.
+
+    "Others" are symlinks and special files (FIFOs, sockets, devices): never followed, never
+    opened (opening a FIFO would block).
+    """
+    files, others, dirs = [], [], []
     for top, dirnames, filenames in os.walk(rendered_dir, followlinks=False):
-        top_path = Path(top)
-        for name in dirnames:
-            path = top_path / name
-            (links if path.is_symlink() else dirs).append(path)
-        for name in filenames:
-            path = top_path / name
-            (links if path.is_symlink() else files).append(path)
-    return sorted(files), sorted(links), sorted(dirs)
+        for name in dirnames + filenames:
+            path = Path(top) / name
+            mode = os.lstat(path).st_mode
+            if stat.S_ISDIR(mode):
+                dirs.append(path)
+            elif stat.S_ISREG(mode):
+                files.append(path)
+            else:
+                others.append(path)
+    return sorted(files), sorted(others), sorted(dirs)
+
+
+def special_entries(rendered_dir: Path) -> List[str]:
+    """Relative paths of symlinks and special files under ``rendered_dir``."""
+    if rendered_dir.is_symlink() or not rendered_dir.is_dir():
+        return []
+    return [p.relative_to(rendered_dir).as_posix() for p in _walk(rendered_dir)[1]]
 
 
 def _read(path: Path) -> str:
-    return path.read_bytes().decode("utf-8", errors="replace")
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    with os.fdopen(fd, "rb") as fh:
+        if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+            return ""
+        return fh.read().decode("utf-8", errors="replace")
 
 
 def existing_files(rendered_dir: Path) -> Dict[str, str]:
@@ -69,6 +86,24 @@ def existing_files(rendered_dir: Path) -> Dict[str, str]:
         return {}
     files, _, _ = _walk(rendered_dir)
     return {p.relative_to(rendered_dir).as_posix(): _read(p) for p in files}
+
+
+def atomic_write(target: Path, text: str) -> None:
+    """Write via a fresh temp file in the same directory, then rename over ``target``.
+
+    The temp file is created with O_EXCL|O_NOFOLLOW (``tempfile.mkstemp``), and the rename
+    replaces a symlink or hard link at ``target`` instead of writing through it.
+    """
+    fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".prov-tmp")
+    try:
+        os.fchmod(fd, 0o644)
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(text)
+        os.replace(tmp, target)
+    except BaseException:
+        if os.path.lexists(tmp):
+            os.unlink(tmp)
+        raise
 
 
 def _write(rendered_dir: Path, name: str, text: str) -> None:
@@ -82,9 +117,7 @@ def _write(rendered_dir: Path, name: str, text: str) -> None:
         current.mkdir(exist_ok=True)
     if not target.parent.resolve().is_relative_to(base):
         raise ConfigError(f"{target} resolves outside {rendered_dir}")
-    fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | _O_NOFOLLOW, 0o644)
-    with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
-        fh.write(text)
+    atomic_write(target, text)
 
 
 def write_rendered(rendered_dir: Path, files: Dict[str, str]) -> List[str]:
@@ -94,10 +127,11 @@ def write_rendered(rendered_dir: Path, files: Dict[str, str]) -> List[str]:
         raise ConfigError(f"{rendered_dir} is a symlink; prov refuses to write through symlinks")
     changes: List[str] = []
     if rendered_dir.is_dir():
-        _, links, _ = _walk(rendered_dir)
-        for link in links:  # never prov output; removing the link does not touch its target
-            link.unlink()
-            changes.append(f"removed symlink {link.relative_to(rendered_dir).as_posix()}")
+        _, others, _ = _walk(rendered_dir)
+        for other in others:  # never prov output; unlink does not touch a link's target
+            kind = "symlink" if other.is_symlink() else "special file"
+            other.unlink()
+            changes.append(f"removed {kind} {other.relative_to(rendered_dir).as_posix()}")
     current = existing_files(rendered_dir)
     for name in sorted(set(current) - set(files)):
         (rendered_dir / name).unlink()
@@ -122,8 +156,9 @@ def diff_rendered(rendered_dir: Path, files: Dict[str, str]) -> str:
     current = existing_files(rendered_dir)
     chunks = []
     if rendered_dir.is_dir() and not rendered_dir.is_symlink():
-        for link in _walk(rendered_dir)[1]:
-            chunks.append(f"symlink {link.relative_to(rendered_dir).as_posix()} would be removed\n")
+        for other in _walk(rendered_dir)[1]:
+            kind = "symlink" if other.is_symlink() else "special file"
+            chunks.append(f"{kind} {other.relative_to(rendered_dir).as_posix()} would be removed\n")
     for name in sorted(set(current) | set(files)):
         old, new = current.get(name), files.get(name)
         if old == new:
