@@ -37,7 +37,7 @@ def test_acceptance_flow(tmp_path, capsys):
     assert code == 0
     assert "cloud-localds seed.iso user-data meta-data" in out
     assert "xorriso -as genisoimage -output seed.iso -volid cidata -joliet -rock user-data meta-data" in out
-    assert "--extra-args 'autoinstall ds=nocloud'" in out
+    assert "--extra-args 'autoinstall ds=nocloud console=ttyS0'" in out
     assert f"cd {rendered}" in out
 
     # Rendering again is a no-op (deterministic output).
@@ -134,3 +134,55 @@ def test_distros_and_schema(capsys):
     assert code == 0 and out.startswith("ubuntu\t")
     code, out, _ = run(capsys, "schema")
     assert code == 0 and '"schema_version"' in out
+
+
+@pytest.mark.parametrize("host", ["demo\n", "demo\r", "Demo", "de/mo", "..", "a" * 64])
+def test_hostile_host_names_exit_2(tmp_path, capsys, host):
+    code, _, err = run(capsys, "--root", str(tmp_path), "init", "ubuntu", host)
+    assert code == 2 and "invalid host name" in err
+    assert not (tmp_path / "hosts").exists() or not any((tmp_path / "hosts").iterdir())
+
+
+def test_unreadable_host_files_exit_2(tmp_path, capsys):
+    hdir = tmp_path / "hosts/demo"
+    hdir.mkdir(parents=True)
+    (hdir / "host.toml").mkdir()
+    for verb in ("render", "validate", "plan", "diff"):
+        code, _, err = run(capsys, "--root", str(tmp_path), verb, "demo")
+        assert code == 2 and "is a directory" in err, (verb, err)
+    (hdir / "host.toml").rmdir()
+    (hdir / "host.toml").write_bytes(b'schema_version = 1\nhostname = "\xff"\n')
+    for verb in ("render", "validate"):
+        code, _, err = run(capsys, "--root", str(tmp_path), verb, "demo")
+        assert code == 2 and "UTF-8" in err, (verb, err)
+
+
+def test_oserror_maps_to_exit_2(tmp_path, capsys, monkeypatch):
+    import prov.cli as cli
+
+    def boom(*a, **k):
+        raise PermissionError(13, "Permission denied", str(tmp_path / "x"))
+
+    run(capsys, "--root", str(tmp_path), "init", "ubuntu", "demo")
+    monkeypatch.setattr(cli, "write_rendered", boom)
+    code, _, err = run(capsys, "--root", str(tmp_path), "render", "demo")
+    assert code == 2 and "Permission denied" in err
+
+
+def test_hand_edited_rendered_garbage_is_a_finding_not_a_crash(tmp_path, capsys):
+    root = str(tmp_path)
+    run(capsys, "--root", root, "init", "ubuntu", "demo")
+    run(capsys, "--root", root, "render", "demo")
+    (tmp_path / "hosts/demo/rendered/user-data").write_bytes(b"#cloud-config\n\xff\xfe\n")
+    code, _, err = run(capsys, "--root", root, "validate", "demo")
+    assert code == 1 and "not valid UTF-8" in err
+
+
+def test_hostname_differs_from_directory_warns(tmp_path, capsys):
+    root = str(tmp_path)
+    run(capsys, "--root", root, "init", "ubuntu", "demo")
+    toml = tmp_path / "hosts/demo/host.toml"
+    toml.write_text(toml.read_text().replace('hostname = "demo"', 'hostname = "other"'))
+    run(capsys, "--root", root, "render", "demo")
+    code, out, _ = run(capsys, "--root", root, "validate", "demo")
+    assert code == 0 and "warning: hostname: hostname 'other' differs from the directory name 'demo'" in out

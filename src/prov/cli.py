@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any, List, Optional, Sequence
@@ -12,9 +13,9 @@ from typing import Any, List, Optional, Sequence
 from . import __version__
 from .plan import plan_lines
 from .registry import discover
-from .render import diff_rendered, write_rendered
+from .render import diff_rendered, safe_host_dir, write_rendered
 from .schema import HOSTNAME_PATTERN, ConfigError, host_schema, read_toml, schema_json, tomllib
-from .validate import ERROR, Finding, check_host, has_errors, load_host
+from .validate import ERROR, WARNING, Finding, check_host, has_errors, load_host
 
 EXIT_OK, EXIT_FINDINGS, EXIT_USAGE = 0, 1, 2
 
@@ -31,16 +32,23 @@ def resolve_root(arg: Optional[str]) -> Path:
 
 
 def host_dir(root: Path, host: str) -> Path:
-    if not re.match(HOSTNAME_PATTERN, host):
+    """``<root>/hosts/<host>`` for a valid host name, refusing symlinked directories."""
+    if not re.fullmatch(HOSTNAME_PATTERN.strip("^$"), host):
         raise ConfigError(f"invalid host name {host!r} (lowercase letters, digits, '-')")
-    return root / "hosts" / host
+    return safe_host_dir(root, host)
+
+
+def _name_warning(host: Any, dirname: str) -> List[Finding]:
+    if host is not None and host["hostname"] != dirname:
+        return [Finding(WARNING, f"hostname {host['hostname']!r} differs from the directory name {dirname!r}", "hostname")]
+    return []
 
 
 def _load(args: argparse.Namespace) -> tuple:
     distros = discover()
     hdir = host_dir(args.root, args.host)
     host, findings = load_host(hdir / "host.toml", distros)
-    return distros[host["distro"]], host, findings, hdir
+    return distros[host["distro"]], host, findings + _name_warning(host, args.host), hdir
 
 
 def _print_findings(findings: List[Any]) -> None:
@@ -68,6 +76,8 @@ def cmd_init(args: argparse.Namespace) -> int:
     if not hasattr(plugin, "starter"):
         raise ConfigError(f"distro {args.distro!r} provides no starter host.toml")
     path = host_dir(args.root, args.host) / "host.toml"
+    if path.is_symlink():
+        raise ConfigError(f"{path} is a symlink; prov refuses to write through symlinks")
     if path.exists() and not args.force:
         raise ConfigError(f"{path} exists (use --force to overwrite)")
     text = plugin.starter(args.host)
@@ -75,7 +85,8 @@ def cmd_init(args: argparse.Namespace) -> int:
     if host is None:  # a broken starter is a plugin bug; never write it
         raise ConfigError("starter host.toml is invalid: " + "; ".join(str(f) for f in findings))
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8", newline="\n") as fh:
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o644)
+    with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
         fh.write(text)
     print(f"wrote {path}")
     return EXIT_OK
@@ -105,6 +116,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
     distros = discover()
     hdir = host_dir(args.root, args.host)
     host, findings = check_host(read_toml(hdir / "host.toml"), distros)
+    findings += _name_warning(host, args.host)
     if host is not None:
         plugin = distros[host["distro"]]
         rendered = hdir / "rendered"
@@ -166,8 +178,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         return args.func(args)
     except ConfigError as exc:
-        print(f"prov: error: {exc}", file=sys.stderr)
-        return EXIT_USAGE
+        message = str(exc)
+    except tomllib.TOMLDecodeError as exc:
+        message = f"invalid TOML: {exc}"
+    except UnicodeDecodeError as exc:
+        message = f"not valid UTF-8: {exc}"
+    except subprocess.TimeoutExpired as exc:
+        message = f"timed out: {exc}"
+    except OSError as exc:  # IsADirectoryError, PermissionError, ...
+        message = f"{exc.filename + ': ' if exc.filename else ''}{exc.strerror or exc}"
+    print(f"prov: error: {message}", file=sys.stderr)
+    return EXIT_USAGE
 
 
 if __name__ == "__main__":  # pragma: no cover
