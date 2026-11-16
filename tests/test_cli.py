@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import re
+import types
 
 import pytest
 
@@ -342,3 +344,54 @@ def test_wrongly_typed_plugin_results_exit_2(tmp_path, capsys, monkeypatch, meth
     verb = {"render": "render", "validate": "validate", "check": "validate", "plan": "plan"}[method]
     code, _, err = run(capsys, "--root", root, verb, "os-install/demo")
     assert code == 2 and f"backend 'ubuntu-autoinstall' {needle}" in err, err
+
+
+@pytest.mark.parametrize("name", ["x\nerror: forged line\x1b[2K", "\x1b]0;title\x07", "Bad Name\r"])
+def test_list_never_prints_raw_hostile_names(tmp_path, capsys, name):
+    """Review W1: a planted name cannot forge output lines or terminal escapes."""
+    root = tmp_path / "root"
+    run(capsys, "--root", str(root), "init", "os-install/web", "--backend", "ubuntu-autoinstall")
+    (root / "os-install" / name).symlink_to(tmp_path, target_is_directory=True)
+    code, out, err = run(capsys, "--root", str(root), "list")
+    assert code == 1 and out == "os-install/web\tubuntu-autoinstall\n"
+    assert "\x1b" not in out + err and "\r" not in out + err
+    assert err.count("\n") == 1 and "forged line\n" not in err
+    assert f"error: os-install/{name!r}: is a symlink; refused" in err
+    (root / "os-install" / name).unlink()
+    (root / "os-install" / name).mkdir()
+    (root / "os-install" / name / "spec.toml").write_text("x = 1\n")
+    code, out, err = run(capsys, "--root", str(root), "list")
+    assert code == 1 and "\x1b" not in out + err and err.count("\n") == 1
+    assert f"error: os-install/{name!r}: invalid item name {name!r}" in err
+
+
+def test_list_invalid_name_without_spec_is_ignored(tmp_path, capsys):
+    (tmp_path / "os-install/Not_An_Item").mkdir(parents=True)
+    assert run(capsys, "--root", str(tmp_path), "list") == (0, "", "")
+
+
+def test_list_missing_root_exits_2(tmp_path, capsys):
+    code, out, err = run(capsys, "--root", str(tmp_path / "nope"), "list")
+    assert code == 2 and out == "" and "does not exist or is not a directory" in err
+    (tmp_path / "file").write_text("x\n")
+    assert run(capsys, "--root", str(tmp_path / "file"), "list")[0] == 2
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+def test_list_unreadable_kind_dir_is_one_finding(tmp_path, capsys, monkeypatch):
+    from prov import kinds
+
+    widget = types.ModuleType("widget")
+    for key in ("VERSIONS", "PROPERTIES", "REQUIRED", "semantic", "REFS"):
+        setattr(widget, key, getattr(kinds.KINDS["os-install"], key))
+    widget.NAME = "widget"
+    monkeypatch.setitem(kinds.KINDS, "widget", widget)
+    run(capsys, "--root", str(tmp_path), "init", "os-install/web", "--backend", "ubuntu-autoinstall")
+    (tmp_path / "widget").mkdir()
+    (tmp_path / "widget").chmod(0)
+    try:
+        code, out, err = run(capsys, "--root", str(tmp_path), "list")
+    finally:
+        (tmp_path / "widget").chmod(0o755)
+    assert code == 1 and out == "os-install/web\tubuntu-autoinstall\n"
+    assert err == "error: widget: cannot read: Permission denied\n"

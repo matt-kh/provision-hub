@@ -16,7 +16,7 @@ from .kinds.common import DEFS
 from .plan import plan_lines
 from .registry import Context, call_plugin, discover, for_kind, lookup
 from .render import atomic_write, diff_rendered, safe_item_dir, special_entries, write_rendered
-from .schema import ID_PATTERN, NAME_PATTERN, SPEC_FILE, ConfigError, api_versions, read_toml, schema_json, spec_schema, tomllib
+from .schema import ID_PATTERN, NAME_PATTERN, SPEC_FILE, ConfigError, api_versions, read_toml, schema_json, short_repr, spec_schema, tomllib
 from .spec import check_spec, load_spec, parse_ref
 from .validate import ERROR, Finding, has_errors
 
@@ -74,36 +74,54 @@ def cmd_backends(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def _is_dir_entry(path: Path) -> Optional[bool]:
-    """True for a real directory, False for anything else, None for a symlink."""
+def _entry_kind(path: Path) -> str:
+    """"dir", "symlink" or "other", by lstat (never follows a link)."""
     mode = os.lstat(path).st_mode
     if stat.S_ISLNK(mode):
-        return None
-    return stat.S_ISDIR(mode)
+        return "symlink"
+    return "dir" if stat.S_ISDIR(mode) else "other"
 
 
 def cmd_list(args: argparse.Namespace) -> int:
-    """Every item under the root, as ``<ref>\\t<backend>``; unreadable items are findings."""
-    root = Path(args.root).resolve()
+    """Every item under the root, as ``<ref>\\t<backend>``; problems are findings (exit 1).
+
+    Only names matching the item name pattern are ever printed raw; any other name appears as
+    a capped repr, so a planted file name cannot forge output lines or terminal escapes.
+    """
+    root = Path(args.root)
+    if not root.is_dir():
+        raise ConfigError(f"root {root} does not exist or is not a directory")
+    root = root.resolve()
     problems: List[Finding] = []
     for kind in sorted(kinds.KINDS):
         kdir = root / kind
-        if not os.path.lexists(kdir):
-            continue
-        state = _is_dir_entry(kdir)
-        if state is None:
-            problems.append(Finding(ERROR, "is a symlink; refused", kind))
-        if not state:
-            continue
-        for entry in sorted(kdir.iterdir()):
-            ref = f"{kind}/{entry.name}"
-            state = _is_dir_entry(entry)
-            if state is None:
-                problems.append(Finding(ERROR, "is a symlink; refused", ref))
+        try:
+            if not os.path.lexists(kdir):
                 continue
-            if not state or not re.fullmatch(NAME_PATTERN.strip("^$"), entry.name):
+            what = _entry_kind(kdir)
+            if what == "symlink":
+                problems.append(Finding(ERROR, "is a symlink; refused", kind))
+            if what != "dir":
                 continue
-            if not os.path.lexists(entry / SPEC_FILE):
+            entries = sorted(kdir.iterdir())
+        except OSError as exc:
+            problems.append(Finding(ERROR, f"cannot read: {exc.strerror or exc}", kind))
+            continue
+        for entry in entries:
+            valid = re.fullmatch(NAME_PATTERN.strip("^$"), entry.name) is not None
+            ref = f"{kind}/{entry.name}" if valid else f"{kind}/{short_repr(entry.name)}"
+            try:
+                what = _entry_kind(entry)
+                if what == "symlink":
+                    problems.append(Finding(ERROR, "is a symlink; refused", ref))
+                    continue
+                if what != "dir" or not os.path.lexists(entry / SPEC_FILE):
+                    continue  # not an item (notes, empty directories)
+            except OSError as exc:
+                problems.append(Finding(ERROR, f"cannot read: {exc.strerror or exc}", ref))
+                continue
+            if not valid:
+                problems.append(Finding(ERROR, f"invalid item name {short_repr(entry.name)} (lowercase letters, digits, '-'; one DNS label)", ref))
                 continue
             try:
                 raw = read_toml(entry / SPEC_FILE)
