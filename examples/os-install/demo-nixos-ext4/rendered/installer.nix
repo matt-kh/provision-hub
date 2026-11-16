@@ -79,30 +79,36 @@ let
         ls -l /dev/disk/by-id/ >&2 || true
         exit 1
       fi
-      dev=$(readlink -f "$disk")
-      type=$(lsblk -dno TYPE "$dev")
+      # Every probe is captured on its own line with an explicit refusal: a failing lsblk
+      # (or a pipe cut short) must stop the install, never let it through.
+      refuse() { echo "install-$host: $*; refusing, nothing was changed" >&2; exit 1; }
+      dev=$(readlink -f "$disk") || refuse "cannot resolve $disk"
+      type=$(lsblk -dno TYPE "$dev") || refuse "cannot read the type of $dev"
       if [ "$type" != "disk" ]; then
-        echo "install-$host: $disk ($dev) is a $type, not a whole disk; refusing, nothing was changed" >&2
-        exit 1
+        refuse "$disk ($dev) is a $type, not a whole disk"
       fi
       # Anything in the disk's tree mounted or used as swap (partitions, dm, loop, md).
-      if lsblk -nro MOUNTPOINTS "$dev" | grep -q .; then
-        echo "install-$host: $disk ($dev) or a device on it is mounted or used as swap; refusing, nothing was changed" >&2
-        lsblk -o NAME,TYPE,MOUNTPOINTS "$dev" >&2
-        exit 1
+      mounts=$(lsblk -nro MOUNTPOINTS "$dev") || refuse "cannot read the mounts on $dev"
+      mounts=$(printf %s "$mounts" | tr -d "[:space:]")
+      if [ -n "$mounts" ]; then
+        lsblk -o NAME,TYPE,MOUNTPOINTS "$dev" >&2 || true
+        refuse "$disk ($dev) or a device on it is mounted or used as swap"
       fi
       # The installer medium: the NixOS ISO mounts it at /iso (iso-image.nix); every disk
-      # it sits on (through partitions, dm or md) must differ from the target.
+      # it sits on (through partitions, dm or md) must differ from the target. No block
+      # device at /iso (copytoram) leaves nothing to compare; a medium on the target disk
+      # is mounted and was refused above anyway.
       medium=$(findmnt -no SOURCE /iso || true)
       if [ -n "$medium" ] && [ -b "$medium" ]; then
+        ancestors=$(lsblk -nrpso NAME,TYPE "$medium") || refuse "cannot read the devices the boot medium $medium sits on"
         while read -r name kind; do
           if [ "$kind" = "disk" ] && [ "$(readlink -f "$name")" = "$dev" ]; then
-            echo "install-$host: $disk ($dev) is the USB stick this installer booted from; refusing, nothing was changed" >&2
-            exit 1
+            refuse "$disk ($dev) is the USB stick this installer booted from"
           fi
-        done < <(lsblk -nrpso NAME,TYPE "$medium")
+        done <<< "$ancestors"
       fi
-      serial=$(lsblk -dno SERIAL "$dev" | tr -d "[:space:]")
+      serial=$(lsblk -dno SERIAL "$dev") || refuse "cannot read the serial of $dev"
+      serial=$(printf %s "$serial" | tr -d "[:space:]")
       if [ "$(printf %s "$serial" | wc -c)" -ge 4 ]; then
         expect=$(printf %s "$serial" | tail -c 4)
         what="the last 4 characters of the disk serial ($serial)"

@@ -135,9 +135,9 @@ def check(spec: Dict[str, Any], ctx: Any) -> List[Finding]:
     if nixos["layout"] == "ext4" and len(disks) != 1:
         out.append(Finding(ERROR, f"layout 'ext4' installs to exactly one disk, got {len(disks)}", "storage.disks"))
     for d, disk in enumerate(disks):
-        if not disk.startswith(BY_ID):
+        if not disk.startswith(BY_ID) or "/../" in disk or "/./" in disk or disk.endswith(("/..", "/.")):
             out.append(
-                Finding(WARNING, f"{short_repr(disk)} is not a {BY_ID} path; kernel names like /dev/sda can change between boots", f"storage.disks[{d}]")
+                Finding(WARNING, f"{short_repr(disk)} is not a plain {BY_ID} path; kernel names like /dev/sda can change between boots", f"storage.disks[{d}]")
             )
     for i, iface in enumerate(spec["network"]["interfaces"]):
         if "macaddress" not in iface and re.fullmatch(r"eth[0-9]+", iface["name"]):
@@ -149,6 +149,8 @@ def check(spec: Dict[str, Any], ctx: Any) -> List[Finding]:
                     f"network.interfaces[{i}]",
                 )
             )
+    if spec["arch"] == "arm64" and "cpu_vendor" in nixos:
+        out.append(Finding(ERROR, "cpu_vendor (intel/amd microcode) applies to amd64 only", f"{NAME}.cpu_vendor"))
     if spec["arch"] == "arm64" and spec["firmware"] == "bios":
         out.append(Finding(ERROR, "arm64 boots with UEFI only", "firmware"))
     for n, user in enumerate(spec["users"]):
@@ -538,30 +540,36 @@ def installer_nix(spec: Dict[str, Any]) -> str:
             "        ls -l /dev/disk/by-id/ >&2 || true",
             "        exit 1",
             "      fi",
-            '      dev=$(readlink -f "$disk")',
-            '      type=$(lsblk -dno TYPE "$dev")',
+            "      # Every probe is captured on its own line with an explicit refusal: a failing lsblk",
+            "      # (or a pipe cut short) must stop the install, never let it through.",
+            '      refuse() { echo "install-$host: $*; refusing, nothing was changed" >&2; exit 1; }',
+            '      dev=$(readlink -f "$disk") || refuse "cannot resolve $disk"',
+            '      type=$(lsblk -dno TYPE "$dev") || refuse "cannot read the type of $dev"',
             '      if [ "$type" != "disk" ]; then',
-            '        echo "install-$host: $disk ($dev) is a $type, not a whole disk; refusing, nothing was changed" >&2',
-            "        exit 1",
+            '        refuse "$disk ($dev) is a $type, not a whole disk"',
             "      fi",
             "      # Anything in the disk's tree mounted or used as swap (partitions, dm, loop, md).",
-            '      if lsblk -nro MOUNTPOINTS "$dev" | grep -q .; then',
-            '        echo "install-$host: $disk ($dev) or a device on it is mounted or used as swap; refusing, nothing was changed" >&2',
-            '        lsblk -o NAME,TYPE,MOUNTPOINTS "$dev" >&2',
-            "        exit 1",
+            '      mounts=$(lsblk -nro MOUNTPOINTS "$dev") || refuse "cannot read the mounts on $dev"',
+            '      mounts=$(printf %s "$mounts" | tr -d "[:space:]")',
+            '      if [ -n "$mounts" ]; then',
+            '        lsblk -o NAME,TYPE,MOUNTPOINTS "$dev" >&2 || true',
+            '        refuse "$disk ($dev) or a device on it is mounted or used as swap"',
             "      fi",
             "      # The installer medium: the NixOS ISO mounts it at /iso (iso-image.nix); every disk",
-            "      # it sits on (through partitions, dm or md) must differ from the target.",
+            "      # it sits on (through partitions, dm or md) must differ from the target. No block",
+            "      # device at /iso (copytoram) leaves nothing to compare; a medium on the target disk",
+            "      # is mounted and was refused above anyway.",
             '      medium=$(findmnt -no SOURCE /iso || true)',
             '      if [ -n "$medium" ] && [ -b "$medium" ]; then',
+            '        ancestors=$(lsblk -nrpso NAME,TYPE "$medium") || refuse "cannot read the devices the boot medium $medium sits on"',
             "        while read -r name kind; do",
             '          if [ "$kind" = "disk" ] && [ "$(readlink -f "$name")" = "$dev" ]; then',
-            '            echo "install-$host: $disk ($dev) is the USB stick this installer booted from; refusing, nothing was changed" >&2',
-            "            exit 1",
+            '            refuse "$disk ($dev) is the USB stick this installer booted from"',
             "          fi",
-            '        done < <(lsblk -nrpso NAME,TYPE "$medium")',
+            '        done <<< "$ancestors"',
             "      fi",
-            '      serial=$(lsblk -dno SERIAL "$dev" | tr -d "[:space:]")',
+            '      serial=$(lsblk -dno SERIAL "$dev") || refuse "cannot read the serial of $dev"',
+            '      serial=$(printf %s "$serial" | tr -d "[:space:]")',
             '      if [ "$(printf %s "$serial" | wc -c)" -ge 4 ]; then',
             '        expect=$(printf %s "$serial" | tail -c 4)',
             '        what="the last 4 characters of the disk serial ($serial)"',
@@ -644,8 +652,8 @@ _REQUIRED = [
     ("installer.nix", "closureInfo", "the offline closure (closureInfo)"),
     ("installer.nix", 'if [ "$answer" != "$expect" ]; then', "the typed confirmation"),
     ("installer.nix", 'if [ "$type" != "disk" ]; then', "the whole-disk check"),
-    ("installer.nix", 'lsblk -nrpso NAME,TYPE "$medium"', "the installer-medium check"),
-    ("installer.nix", 'if lsblk -nro MOUNTPOINTS "$dev" | grep -q .; then', "the mounted-disk check"),
+    ("installer.nix", 'ancestors=$(lsblk -nrpso NAME,TYPE "$medium") || refuse', "the installer-medium check"),
+    ("installer.nix", 'mounts=$(lsblk -nro MOUNTPOINTS "$dev") || refuse', "the mounted-disk check"),
     ("installer.nix", "if [ ! -t 0 ]; then", "the terminal check"),
     ("installer.nix", "builtins.pathExists ./flake.lock", "the flake.lock assertion"),
     ("installer.nix", "disko-install ", "the disko-install call"),
@@ -782,20 +790,20 @@ def plan(spec: Dict[str, Any], ctx: Any) -> List[str]:
         "#        nixos-generate-config --no-filesystems --show-hardware-config > hardware-configuration.nix",
         "#    and copy the file to this machine NEXT TO spec.toml (not into rendered/, which render",
         "#    owns): ../hardware-configuration.nix from here. Then:",
-        "git add ../hardware-configuration.nix",
+        "if [ -f ../hardware-configuration.nix ]; then git add ../hardware-configuration.nix; fi",
         "#    configuration.nix imports it when present; without it a broad initrd driver set is used.",
         "",
         "# 2. Track the rendered files, lock the flake inputs and commit the lock",
         "#    (render keeps rendered/flake.lock):",
         "git add . ../spec.toml",
-        "nix flake lock",
+        "nix --extra-experimental-features 'nix-command flakes' flake lock",
         f"git add flake.lock && git commit -m {q(f'Lock the {host} flake inputs')}",
         "",
         "# 3. Build the installer ISO (large: it carries the target closure for an offline install).",
         "#    The out-link under ~/prov-iso keeps the ISO from garbage collection; delete the link",
         "#    when you no longer need the ISO.",
         'mkdir -p "$HOME"/prov-iso',
-        f"nix build {installer} --out-link {link}",
+        f"nix --extra-experimental-features 'nix-command flakes' build {installer} --out-link {link}",
         f"ls {link}/iso/",
         "",
         "# 4. Write the ISO to a USB stick. WARNING: this WIPES the stick. Find its by-id path with",

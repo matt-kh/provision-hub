@@ -97,7 +97,18 @@ def test_zero_disks_is_rejected():
 def test_non_by_id_disk_warns():
     findings = spec_findings(lambda r: r["storage"].update(disks=["/dev/sda"]))
     assert messages(findings) == []
-    assert any("is not a /dev/disk/by-id/ path" in m for m in messages(findings, WARNING))
+    assert any("is not a plain /dev/disk/by-id/ path" in m for m in messages(findings, WARNING))
+
+
+@pytest.mark.parametrize("disk", ["/dev/disk/by-id/../../sda", "/dev/disk/by-id/./nvme-EXAMPLE_1", "/dev/disk/by-id/nvme-EXAMPLE_1/.."])
+def test_by_id_paths_with_dot_segments_warn(disk):
+    findings = spec_findings(lambda r: r["storage"].update(disks=[disk]))
+    assert any("is not a plain /dev/disk/by-id/ path" in m for m in messages(findings, WARNING))
+
+
+def test_cpu_vendor_on_arm64_is_rejected():
+    findings = spec_findings(lambda r: (r.update(arch="arm64"), r["nixos-disko"].update(cpu_vendor="intel")))
+    assert "cpu_vendor (intel/amd microcode) applies to amd64 only" in messages(findings)
 
 
 @pytest.mark.parametrize("shell", ["/bin/sh", "/usr/local/bin/zsh", "/bin/tcsh", "/bin/bash2"])
@@ -304,20 +315,23 @@ def test_installer_refuses_partitions_and_the_boot_medium():
     prompt = inst.index("read -r answer")
     whole = inst.index('if [ "$type" != "disk" ]; then')
     assert 'type=$(lsblk -dno TYPE "$dev")' in inst and whole < prompt
-    assert "is a $type, not a whole disk; refusing, nothing was changed" in inst
-    medium = inst.index('done < <(lsblk -nrpso NAME,TYPE "$medium")')
+    assert 'refuse "$disk ($dev) is a $type, not a whole disk"' in inst
+    assert 'refuse() { echo "install-$host: $*; refusing, nothing was changed" >&2; exit 1; }' in inst
+    medium = inst.index('done <<< "$ancestors"')
+    assert 'ancestors=$(lsblk -nrpso NAME,TYPE "$medium") || refuse' in inst
     assert "medium=$(findmnt -no SOURCE /iso || true)" in inst
-    assert "is the USB stick this installer booted from; refusing, nothing was changed" in inst and medium < prompt
-    mounted = inst.index('if lsblk -nro MOUNTPOINTS "$dev" | grep -q .; then')
-    assert "or a device on it is mounted or used as swap; refusing, nothing was changed" in inst and mounted < prompt
+    assert 'refuse "$disk ($dev) is the USB stick this installer booted from"' in inst and medium < prompt
+    mounted = inst.index('mounts=$(lsblk -nro MOUNTPOINTS "$dev") || refuse')
+    assert 'refuse "$disk ($dev) or a device on it is mounted or used as swap"' in inst and mounted < prompt
+    assert "grep" not in inst and "< <(" not in inst  # no pipe or process substitution that can fail open
     tty = inst.index("if [ ! -t 0 ]; then")
     assert "run it on a terminal; the confirmation must be typed" in inst and tty < prompt
-    assert inst.index("exit 1", whole) < prompt and inst.index("exit 1", mounted) < prompt
+    assert all(f"{probe} || refuse" in inst for probe in ('dev=$(readlink -f "$disk")', 'type=$(lsblk -dno TYPE "$dev")', 'serial=$(lsblk -dno SERIAL "$dev")'))
 
 
 def test_installer_confirms_with_serial_or_hostname():
     inst = nixos.render(host(), Context("demo"))["installer.nix"]
-    assert 'serial=$(lsblk -dno SERIAL "$dev" | tr -d "[:space:]")' in inst
+    assert 'serial=$(printf %s "$serial" | tr -d "[:space:]")' in inst
     assert 'expect=$(printf %s "$serial" | tail -c 4)' in inst
     assert 'what="the last 4 characters of the disk serial ($serial)"' in inst
     assert 'expect="$host"' in inst and "the disk reports no serial" in inst
@@ -362,8 +376,8 @@ def test_clean_render_validates(rendered):
         ("disko.nix", lambda t: t.replace('mountpoint = "/";', 'mountpoint = "/srv";'), "a root filesystem is missing"),
         ("installer.nix", lambda t: t.replace('if [ "$answer" != "$expect" ]; then', "if false; then"), "the typed confirmation"),
         ("installer.nix", lambda t: t.replace('if [ "$type" != "disk" ]; then', "if false; then"), "the whole-disk check"),
-        ("installer.nix", lambda t: t.replace('lsblk -nrpso NAME,TYPE "$medium"', "true"), "the installer-medium check"),
-        ("installer.nix", lambda t: t.replace('if lsblk -nro MOUNTPOINTS "$dev" | grep -q .; then', "if false; then"), "the mounted-disk check"),
+        ("installer.nix", lambda t: t.replace('ancestors=$(lsblk -nrpso NAME,TYPE "$medium") || refuse', "ancestors="), "the installer-medium check"),
+        ("installer.nix", lambda t: t.replace('mounts=$(lsblk -nro MOUNTPOINTS "$dev") || refuse', "mounts="), "the mounted-disk check"),
         ("installer.nix", lambda t: t.replace("if [ ! -t 0 ]; then", "if false; then"), "the terminal check"),
         ("installer.nix", lambda t: t.replace("builtins.pathExists ./flake.lock", "true"), "the flake.lock assertion"),
         ("installer.nix", lambda t: t.replace('hostName = "demo";', 'hostName = "x";'), "hostName differs"),
@@ -516,8 +530,9 @@ def test_plan_order_and_no_execution(tmp_path, capsys, monkeypatch, firmware):
     order = [
         "#        nixos-generate-config --no-filesystems --show-hardware-config > hardware-configuration.nix",
         "git add . ../spec.toml",
-        "nix flake lock",
-        'nix build .#nixosConfigurations.demo-installer.config.system.build.isoImage --out-link "$HOME"/prov-iso/demo-installer',
+        "nix --extra-experimental-features 'nix-command flakes' flake lock",
+        "nix --extra-experimental-features 'nix-command flakes' build .#nixosConfigurations.demo-installer.config.system.build.isoImage"
+        ' --out-link "$HOME"/prov-iso/demo-installer',
         "USB=/dev/disk/by-id/usb-CHANGE-ME",
         'if [ -b "$USB" ]; then sudo dd if="$ISO" of="$USB" bs=4M conv=fsync status=progress; else echo "USB=$USB is not a block device; set USB first" >&2; fi',
         "sudo install-demo",
@@ -528,10 +543,10 @@ def test_plan_order_and_no_execution(tmp_path, capsys, monkeypatch, firmware):
     assert any("WIPES the stick" in line for line in lines) and any("GUI writer" in line for line in lines)
     assert any(line.startswith("# 5. WARNING: the install WIPES " + DISK) for line in lines)
     assert ("UEFI mode" in out) == (firmware == "uefi")
-    assert "git add ../hardware-configuration.nix" in lines
+    assert "if [ -f ../hardware-configuration.nix ]; then git add ../hardware-configuration.nix; fi" in lines
     assert sorted((str(p), p.stat().st_mtime_ns) for p in tmp_path.rglob("*")) == before
     # no default ./result link inside the item; no bare <placeholder> a paste could read as a redirect
-    build = next(line for line in lines if line.startswith("nix build "))
+    build = next(line for line in lines if " build .#" in line)
     assert "--out-link" in build and not shlex.split(build)[-1].startswith((".", "result"))
     assert not any("result" in line for line in lines if not line.startswith("#"))
     assert not any("<" in line for line in lines if not line.startswith("#"))
@@ -617,12 +632,13 @@ def test_keyboard_is_an_xkb_layout():
 # --- behaviour of the rendered install script (stubbed lsblk/findmnt/readlink/id) ---------
 
 STUBS = {
-    "id": 'echo 0\n',
-    "readlink": 'echo "${@: -1}"\n',
+    "id": 'echo "${STUB_UID:-0}"\n',
+    "readlink": 'p="${@: -1}"; if [ "$p" = "${STUB_LINK_FROM:-}" ]; then echo "$STUB_LINK_TO"; else echo "$p"; fi\n',
     "findmnt": 'printf "%s\\n" "$STUB_MEDIUM"\n',
-    "lsblk": r'''case "$*" in
+    "lsblk": r'''case "$*" in *"${STUB_FAIL:-@@}"*) echo "lsblk: failed" >&2; exit 32 ;; esac
+case "$*" in
   "-dno TYPE "*) echo "$STUB_TYPE" ;;
-  "-nro MOUNTPOINTS "*) printf "%s" "$STUB_MOUNTS" ;;
+  "-nro MOUNTPOINTS "*) printf "%b" "$STUB_MOUNTS" ;;
   "-nrpso NAME,TYPE "*) printf "%b" "$STUB_ANCESTORS" ;;
   "-dno SERIAL "*) echo "$STUB_SERIAL" ;;
   *) echo "lsblk $*" ;;
@@ -740,3 +756,60 @@ def test_script_falls_back_to_the_hostname_without_a_serial(script_env):
     assert proc.returncode == 0, proc.stderr
     assert "the hostname (demo; the disk reports no serial)" in proc.stdout and "Disk serial: none" in proc.stdout
     assert args[-1] == disk
+
+
+
+# --- round 3: fail closed ----------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "probe,needle",
+    [
+        ("-dno TYPE", "cannot read the type of"),
+        ("-nro MOUNTPOINTS", "cannot read the mounts on"),
+        ("-nrpso NAME,TYPE", "cannot read the devices the boot medium"),
+        ("-dno SERIAL", "cannot read the serial of"),
+    ],
+)
+def test_script_refuses_when_lsblk_fails(script_env, probe, needle):
+    run_script, _, _ = script_env
+    proc, args = run_script(STUB_FAIL=probe)
+    assert proc.returncode == 1 and needle in proc.stderr and "refusing, nothing was changed" in proc.stderr and args is None
+
+
+def test_script_finds_a_mount_among_blank_lines(script_env):
+    run_script, _, _ = script_env
+    proc, args = run_script(STUB_MOUNTS="\\n\\n/mnt\\n")
+    assert proc.returncode == 1 and "mounted or used as swap; refusing" in proc.stderr and args is None
+
+
+def test_script_blank_mount_lines_are_not_mounts(script_env):
+    run_script, _, _ = script_env
+    proc, args = run_script(STUB_MOUNTS="\\n\\n\\n")
+    assert proc.returncode == 0 and args is not None, proc.stderr
+
+
+def test_script_refuses_a_swap_child(script_env):
+    run_script, _, _ = script_env
+    proc, args = run_script(STUB_MOUNTS="\\n[SWAP]\\n")
+    assert proc.returncode == 1 and "mounted or used as swap; refusing" in proc.stderr and args is None
+
+
+def test_script_refuses_without_root(script_env):
+    run_script, _, _ = script_env
+    proc, args = run_script(STUB_UID="1000")
+    assert proc.returncode == 1 and "run it as root: sudo install-demo" in proc.stderr and args is None
+
+
+def test_script_refuses_a_missing_disk(script_env):
+    run_script, disk, _ = script_env
+    os.unlink(disk)
+    proc, args = run_script()
+    assert proc.returncode == 1 and "not found; nothing was changed" in proc.stderr and args is None
+
+
+def test_script_refuses_a_by_id_link_to_the_boot_medium(script_env):
+    run_script, disk, medium = script_env
+    # the by-id path resolves to /dev/sdz, the disk the /iso medium partition sits on
+    proc, args = run_script(STUB_LINK_FROM=disk, STUB_LINK_TO="/dev/sdz", STUB_ANCESTORS=f"{medium} part\\n/dev/sdz disk\\n")
+    assert proc.returncode == 1 and "(/dev/sdz) is the USB stick this installer booted from; refusing" in proc.stderr and args is None
