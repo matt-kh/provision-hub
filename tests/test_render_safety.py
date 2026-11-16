@@ -253,6 +253,26 @@ def test_preserved_files_are_kept_and_not_diffed(tmp_path, outside):
     assert not os.path.lexists(rendered / "flake.lock") and (outside / "precious.txt").read_text() == "keep me\n"
 
 
+def test_preserved_file_in_a_subdirectory_survives_the_empty_dir_sweep(tmp_path):
+    rendered = tmp_path / "rendered"
+    (rendered / "locks").mkdir(parents=True)
+    (rendered / "locks/x.lock").write_text("keep\n")
+    (rendered / "empty").mkdir()
+    changes = write_rendered(rendered, {"a": "b\n"}, preserve=("locks/x.lock",))
+    assert (rendered / "locks/x.lock").read_text() == "keep\n" and not (rendered / "empty").exists()
+    assert not any("x.lock" in c for c in changes)
+    assert diff_rendered(rendered, {"a": "b\n"}, preserve=("locks/x.lock",)) == ""
+
+
+def test_fifo_named_like_a_preserved_file_is_removed(tmp_path):
+    rendered = tmp_path / "rendered"
+    rendered.mkdir()
+    os.mkfifo(rendered / "flake.lock")
+    assert "special file flake.lock would be removed" in diff_rendered(rendered, {"a": "b\n"}, preserve=("flake.lock",))
+    changes = write_rendered(rendered, {"a": "b\n"}, preserve=("flake.lock",))
+    assert "removed special file flake.lock" in changes and not os.path.lexists(rendered / "flake.lock")
+
+
 @pytest.fixture
 def alarm():
     """Fail instead of hanging forever if a read blocks (e.g. on a FIFO)."""
