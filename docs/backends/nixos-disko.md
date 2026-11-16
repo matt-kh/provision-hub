@@ -12,8 +12,10 @@ writes or installs anything.
 > UEFI and BIOS, with and without a hardware file: the target's toplevel and the ISO
 > derivations evaluate, and the target evaluated from the installer's offline flake copy
 > (directly and through disko-install's own `install-cli.nix`, with Nix 2.35 and with the
-> nixpkgs Nix the ISO ships) gives the same toplevel derivation as the one on the ISO. No
-> machine has been installed from these files yet. Test in a throwaway VM or on a spare
+> nixpkgs Nix the ISO ships) gives the same toplevel derivation as the one on the ISO. The
+> `install-<hostname>` script passes shellcheck (from the pinned nixpkgs), and its refusal
+> paths are tested with stubbed `lsblk`/`findmnt`, never against real devices. No machine
+> has been installed from these files yet. Test in a throwaway VM or on a spare
 > disk first.
 
 ## Spec
