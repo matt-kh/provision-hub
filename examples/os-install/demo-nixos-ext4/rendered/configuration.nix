@@ -3,11 +3,14 @@
 { config, lib, pkgs, modulesPath, ... }:
 let
   # A human-owned hardware-configuration.nix next to spec.toml (outside rendered/) is
-  # imported when it exists and is git-tracked; render never writes or deletes it. The
-  # installer copies it into its offline flake as ./hardware-configuration.nix.
+  # imported when it exists and is git-tracked; render never writes or deletes it.
+  # On the USB stick disko-install evaluates a copy of this directory alone in the store,
+  # where ../ is the store directory itself: the installer copies the file in as
+  # ./hardware-configuration.installer-copy.nix, and ../ is not looked at there.
+  storeRoot = dirOf (toString ./.) == builtins.storeDir;
   hardware =
-    if builtins.pathExists ./hardware-configuration.nix then [ ./hardware-configuration.nix ]
-    else if builtins.pathExists ../hardware-configuration.nix then [ ../hardware-configuration.nix ]
+    if builtins.pathExists ./hardware-configuration.installer-copy.nix then [ ./hardware-configuration.installer-copy.nix ]
+    else if !storeRoot && builtins.pathExists ../hardware-configuration.nix then [ ../hardware-configuration.nix ]
     else [ ];
 in
 {

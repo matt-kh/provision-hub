@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import re
 import os
 import shlex
 import subprocess
@@ -132,6 +133,17 @@ def test_schema_rejections(edit):
     assert spec is None and messages(findings)
 
 
+@pytest.mark.parametrize("name", ["root", "nobody", "messagebus", "sshd", "nixbld", "nixbld7"])
+def test_system_account_names_are_rejected(name):
+    findings = spec_findings(lambda r: r["users"][0].update(name=name))
+    assert any("is a NixOS system account" in m for m in messages(findings))
+
+
+def test_gecos_with_colon_is_rejected():
+    findings = spec_findings(lambda r: r["users"][0].update(gecos="Ops: on call"))
+    assert "gecos may not contain ':' (the passwd field separator)" in messages(findings)
+
+
 def test_nix_keyword_package_is_rejected():
     findings = spec_findings(lambda r: r["nixos-disko"].update(packages=["python3Packages.with"]))
     assert any("is a Nix keyword" in m for m in messages(findings))
@@ -198,8 +210,11 @@ def test_disk_and_root_filesystem():
 
 def test_hardware_configuration_import_is_guarded():
     conf = nixos.render(host(), Context("demo"))["configuration.nix"]
-    assert "if builtins.pathExists ./hardware-configuration.nix then [ ./hardware-configuration.nix ]" in conf
-    assert "else if builtins.pathExists ../hardware-configuration.nix then [ ../hardware-configuration.nix ]" in conf
+    assert "storeRoot = dirOf (toString ./.) == builtins.storeDir;" in conf
+    assert f"if builtins.pathExists ./{nixos.HW_COPY} then [ ./{nixos.HW_COPY} ]" in conf
+    assert "else if !storeRoot && builtins.pathExists ../hardware-configuration.nix then [ ../hardware-configuration.nix ]" in conf
+    # a human-created rendered/hardware-configuration.nix (which render deletes) is never imported
+    assert not re.search(r"(?<!\.)\./hardware-configuration\.nix", conf)
     assert '(modulesPath + "/installer/scan/not-detected.nix")' in conf
     for module in nixos.INITRD_MODULES:
         assert f'"{module}"' in conf
@@ -267,9 +282,9 @@ def test_installer_guard_and_offline_closure():
     assert '(modulesPath + "/installer/cd-dvd/installation-cd-minimal.nix")' in inst
     assert 'name = "install-${hostName}";' in inst and 'hostName = "demo";' in inst and f'disk = "{DISK}";' in inst
     assert 'if [ ! -b "$disk" ]; then' in inst
-    assert 'lsblk -o NAME,MODEL,SERIAL,SIZE,TYPE,FSTYPE,LABEL,MOUNTPOINTS "$disk"' in inst
+    assert 'lsblk -o NAME,MODEL,SERIAL,SIZE,TYPE,FSTYPE,LABEL,MOUNTPOINTS "$dev"' in inst
     assert "read -r answer || true" in inst
-    guard = inst.index('if [ "$answer" != "$host" ]; then')
+    guard = inst.index('if [ "$answer" != "$expect" ]; then')
     assert "aborted, nothing was changed" in inst[guard:] and "exit 1" in inst[guard:]
     assert guard < inst.index("exec disko-install")
     assert 'exec disko-install --write-efi-boot-entries --flake ${lib.escapeShellArg "${installFlake}#${hostName}"} --disk main "$disk"' in inst
@@ -278,6 +293,45 @@ def test_installer_guard_and_offline_closure():
     assert "flakeOutPaths" in inst and 'environment.etc."install-closure".source' in inst
     assert nixos.DISKO_REF_COMMIT in inst
     assert "systemd.services" not in inst and "autologinUser" not in inst
+
+
+def test_installer_refuses_partitions_and_the_boot_medium():
+    inst = nixos.render(host(), Context("demo"))["installer.nix"]
+    prompt = inst.index("read -r answer")
+    whole = inst.index('if [ "$type" != "disk" ]; then')
+    assert 'type=$(lsblk -dno TYPE "$dev")' in inst and whole < prompt
+    assert "is a $type, not a whole disk; refusing, nothing was changed" in inst
+    medium = inst.index('if [ "$medium" = "$dev" ]; then')
+    assert "medium=$(findmnt -no SOURCE /iso || true)" in inst
+    assert 'parent=$(lsblk -no PKNAME "$medium" | head -n 1)' in inst
+    assert "is the USB stick this installer booted from; refusing, nothing was changed" in inst and medium < prompt
+    assert inst.index("exit 1", whole) < prompt and inst.index("exit 1", medium) < prompt
+
+
+def test_installer_confirms_with_serial_or_hostname():
+    inst = nixos.render(host(), Context("demo"))["installer.nix"]
+    assert 'serial=$(lsblk -dno SERIAL "$dev" | tr -d "[:space:]")' in inst
+    assert 'expect=$(printf %s "$serial" | tail -c 4)' in inst
+    assert 'what="the last 4 characters of the disk serial ($serial)"' in inst
+    assert 'expect="$host"' in inst and "the disk reports no serial" in inst
+    assert 'printf "Host: %s  Disk serial: %s\\nType %s to wipe this disk: " "$host" "$shown" "$what"' in inst
+    assert "''${" not in inst and "${serial" not in inst  # no bash ${...} inside the Nix '' string
+
+
+def test_installer_requires_a_committed_flake_lock():
+    inst = nixos.render(host(), Context("demo"))["installer.nix"]
+    assert "assert lib.assertMsg (builtins.pathExists ./flake.lock)" in inst
+    assert "commit rendered/flake.lock (nix flake lock && git add flake.lock) before building the installer" in inst
+    assert 'cp ${./flake.lock} "$out/flake.lock"' in inst
+    assert "optionalString (builtins.pathExists ./flake.lock)" not in inst  # the copy is unconditional
+    assert f'cp ${{../hardware-configuration.nix}} "$out/{nixos.HW_COPY}"' in inst
+
+
+def test_bios_install_line_writes_no_efi_entries():
+    inst = nixos.render(host(lambda r: r.update(firmware="bios")), Context("demo"))["installer.nix"]
+    line = next(line for line in inst.splitlines() if "exec disko-install" in line)
+    assert line.strip() == 'exec disko-install --flake ${lib.escapeShellArg "${installFlake}#${hostName}"} --disk main "$disk"'
+    assert "--write-efi-boot-entries" not in line and '--disk main "$disk"' in line
 
 
 # --- validate -----------------------------------------------------------------------------
@@ -299,7 +353,10 @@ def test_clean_render_validates(rendered):
         ("configuration.nix", lambda t: t.replace("../hardware-configuration.nix", "../hw.nix"), "guarded hardware-configuration.nix import"),
         ("disko.nix", lambda t: t.replace(DISK, "/dev/disk/by-id/other"), "but disko.nix partitions"),
         ("disko.nix", lambda t: t.replace('mountpoint = "/";', 'mountpoint = "/srv";'), "a root filesystem is missing"),
-        ("installer.nix", lambda t: t.replace('if [ "$answer" != "$host" ]; then', "if false; then"), "typed-hostname confirmation"),
+        ("installer.nix", lambda t: t.replace('if [ "$answer" != "$expect" ]; then', "if false; then"), "the typed confirmation"),
+        ("installer.nix", lambda t: t.replace('if [ "$type" != "disk" ]; then', "if false; then"), "the whole-disk check"),
+        ("installer.nix", lambda t: t.replace('if [ "$medium" = "$dev" ]; then', "if false; then"), "the installer-medium check"),
+        ("installer.nix", lambda t: t.replace("builtins.pathExists ./flake.lock", "true"), "the flake.lock assertion"),
         ("installer.nix", lambda t: t.replace('hostName = "demo";', 'hostName = "x";'), "hostName differs"),
         ("installer.nix", lambda t: t.replace("in\n{\n", 'in\n{\n  systemd.services.go.script = "install-demo";\n'), "must not run anything at boot"),
     ],
@@ -330,13 +387,70 @@ def test_nix_parse_runs_when_present(rendered, monkeypatch):
     def fake_run(argv, **kwargs):
         calls.append(argv)
         bad = argv[-1].endswith("disko.nix")
-        return subprocess.CompletedProcess(argv, 1 if bad else 0, stdout="", stderr="error: syntax error\x1b[31m" if bad else "")
+        err = f"error: syntax error\x1b[31m\n       at {argv[-1]}:2:1:" if bad else ""
+        return subprocess.CompletedProcess(argv, 1 if bad else 0, stdout="", stderr=err)
 
     monkeypatch.setattr(nixos.shutil, "which", lambda name: "/usr/bin/nix-instantiate" if name == "nix-instantiate" else None)
     monkeypatch.setattr(nixos.subprocess, "run", fake_run)
     findings = nixos.validate(rendered)
-    assert calls == [["/usr/bin/nix-instantiate", "--readonly-mode", "--parse", str(rendered / n)] for n in nixos.FILES]
-    assert [str(f) for f in findings if f.level == ERROR] == ["error: disko.nix: nix-instantiate --parse: error: syntax error\\x1b[31m"]
+    assert calls == [["/usr/bin/nix-instantiate", "--readonly-mode", "--store", "dummy://", "--parse", str(rendered / n)] for n in nixos.FILES]
+    assert [str(f) for f in findings if f.level == ERROR] == [f"error: disko.nix: nix-instantiate --parse: error: syntax error\\x1b[31m | at {rendered / 'disko.nix'}:2:1:"]
+
+
+def _which_nix(monkeypatch):
+    monkeypatch.setattr(nixos.shutil, "which", lambda name: "/usr/bin/nix-instantiate" if name == "nix-instantiate" else None)
+
+
+def test_nix_parse_tool_failure_is_skipped_not_an_error(rendered, monkeypatch):
+    _which_nix(monkeypatch)
+    monkeypatch.setattr(
+        nixos.subprocess, "run", lambda argv, **kw: subprocess.CompletedProcess(argv, 1, stdout="", stderr="error: cannot open connection to remote store")
+    )
+    findings = nixos.validate(rendered)
+    assert messages(findings) == []
+    assert messages(findings, SKIPPED) == ["nix-instantiate --parse could not run: error: cannot open connection to remote store"] * 4
+
+
+def test_nix_parse_timeout_and_oserror(rendered, monkeypatch):
+    _which_nix(monkeypatch)
+
+    def timeout(argv, **kw):
+        raise subprocess.TimeoutExpired(argv, 60)
+
+    monkeypatch.setattr(nixos.subprocess, "run", timeout)
+    assert messages(nixos.validate(rendered)) == ["nix-instantiate --parse timed out after 60 s"] * 4
+
+    def broken(argv, **kw):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(nixos.subprocess, "run", broken)
+    assert messages(nixos.validate(rendered)) == ["nix-instantiate could not run: Permission denied"] * 4
+
+
+def test_nix_parse_is_called_safely(rendered, monkeypatch):
+    _which_nix(monkeypatch)
+    seen = []
+
+    def fake_run(argv, **kw):
+        seen.append(kw)
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(nixos.subprocess, "run", fake_run)
+    assert messages(nixos.validate(rendered)) == []
+    assert all(kw["stdin"] is subprocess.DEVNULL and kw["errors"] == "replace" and kw["timeout"] == 60 for kw in seen)
+
+
+@pytest.mark.parametrize("hostname", ["in", "1abc"])
+def test_quoted_hostnames_render_and_validate(tmp_path, hostname):
+    spec = host(lambda r: r.update(hostname=hostname))
+    files = nixos.render(spec, Context("demo"))
+    assert f'nixosConfigurations."{hostname}" = ' in files["flake.nix"]
+    installer = nixos.nix_attr(f"{hostname}-installer")
+    assert f"nixosConfigurations.{installer} = " in files["flake.nix"]
+    assert f'target = self.nixosConfigurations."{hostname}";' in files["installer.nix"]
+    for name, text in files.items():
+        (tmp_path / name).write_text(text)
+    assert messages(nixos.validate(tmp_path)) == []
 
 
 # --- CLI: init/render/validate/plan, preserved lock, hardware file ------------------------
@@ -391,7 +505,7 @@ def test_plan_order_and_no_execution(tmp_path, capsys, monkeypatch, firmware):
     assert code == 0
     lines = out.splitlines()
     order = [
-        "nixos-generate-config --no-filesystems --show-hardware-config > hardware-configuration.nix",
+        "#        nixos-generate-config --no-filesystems --show-hardware-config > hardware-configuration.nix",
         "nix flake lock",
         "nix build .#nixosConfigurations.demo-installer.config.system.build.isoImage",
         "sudo dd if=result/iso/<ISO-FILE> of=/dev/disk/by-id/usb-<YOUR-STICK> bs=4M conv=fsync status=progress",

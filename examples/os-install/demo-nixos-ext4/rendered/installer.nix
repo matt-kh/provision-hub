@@ -13,23 +13,27 @@ let
   disko = self.inputs.disko.packages.${pkgs.stdenv.hostPlatform.system}.disko;
 
   # The flake disko-install evaluates on the stick. disko-install copies only the flake
-  # directory, so ../hardware-configuration.nix would be lost: it is copied in as
-  # ./hardware-configuration.nix, which configuration.nix checks first.
-  installFlake = pkgs.runCommand "install-flake-${hostName}" { } (
-    ''
-      mkdir -p "$out"
-      cp ${./flake.nix} "$out/flake.nix"
-      cp ${./configuration.nix} "$out/configuration.nix"
-      cp ${./disko.nix} "$out/disko.nix"
-      cp ${./installer.nix} "$out/installer.nix"
-    ''
-    + lib.optionalString (builtins.pathExists ./flake.lock) ''
-      cp ${./flake.lock} "$out/flake.lock"
-    ''
-    + lib.optionalString (builtins.pathExists ../hardware-configuration.nix) ''
-      cp ${../hardware-configuration.nix} "$out/hardware-configuration.nix"
-    ''
-  );
+  # directory (a ?dir= flake ref loses its dir there), so ../hardware-configuration.nix
+  # is copied in as ./hardware-configuration.installer-copy.nix,
+  # which configuration.nix checks first.
+  # Without a git-tracked flake.lock, disko-install would try to lock the inputs offline,
+  # after the wipe is confirmed: refuse to build the installer instead.
+  installFlake =
+    assert lib.assertMsg (builtins.pathExists ./flake.lock)
+      "commit rendered/flake.lock (nix flake lock && git add flake.lock) before building the installer";
+    pkgs.runCommand "install-flake-${hostName}" { } (
+      ''
+        mkdir -p "$out"
+        cp ${./flake.nix} "$out/flake.nix"
+        cp ${./configuration.nix} "$out/configuration.nix"
+        cp ${./disko.nix} "$out/disko.nix"
+        cp ${./installer.nix} "$out/installer.nix"
+        cp ${./flake.lock} "$out/flake.lock"
+      ''
+      + lib.optionalString (builtins.pathExists ../hardware-configuration.nix) ''
+        cp ${../hardware-configuration.nix} "$out/hardware-configuration.installer-copy.nix"
+      ''
+    );
 
   # Every flake input (recursively), so evaluating the flake needs no network.
   flakeOutPaths =
@@ -69,12 +73,39 @@ let
         ls -l /dev/disk/by-id/ >&2 || true
         exit 1
       fi
-      echo "WARNING: this ERASES ALL DATA on $disk ($(readlink -f "$disk")):"
-      lsblk -o NAME,MODEL,SERIAL,SIZE,TYPE,FSTYPE,LABEL,MOUNTPOINTS "$disk"
-      printf "Type the hostname (%s) to wipe this disk and install NixOS: " "$host"
+      dev=$(readlink -f "$disk")
+      type=$(lsblk -dno TYPE "$dev")
+      if [ "$type" != "disk" ]; then
+        echo "install-$host: $disk ($dev) is a $type, not a whole disk; refusing, nothing was changed" >&2
+        exit 1
+      fi
+      # The installer medium: the NixOS ISO mounts it at /iso (iso-image.nix).
+      medium=$(findmnt -no SOURCE /iso || true)
+      if [ -n "$medium" ] && [ -b "$medium" ]; then
+        medium=$(readlink -f "$medium")
+        parent=$(lsblk -no PKNAME "$medium" | head -n 1)
+        if [ -n "$parent" ]; then medium="/dev/$parent"; fi
+        if [ "$medium" = "$dev" ]; then
+          echo "install-$host: $disk ($dev) is the USB stick this installer booted from; refusing, nothing was changed" >&2
+          exit 1
+        fi
+      fi
+      serial=$(lsblk -dno SERIAL "$dev" | tr -d "[:space:]")
+      if [ "$(printf %s "$serial" | wc -c)" -ge 4 ]; then
+        expect=$(printf %s "$serial" | tail -c 4)
+        what="the last 4 characters of the disk serial ($serial)"
+      else
+        expect="$host"
+        what="the hostname ($host; the disk reports no serial)"
+      fi
+      echo "WARNING: this ERASES ALL DATA on $disk ($dev) to install NixOS host $host:"
+      lsblk -o NAME,MODEL,SERIAL,SIZE,TYPE,FSTYPE,LABEL,MOUNTPOINTS "$dev"
+      shown="$serial"
+      if [ -z "$shown" ]; then shown="none"; fi
+      printf "Host: %s  Disk serial: %s\nType %s to wipe this disk: " "$host" "$shown" "$what"
       answer=""
       read -r answer || true
-      if [ "$answer" != "$host" ]; then
+      if [ "$answer" != "$expect" ]; then
         echo "install-$host: confirmation did not match; aborted, nothing was changed" >&2
         exit 1
       fi

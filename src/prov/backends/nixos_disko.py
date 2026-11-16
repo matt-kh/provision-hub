@@ -39,6 +39,10 @@ PRESERVE = ("flake.lock",)
 
 FILES = ("configuration.nix", "disko.nix", "flake.nix", "installer.nix")
 
+# Name of the hardware file inside the installer's offline flake copy (never rendered; a
+# human-created rendered/hardware-configuration.nix is not imported).
+HW_COPY = "hardware-configuration.installer-copy.nix"
+
 _ATTR = "[A-Za-z_][A-Za-z0-9_-]*"
 
 SCHEMA: Dict[str, Any] = {
@@ -85,6 +89,9 @@ INITRD_MODULES = ("nvme", "ahci", "xhci_pci", "usb_storage", "sd_mod", "usbhid")
 SYSTEMS = {"amd64": "x86_64-linux", "arm64": "aarch64-linux"}
 SHELLS = {"bash": None, "zsh": "zsh", "fish": "fish"}  # basename -> programs.<x> / pkgs.<x>
 SHELL_DIRS = ("/bin/", "/usr/bin/", "/run/current-system/sw/bin/")
+# Accounts NixOS defines itself; a [[users]] entry with one of these names would redefine a
+# system account. Deliberately small: the common ones plus the nixbld<N> build users.
+RESERVED_USERS = frozenset({"root", "nobody", "messagebus", "sshd", "nscd", "systemd-network", "systemd-resolve", "systemd-timesync"})
 NIX_KEYWORDS = frozenset({"assert", "else", "if", "in", "inherit", "let", "or", "rec", "then", "with"})
 
 
@@ -135,6 +142,10 @@ def check(spec: Dict[str, Any], ctx: Any) -> List[Finding]:
     if spec["arch"] == "arm64" and spec["firmware"] == "bios":
         out.append(Finding(ERROR, "arm64 boots with UEFI only", "firmware"))
     for n, user in enumerate(spec["users"]):
+        if user["name"] in RESERVED_USERS or re.fullmatch(r"nixbld[0-9]*", user["name"]):
+            out.append(Finding(ERROR, f"user name {short_repr(user['name'])} is a NixOS system account; choose another name", f"users[{n}].name"))
+        if ":" in user.get("gecos", ""):
+            out.append(Finding(ERROR, "gecos may not contain ':' (the passwd field separator)", f"users[{n}].gecos"))
         try:
             _shell(user["shell"])
         except ValueError:
@@ -296,11 +307,14 @@ def configuration_nix(spec: Dict[str, Any]) -> str:
         "{ config, lib, pkgs, modulesPath, ... }:",
         "let",
         "  # A human-owned hardware-configuration.nix next to spec.toml (outside rendered/) is",
-        "  # imported when it exists and is git-tracked; render never writes or deletes it. The",
-        "  # installer copies it into its offline flake as ./hardware-configuration.nix.",
+        "  # imported when it exists and is git-tracked; render never writes or deletes it.",
+        f"  # On the USB stick disko-install evaluates a copy of this directory alone in the store,",
+        f"  # where ../ is the store directory itself: the installer copies the file in as",
+        f"  # ./{HW_COPY}, and ../ is not looked at there.",
+        "  storeRoot = dirOf (toString ./.) == builtins.storeDir;",
         "  hardware =",
-        "    if builtins.pathExists ./hardware-configuration.nix then [ ./hardware-configuration.nix ]",
-        "    else if builtins.pathExists ../hardware-configuration.nix then [ ../hardware-configuration.nix ]",
+        f"    if builtins.pathExists ./{HW_COPY} then [ ./{HW_COPY} ]",
+        "    else if !storeRoot && builtins.pathExists ../hardware-configuration.nix then [ ../hardware-configuration.nix ]",
         "    else [ ];",
         "in",
         "{",
@@ -444,23 +458,27 @@ def installer_nix(spec: Dict[str, Any]) -> str:
             "  disko = self.inputs.disko.packages.${pkgs.stdenv.hostPlatform.system}.disko;",
             "",
             "  # The flake disko-install evaluates on the stick. disko-install copies only the flake",
-            "  # directory, so ../hardware-configuration.nix would be lost: it is copied in as",
-            "  # ./hardware-configuration.nix, which configuration.nix checks first.",
-            '  installFlake = pkgs.runCommand "install-flake-${hostName}" { } (',
-            "    ''",
-            '      mkdir -p "$out"',
-            '      cp ${./flake.nix} "$out/flake.nix"',
-            '      cp ${./configuration.nix} "$out/configuration.nix"',
-            '      cp ${./disko.nix} "$out/disko.nix"',
-            '      cp ${./installer.nix} "$out/installer.nix"',
-            "    ''",
-            "    + lib.optionalString (builtins.pathExists ./flake.lock) ''",
-            '      cp ${./flake.lock} "$out/flake.lock"',
-            "    ''",
-            "    + lib.optionalString (builtins.pathExists ../hardware-configuration.nix) ''",
-            '      cp ${../hardware-configuration.nix} "$out/hardware-configuration.nix"',
-            "    ''",
-            "  );",
+            "  # directory (a ?dir= flake ref loses its dir there), so ../hardware-configuration.nix",
+            f"  # is copied in as ./{HW_COPY},",
+            "  # which configuration.nix checks first.",
+            "  # Without a git-tracked flake.lock, disko-install would try to lock the inputs offline,",
+            "  # after the wipe is confirmed: refuse to build the installer instead.",
+            "  installFlake =",
+            "    assert lib.assertMsg (builtins.pathExists ./flake.lock)",
+            '      "commit rendered/flake.lock (nix flake lock && git add flake.lock) before building the installer";',
+            '    pkgs.runCommand "install-flake-${hostName}" { } (',
+            "      ''",
+            '        mkdir -p "$out"',
+            '        cp ${./flake.nix} "$out/flake.nix"',
+            '        cp ${./configuration.nix} "$out/configuration.nix"',
+            '        cp ${./disko.nix} "$out/disko.nix"',
+            '        cp ${./installer.nix} "$out/installer.nix"',
+            '        cp ${./flake.lock} "$out/flake.lock"',
+            "      ''",
+            "      + lib.optionalString (builtins.pathExists ../hardware-configuration.nix) ''",
+            f'        cp ${{../hardware-configuration.nix}} "$out/{HW_COPY}"',
+            "      ''",
+            "    );",
             "",
             "  # Every flake input (recursively), so evaluating the flake needs no network.",
             "  flakeOutPaths =",
@@ -500,12 +518,39 @@ def installer_nix(spec: Dict[str, Any]) -> str:
             "        ls -l /dev/disk/by-id/ >&2 || true",
             "        exit 1",
             "      fi",
-            '      echo "WARNING: this ERASES ALL DATA on $disk ($(readlink -f "$disk")):"',
-            '      lsblk -o NAME,MODEL,SERIAL,SIZE,TYPE,FSTYPE,LABEL,MOUNTPOINTS "$disk"',
-            '      printf "Type the hostname (%s) to wipe this disk and install NixOS: " "$host"',
+            '      dev=$(readlink -f "$disk")',
+            '      type=$(lsblk -dno TYPE "$dev")',
+            '      if [ "$type" != "disk" ]; then',
+            '        echo "install-$host: $disk ($dev) is a $type, not a whole disk; refusing, nothing was changed" >&2',
+            "        exit 1",
+            "      fi",
+            "      # The installer medium: the NixOS ISO mounts it at /iso (iso-image.nix).",
+            '      medium=$(findmnt -no SOURCE /iso || true)',
+            '      if [ -n "$medium" ] && [ -b "$medium" ]; then',
+            '        medium=$(readlink -f "$medium")',
+            '        parent=$(lsblk -no PKNAME "$medium" | head -n 1)',
+            '        if [ -n "$parent" ]; then medium="/dev/$parent"; fi',
+            '        if [ "$medium" = "$dev" ]; then',
+            '          echo "install-$host: $disk ($dev) is the USB stick this installer booted from; refusing, nothing was changed" >&2',
+            "          exit 1",
+            "        fi",
+            "      fi",
+            '      serial=$(lsblk -dno SERIAL "$dev" | tr -d "[:space:]")',
+            '      if [ "$(printf %s "$serial" | wc -c)" -ge 4 ]; then',
+            '        expect=$(printf %s "$serial" | tail -c 4)',
+            '        what="the last 4 characters of the disk serial ($serial)"',
+            "      else",
+            '        expect="$host"',
+            '        what="the hostname ($host; the disk reports no serial)"',
+            "      fi",
+            '      echo "WARNING: this ERASES ALL DATA on $disk ($dev) to install NixOS host $host:"',
+            '      lsblk -o NAME,MODEL,SERIAL,SIZE,TYPE,FSTYPE,LABEL,MOUNTPOINTS "$dev"',
+            '      shown="$serial"',
+            '      if [ -z "$shown" ]; then shown="none"; fi',
+            '      printf "Host: %s  Disk serial: %s\\nType %s to wipe this disk: " "$host" "$shown" "$what"',
             '      answer=""',
             "      read -r answer || true",
-            '      if [ "$answer" != "$host" ]; then',
+            '      if [ "$answer" != "$expect" ]; then',
             '        echo "install-$host: confirmation did not match; aborted, nothing was changed" >&2',
             "        exit 1",
             "      fi",
@@ -563,7 +608,7 @@ _REQUIRED = [
     ("flake.nix", "./configuration.nix", "an import of ./configuration.nix"),
     ("flake.nix", "./disko.nix", "an import of ./disko.nix"),
     ("flake.nix", "./installer.nix", "an import of ./installer.nix"),
-    ("configuration.nix", "builtins.pathExists ../hardware-configuration.nix", "the guarded hardware-configuration.nix import"),
+    ("configuration.nix", "!storeRoot && builtins.pathExists ../hardware-configuration.nix", "the guarded hardware-configuration.nix import"),
     ("configuration.nix", "networking.hostName = ", "networking.hostName"),
     ("configuration.nix", "services.openssh", "services.openssh"),
     ("configuration.nix", "system.stateVersion = ", "system.stateVersion"),
@@ -571,7 +616,10 @@ _REQUIRED = [
     ("disko.nix", 'mountpoint = "/";', "a root filesystem"),
     ("installer.nix", "installation-cd-minimal.nix", "the installation-cd-minimal.nix base"),
     ("installer.nix", "closureInfo", "the offline closure (closureInfo)"),
-    ("installer.nix", 'if [ "$answer" != "$host" ]; then', "the typed-hostname confirmation"),
+    ("installer.nix", 'if [ "$answer" != "$expect" ]; then', "the typed confirmation"),
+    ("installer.nix", 'if [ "$type" != "disk" ]; then', "the whole-disk check"),
+    ("installer.nix", 'if [ "$medium" = "$dev" ]; then', "the installer-medium check"),
+    ("installer.nix", "builtins.pathExists ./flake.lock", "the flake.lock assertion"),
     ("installer.nix", "disko-install ", "the disko-install call"),
 ]
 
@@ -587,7 +635,11 @@ def _string_value(text: str, key: str) -> Optional[str]:
 
 
 def _external(paths: List[Path]) -> List[Finding]:
-    """``nix-instantiate --parse`` on each file (parse only: no evaluation, no fetching)."""
+    """``nix-instantiate --parse`` on each file (parse only: no evaluation, no fetching).
+
+    ``--store dummy://`` keeps it away from any real store; a failure whose output does not
+    name the file (the tool itself broken, not a syntax error) is reported as skipped.
+    """
     tool = shutil.which("nix-instantiate")
     if tool is None:
         return [Finding(SKIPPED, "nix not installed (nix-instantiate --parse)")]
@@ -595,9 +647,11 @@ def _external(paths: List[Path]) -> List[Finding]:
     for path in paths:
         try:
             proc = subprocess.run(
-                [tool, "--readonly-mode", "--parse", str(path)],
+                [tool, "--readonly-mode", "--store", "dummy://", "--parse", str(path)],
                 capture_output=True,
+                stdin=subprocess.DEVNULL,
                 text=True,
+                errors="replace",
                 timeout=60,
                 check=False,
             )
@@ -608,8 +662,11 @@ def _external(paths: List[Path]) -> List[Finding]:
             out.append(Finding(ERROR, f"nix-instantiate could not run: {exc.strerror or exc}", path.name))
             continue
         if proc.returncode != 0:
-            detail = proc.stderr.strip().splitlines()
-            out.append(Finding(ERROR, "nix-instantiate --parse: " + esc(" | ".join(detail[-5:])), path.name))
+            detail = " | ".join(line.strip() for line in proc.stderr.strip().splitlines()[-5:])
+            if str(path) in proc.stderr:
+                out.append(Finding(ERROR, "nix-instantiate --parse: " + esc(detail), path.name))
+            else:
+                out.append(Finding(SKIPPED, "nix-instantiate --parse could not run: " + esc(detail), path.name))
     return out
 
 
@@ -690,10 +747,11 @@ def plan(spec: Dict[str, Any], ctx: Any) -> List[str]:
         "# Nix copies only git-tracked files of a flake: keep this item in a git repository and",
         "# git add rendered/, flake.lock and ../hardware-configuration.nix before every nix command.",
         "",
-        "# 1. Optional, recommended: capture the target's hardware configuration. Boot the stock",
-        "#    NixOS minimal ISO on the target and run:",
-        "nixos-generate-config --no-filesystems --show-hardware-config > hardware-configuration.nix",
-        "#    Copy that file next to spec.toml (../hardware-configuration.nix from here), then:",
+        "# 1. Optional, recommended: capture the target's hardware configuration. ON THE TARGET,",
+        "#    booted from the stock NixOS minimal ISO, run:",
+        "#        nixos-generate-config --no-filesystems --show-hardware-config > hardware-configuration.nix",
+        "#    and copy the file to this machine NEXT TO spec.toml (not into rendered/, which render",
+        "#    owns): ../hardware-configuration.nix from here. Then:",
         "git add ../hardware-configuration.nix",
         "#    configuration.nix imports it when present; without it a broad initrd driver set is used.",
         "",
@@ -713,8 +771,9 @@ def plan(spec: Dict[str, Any], ctx: Any) -> List[str]:
         f"# 5. WARNING: the install WIPES {disks} on the target machine.",
         f"#    Boot the target from the USB stick in {mode} mode, then run on its console:",
         f"sudo {q(f'install-{host}')}",
-        f"#    It shows {q(disk)}, asks you to type {q(host)} to confirm, then runs disko-install",
-        "#    offline (partition, format, install). Any other answer aborts without changes.",
+        f"#    It refuses anything but the whole disk {q(disk)} (never a partition or the USB stick),",
+        "#    shows it, asks for the last 4 characters of its serial (or the hostname when it has",
+        "#    none), then runs disko-install offline. Any other answer aborts without changes.",
         "",
         "# 6. Post-install checks: remove the stick, reboot into the installed system, then",
     ]
