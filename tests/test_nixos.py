@@ -319,7 +319,9 @@ def test_installer_refuses_partitions_and_the_boot_medium():
     assert 'refuse() { echo "install-$host: $*; refusing, nothing was changed" >&2; exit 1; }' in inst
     medium = inst.index('done <<< "$ancestors"')
     assert 'ancestors=$(lsblk -nrpso NAME,TYPE "$medium") || refuse' in inst
-    assert "medium=$(findmnt -no SOURCE /iso || true)" in inst
+    assert 'medium=$(findmnt -no SOURCE /iso) || refuse "cannot read the source of /iso"' in inst
+    assert "no block device at /iso; the boot medium was not compared" in inst
+    assert 'r=$(readlink -f "$name") || refuse' in inst and 'uid=$(id -u) || refuse' in inst
     assert 'refuse "$disk ($dev) is the USB stick this installer booted from"' in inst and medium < prompt
     mounted = inst.index('mounts=$(lsblk -nro MOUNTPOINTS "$dev") || refuse')
     assert 'refuse "$disk ($dev) or a device on it is mounted or used as swap"' in inst and mounted < prompt
@@ -534,7 +536,9 @@ def test_plan_order_and_no_execution(tmp_path, capsys, monkeypatch, firmware):
         "nix --extra-experimental-features 'nix-command flakes' build .#nixosConfigurations.demo-installer.config.system.build.isoImage"
         ' --out-link "$HOME"/prov-iso/demo-installer',
         "USB=/dev/disk/by-id/usb-CHANGE-ME",
-        'if [ -b "$USB" ]; then sudo dd if="$ISO" of="$USB" bs=4M conv=fsync status=progress; else echo "USB=$USB is not a block device; set USB first" >&2; fi',
+        'case "$USB" in *-part[0-9]*) echo "USB=$USB is a partition; use the whole stick" >&2 ;; '
+        '*) if [ -b "$USB" ]; then sudo dd if="$ISO" of="$USB" bs=4M conv=fsync status=progress; '
+        'else echo "USB=$USB is not a block device; set USB first" >&2; fi ;; esac',
         "sudo install-demo",
         "nixos-version",
     ]
@@ -632,10 +636,14 @@ def test_keyboard_is_an_xkb_layout():
 # --- behaviour of the rendered install script (stubbed lsblk/findmnt/readlink/id) ---------
 
 STUBS = {
-    "id": 'echo "${STUB_UID:-0}"\n',
+    "id": 'if [ -n "${STUB_ID_FAIL:-}" ]; then exit 1; fi; echo "${STUB_UID-0}"\n',
     "readlink": 'p="${@: -1}"; if [ "$p" = "${STUB_LINK_FROM:-}" ]; then echo "$STUB_LINK_TO"; else echo "$p"; fi\n',
-    "findmnt": 'printf "%s\\n" "$STUB_MEDIUM"\n',
+    "findmnt": 'if [ -n "${STUB_FINDMNT_FAIL:-}" ]; then exit 1; fi; printf "%s\\n" "$STUB_MEDIUM"\n',
+    "mountpoint": '[ "${STUB_ISO_MOUNTED:-1}" = 1 ]\n',
     "lsblk": r'''case "$*" in *"${STUB_FAIL:-@@}"*) echo "lsblk: failed" >&2; exit 32 ;; esac
+# the device argument must be the resolved target disk, or the medium for the ancestor walk
+want="$STUB_DEV"; case "$*" in "-nrpso NAME,TYPE "*) want="$STUB_MEDIUM" ;; esac
+if [ "${@: -1}" != "$want" ]; then echo "lsblk stub: called on ${@: -1}, expected $want" >&2; exit 99; fi
 case "$*" in
   "-dno TYPE "*) echo "$STUB_TYPE" ;;
   "-nro MOUNTPOINTS "*) printf "%b" "$STUB_MOUNTS" ;;
@@ -658,12 +666,19 @@ def _script(firmware, disk, tmp_path):
     body = inst.split("    text = ''\n", 1)[1].split("\n    '';\n", 1)[0]
     lines = [line[6:] if line.startswith("      ") else line for line in body.split("\n")]
     text = "\n".join(lines)
-    text = text.replace("${lib.escapeShellArg disk}", shlex.quote(disk))
-    text = text.replace("${lib.escapeShellArg hostName}", "demo")
-    text = text.replace('${lib.escapeShellArg "${installFlake}#${hostName}"}', "/nix/store/fake-install-flake#demo")
+
+    def sub(old, new):
+        nonlocal text
+        assert old in text, f"script no longer contains {old!r}"
+        text = text.replace(old, new)
+
+    sub("${lib.escapeShellArg disk}", shlex.quote(disk))
+    sub("${lib.escapeShellArg hostName}", "demo")
+    sub('${lib.escapeShellArg "${installFlake}#${hostName}"}', "/nix/store/fake-install-flake#demo")
     assert "${" not in text, "an unsubstituted Nix interpolation is left"
-    text = text.replace('[ ! -b "$disk" ]', '[ ! -e "$disk" ]').replace('[ -b "$medium" ]', '[ -e "$medium" ]')
-    text = text.replace("[ ! -t 0 ]", '[ -n "${STUB_NOTTY:-}" ]')
+    sub('[ ! -b "$disk" ]', '[ ! -e "$disk" ]')
+    sub('[ -b "$medium" ]', '[ -e "$medium" ]')
+    sub("[ ! -t 0 ]", '[ -n "${STUB_NOTTY:-}" ]')
     path = tmp_path / "install-demo"
     path.write_text("#!/usr/bin/env bash\nset -o errexit -o nounset -o pipefail\n" + text + "\n")
     return path
@@ -691,6 +706,7 @@ def script_env(tmp_path):
         "STUB_ANCESTORS": f"{medium} part\\n/dev/sdz disk\\n",
         "STUB_SERIAL": "EXAMPLE-SERIAL-9876",
         "STUB_LOG": str(tmp_path / "disko-install.args"),
+        "STUB_DEV": str(disk),
     }
 
     def run_script(firmware="uefi", answer="9876\n", **overrides):
@@ -811,5 +827,55 @@ def test_script_refuses_a_missing_disk(script_env):
 def test_script_refuses_a_by_id_link_to_the_boot_medium(script_env):
     run_script, disk, medium = script_env
     # the by-id path resolves to /dev/sdz, the disk the /iso medium partition sits on
-    proc, args = run_script(STUB_LINK_FROM=disk, STUB_LINK_TO="/dev/sdz", STUB_ANCESTORS=f"{medium} part\\n/dev/sdz disk\\n")
+    proc, args = run_script(STUB_LINK_FROM=disk, STUB_LINK_TO="/dev/sdz", STUB_DEV="/dev/sdz", STUB_ANCESTORS=f"{medium} part\\n/dev/sdz disk\\n")
     assert proc.returncode == 1 and "(/dev/sdz) is the USB stick this installer booted from; refusing" in proc.stderr and args is None
+
+
+
+# --- round 4: /iso without a block device -------------------------------------------------
+
+
+def test_script_notes_when_iso_is_not_mounted(script_env):
+    run_script, _, _ = script_env
+    proc, args = run_script(STUB_ISO_MOUNTED="0")
+    assert proc.returncode == 0 and args is not None, proc.stderr
+    assert "no block device at /iso; the boot medium was not compared" in proc.stderr
+
+
+def test_script_notes_when_iso_is_not_a_block_device(script_env, tmp_path):
+    run_script, _, _ = script_env
+    proc, args = run_script(STUB_MEDIUM="tmpfs")  # copytoram: /iso is a tmpfs
+    assert proc.returncode == 0 and args is not None, proc.stderr
+    assert "no block device at /iso; the boot medium was not compared" in proc.stderr
+
+
+def test_script_refuses_when_iso_is_mounted_but_unreadable(script_env):
+    run_script, _, _ = script_env
+    proc, args = run_script(STUB_FINDMNT_FAIL="1")
+    assert proc.returncode == 1 and "cannot read the source of /iso; refusing" in proc.stderr and args is None
+
+
+def test_script_refuses_when_id_fails(script_env):
+    run_script, _, _ = script_env
+    proc, args = run_script(STUB_ID_FAIL="1")
+    assert proc.returncode == 1 and "cannot read the user id; refusing" in proc.stderr and args is None
+
+
+@pytest.mark.parametrize("uid", ["", "abc", "1000"])
+def test_script_treats_any_non_zero_uid_as_non_root(script_env, uid):
+    run_script, _, _ = script_env
+    proc, args = run_script(STUB_UID=uid)
+    assert proc.returncode == 1 and "run it as root" in proc.stderr and args is None
+
+
+def test_plan_refuses_a_usb_partition_in_its_dd_line():
+    lines = nixos.plan(host(), Context("demo"))
+    dd = next(line for line in lines if line.startswith('case "$USB" in'))
+    assert '*-part[0-9]*) echo "USB=$USB is a partition; use the whole stick" >&2 ;;' in dd
+    assert any("Unmount the stick's partitions first" in line for line in lines)
+
+
+def test_boot_loader_generation_limit():
+    assert "boot.loader.systemd-boot.configurationLimit = 10;" in nixos.render(host(), Context("demo"))["configuration.nix"]
+    bios = nixos.render(host(lambda r: r.update(firmware="bios")), Context("demo"))["configuration.nix"]
+    assert "boot.loader.grub.configurationLimit = 10;" in bios and 'size = "512M";' in nixos.render(host(), Context("demo"))["disko.nix"]

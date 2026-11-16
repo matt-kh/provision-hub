@@ -4,7 +4,8 @@ Renders ``flake.nix`` (nixpkgs + disko inputs; outputs ``nixosConfigurations.<ho
 ``nixosConfigurations.<host>-installer``), ``configuration.nix`` (the target system),
 ``disko.nix`` (GPT, ESP or BIOS boot partition, optional swap, ext4 root) and
 ``installer.nix`` (minimal installer ISO carrying the target closure and an
-``install-<host>`` command that asks for the hostname before it wipes the disk).
+``install-<host>`` command that checks the disk, then asks for the last 4 characters of its
+serial, or the hostname when it reports none, before it wipes the disk).
 
 prov never builds, writes or installs anything: ``plan`` prints the ``nix flake lock`` /
 ``nix build`` / USB / install steps for a human. ``validate`` checks the files structurally
@@ -344,12 +345,14 @@ def configuration_nix(spec: Dict[str, Any]) -> str:
         lines += [
             "  # UEFI: systemd-boot on the ESP (disko.nix mounts it at /boot).",
             "  boot.loader.systemd-boot.enable = true;",
+            "  boot.loader.systemd-boot.configurationLimit = 10; # keeps the 512M ESP from filling up",
             "  boot.loader.efi.canTouchEfiVariables = true;",
         ]
     else:
         lines += [
             "  # BIOS: GRUB in the MBR gap; disko sets boot.loader.grub.devices from the EF02 partition.",
             "  boot.loader.grub.enable = true;",
+            "  boot.loader.grub.configurationLimit = 10;",
         ]
     lines += ["", f"  networking.hostName = {nix_str(spec['hostname'])};"]
     if "domain" in spec:
@@ -527,11 +530,15 @@ def installer_nix(spec: Dict[str, Any]) -> str:
             "    text = ''",
             "      disk=${lib.escapeShellArg disk}",
             "      host=${lib.escapeShellArg hostName}",
+            "      # Every probe is captured on its own line with an explicit refusal: a failing lsblk",
+            "      # (or a pipe cut short) must stop the install, never let it through.",
+            '      refuse() { echo "install-$host: $*; refusing, nothing was changed" >&2; exit 1; }',
             '      if [ ! -t 0 ]; then',
             '        echo "install-$host: run it on a terminal; the confirmation must be typed" >&2',
             "        exit 1",
             "      fi",
-            '      if [ "$(id -u)" -ne 0 ]; then',
+            '      uid=$(id -u) || refuse "cannot read the user id"',
+            '      if [ "$uid" != "0" ]; then',
             '        echo "install-$host: run it as root: sudo install-$host" >&2',
             "        exit 1",
             "      fi",
@@ -540,9 +547,6 @@ def installer_nix(spec: Dict[str, Any]) -> str:
             "        ls -l /dev/disk/by-id/ >&2 || true",
             "        exit 1",
             "      fi",
-            "      # Every probe is captured on its own line with an explicit refusal: a failing lsblk",
-            "      # (or a pipe cut short) must stop the install, never let it through.",
-            '      refuse() { echo "install-$host: $*; refusing, nothing was changed" >&2; exit 1; }',
             '      dev=$(readlink -f "$disk") || refuse "cannot resolve $disk"',
             '      type=$(lsblk -dno TYPE "$dev") || refuse "cannot read the type of $dev"',
             '      if [ "$type" != "disk" ]; then',
@@ -555,18 +559,26 @@ def installer_nix(spec: Dict[str, Any]) -> str:
             '        lsblk -o NAME,TYPE,MOUNTPOINTS "$dev" >&2 || true',
             '        refuse "$disk ($dev) or a device on it is mounted or used as swap"',
             "      fi",
-            "      # The installer medium: the NixOS ISO mounts it at /iso (iso-image.nix); every disk",
-            "      # it sits on (through partitions, dm or md) must differ from the target. No block",
-            "      # device at /iso (copytoram) leaves nothing to compare; a medium on the target disk",
-            "      # is mounted and was refused above anyway.",
-            '      medium=$(findmnt -no SOURCE /iso || true)',
+            "      # Best effort: the installer medium is mounted at /iso (iso-image.nix); every disk it",
+            "      # sits on (through partitions, dm or md) must differ from the target. Without a block",
+            "      # device there (copytoram, netboot) nothing is compared; the mounted-disk check above",
+            "      # and the typed serial still apply.",
+            '      medium=""',
+            "      if mountpoint -q /iso; then",
+            '        medium=$(findmnt -no SOURCE /iso) || refuse "cannot read the source of /iso"',
+            "      fi",
             '      if [ -n "$medium" ] && [ -b "$medium" ]; then',
             '        ancestors=$(lsblk -nrpso NAME,TYPE "$medium") || refuse "cannot read the devices the boot medium $medium sits on"',
             "        while read -r name kind; do",
-            '          if [ "$kind" = "disk" ] && [ "$(readlink -f "$name")" = "$dev" ]; then',
-            '            refuse "$disk ($dev) is the USB stick this installer booted from"',
+            '          if [ "$kind" = "disk" ]; then',
+            '            r=$(readlink -f "$name") || refuse "cannot resolve $name"',
+            '            if [ "$r" = "$dev" ]; then',
+            '              refuse "$disk ($dev) is the USB stick this installer booted from"',
+            "            fi",
             "          fi",
             '        done <<< "$ancestors"',
+            "      else",
+            '        echo "install-$host: no block device at /iso; the boot medium was not compared" >&2',
             "      fi",
             '      serial=$(lsblk -dno SERIAL "$dev") || refuse "cannot read the serial of $dev"',
             '      serial=$(printf %s "$serial" | tr -d "[:space:]")',
@@ -808,10 +820,13 @@ def plan(spec: Dict[str, Any], ctx: Any) -> List[str]:
         "",
         "# 4. Write the ISO to a USB stick. WARNING: this WIPES the stick. Find its by-id path with",
         "#    ls -l /dev/disk/by-id/ | grep usb   and set USB to it below (double-check it).",
-        "#    A GUI writer (GNOME Disks, balenaEtcher, Rufus in DD mode) is safer than dd.",
+        "#    Unmount the stick's partitions first (desktops often automount them). A GUI writer",
+        "#    (GNOME Disks, balenaEtcher, Rufus in DD mode) is safer than dd.",
         f"ISO=$(echo {link}/iso/*.iso)",
         "USB=/dev/disk/by-id/usb-CHANGE-ME",
-        'if [ -b "$USB" ]; then sudo dd if="$ISO" of="$USB" bs=4M conv=fsync status=progress; else echo "USB=$USB is not a block device; set USB first" >&2; fi',
+        'case "$USB" in *-part[0-9]*) echo "USB=$USB is a partition; use the whole stick" >&2 ;; '
+        '*) if [ -b "$USB" ]; then sudo dd if="$ISO" of="$USB" bs=4M conv=fsync status=progress; '
+        'else echo "USB=$USB is not a block device; set USB first" >&2; fi ;; esac',
         "",
         f"# 5. WARNING: the install WIPES {disks} on the target machine.",
         f"#    Boot the target from the USB stick in {mode} mode, then run on its console:",

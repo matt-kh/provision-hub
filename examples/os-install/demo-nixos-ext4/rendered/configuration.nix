@@ -22,6 +22,7 @@ in
 
   # UEFI: systemd-boot on the ESP (disko.nix mounts it at /boot).
   boot.loader.systemd-boot.enable = true;
+  boot.loader.systemd-boot.configurationLimit = 10; # keeps the 512M ESP from filling up
   boot.loader.efi.canTouchEfiVariables = true;
 
   networking.hostName = "demo-nixos-ext4";

@@ -66,11 +66,15 @@ let
     text = ''
       disk=${lib.escapeShellArg disk}
       host=${lib.escapeShellArg hostName}
+      # Every probe is captured on its own line with an explicit refusal: a failing lsblk
+      # (or a pipe cut short) must stop the install, never let it through.
+      refuse() { echo "install-$host: $*; refusing, nothing was changed" >&2; exit 1; }
       if [ ! -t 0 ]; then
         echo "install-$host: run it on a terminal; the confirmation must be typed" >&2
         exit 1
       fi
-      if [ "$(id -u)" -ne 0 ]; then
+      uid=$(id -u) || refuse "cannot read the user id"
+      if [ "$uid" != "0" ]; then
         echo "install-$host: run it as root: sudo install-$host" >&2
         exit 1
       fi
@@ -79,9 +83,6 @@ let
         ls -l /dev/disk/by-id/ >&2 || true
         exit 1
       fi
-      # Every probe is captured on its own line with an explicit refusal: a failing lsblk
-      # (or a pipe cut short) must stop the install, never let it through.
-      refuse() { echo "install-$host: $*; refusing, nothing was changed" >&2; exit 1; }
       dev=$(readlink -f "$disk") || refuse "cannot resolve $disk"
       type=$(lsblk -dno TYPE "$dev") || refuse "cannot read the type of $dev"
       if [ "$type" != "disk" ]; then
@@ -94,18 +95,26 @@ let
         lsblk -o NAME,TYPE,MOUNTPOINTS "$dev" >&2 || true
         refuse "$disk ($dev) or a device on it is mounted or used as swap"
       fi
-      # The installer medium: the NixOS ISO mounts it at /iso (iso-image.nix); every disk
-      # it sits on (through partitions, dm or md) must differ from the target. No block
-      # device at /iso (copytoram) leaves nothing to compare; a medium on the target disk
-      # is mounted and was refused above anyway.
-      medium=$(findmnt -no SOURCE /iso || true)
+      # Best effort: the installer medium is mounted at /iso (iso-image.nix); every disk it
+      # sits on (through partitions, dm or md) must differ from the target. Without a block
+      # device there (copytoram, netboot) nothing is compared; the mounted-disk check above
+      # and the typed serial still apply.
+      medium=""
+      if mountpoint -q /iso; then
+        medium=$(findmnt -no SOURCE /iso) || refuse "cannot read the source of /iso"
+      fi
       if [ -n "$medium" ] && [ -b "$medium" ]; then
         ancestors=$(lsblk -nrpso NAME,TYPE "$medium") || refuse "cannot read the devices the boot medium $medium sits on"
         while read -r name kind; do
-          if [ "$kind" = "disk" ] && [ "$(readlink -f "$name")" = "$dev" ]; then
-            refuse "$disk ($dev) is the USB stick this installer booted from"
+          if [ "$kind" = "disk" ]; then
+            r=$(readlink -f "$name") || refuse "cannot resolve $name"
+            if [ "$r" = "$dev" ]; then
+              refuse "$disk ($dev) is the USB stick this installer booted from"
+            fi
           fi
         done <<< "$ancestors"
+      else
+        echo "install-$host: no block device at /iso; the boot medium was not compared" >&2
       fi
       serial=$(lsblk -dno SERIAL "$dev") || refuse "cannot read the serial of $dev"
       serial=$(printf %s "$serial" | tr -d "[:space:]")

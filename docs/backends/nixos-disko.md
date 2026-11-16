@@ -59,7 +59,7 @@ How the core keys map:
 |---|---|
 | `hostname`, `domain` | `networking.hostName`, `networking.domain`; the flake outputs are `nixosConfigurations.<hostname>` and `<hostname>-installer` |
 | `arch` | `nixpkgs.hostPlatform`: `x86_64-linux` / `aarch64-linux` |
-| `firmware` | UEFI: systemd-boot (`canTouchEfiVariables = true`, the install writes an EFI boot entry). BIOS: GRUB, installed to the disk through disko's EF02 partition |
+| `firmware` | UEFI: systemd-boot (`canTouchEfiVariables = true`, the install writes an EFI boot entry). BIOS: GRUB, installed to the disk through disko's EF02 partition. Both keep at most 10 generations in the boot menu (`configurationLimit = 10`), so the 512M ESP does not fill up |
 | `timezone`, `locale` | `time.timeZone`, `i18n.defaultLocale` |
 | `keyboard` | an XKB layout (as for ubuntu-autoinstall): `services.xserver.xkb.layout`, with `console.useXkbConfig = true` so the console keymap follows it; X itself stays disabled |
 | `users` | `users.users.<name>`: `isNormalUser`, `description` (gecos), `extraGroups` (groups, plus `wheel` when `sudo`), `openssh.authorizedKeys.keys`, `hashedPassword` |
@@ -167,8 +167,11 @@ files (the output of `nixos-generate-config` already is).
    ```sh
    ISO=$(echo "$HOME"/prov-iso/<hostname>-installer/iso/*.iso)
    USB=/dev/disk/by-id/usb-CHANGE-ME
-   if [ -b "$USB" ]; then sudo dd if="$ISO" of="$USB" bs=4M conv=fsync status=progress; else echo "USB=$USB is not a block device; set USB first" >&2; fi
+   case "$USB" in *-part[0-9]*) echo "USB=$USB is a partition; use the whole stick" >&2 ;; *) if [ -b "$USB" ]; then sudo dd if="$ISO" of="$USB" bs=4M conv=fsync status=progress; else echo "USB=$USB is not a block device; set USB first" >&2; fi ;; esac
    ```
+
+   Unmount the stick's partitions first (desktops often automount them). The line refuses
+   a by-id path of a partition (`…-part1`) and anything that is not a block device.
 
    A GUI writer (GNOME Disks, balenaEtcher, Rufus in DD mode) is safer than dd.
 5. **Install. This wipes the spec disk.** Boot the target from the stick (UEFI or legacy
@@ -178,8 +181,11 @@ files (the output of `nixos-generate-config` already is).
    dm, md or loop devices on top) is mounted or used as swap
    (`lsblk -nro MOUNTPOINTS` is empty); and it is none of the disks the boot medium
    mounted at `/iso` sits on (every `disk` in `lsblk -nrpso NAME,TYPE` of the `/iso`
-   source, so a stick behind a partition or a dm device is caught too). If any of these
-   `lsblk` reads fails, it refuses as well. It then shows the
+   source, so a stick behind a partition or a dm device is caught too). The boot-medium
+   comparison is best effort: when `/iso` has no block device (copytoram, netboot) it
+   prints "no block device at /iso; the boot medium was not compared" and skips it, while
+   the mounted-disk check and the typed serial still apply. If any of these reads fails
+   (including `findmnt` on a mounted `/iso`), it refuses as well. It then shows the
    disk with `lsblk` (model, serial, size, partitions) and asks you to type the last 4
    characters of the disk's serial, or the hostname when the disk reports no serial. Any
    other answer aborts without changes. Then it runs
