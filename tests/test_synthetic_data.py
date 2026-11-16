@@ -8,6 +8,7 @@ from pathlib import Path
 
 from conftest import EXAMPLES, REPO
 
+from prov.backends import nixos_disko as nixos
 from prov.backends import ubuntu_autoinstall as ubuntu
 
 DOC_NETS = [
@@ -22,6 +23,7 @@ PUBLIC_REFERENCES = (
     "github.com",
     "ghcr.io",
     "openssh.com",  # part of the sk-* key type names
+    "nixos.org",  # NixOS downloads and manuals, linked from docs
 )
 SCANNED = [EXAMPLES, REPO / "tests", REPO / "docs", REPO / "schema", REPO / "README.md", REPO / "CLAUDE.md", REPO / "CHANGELOG.md"]
 SELF = Path(__file__).resolve()
@@ -40,6 +42,7 @@ def _files():
                 yield path, path.read_text(encoding="utf-8")
     # The `prov init` starter is synthetic data too.
     yield REPO / "src/prov/backends/ubuntu_autoinstall.py", ubuntu.starter("demo")
+    yield REPO / "src/prov/backends/nixos_disko.py", nixos.starter("demo")
 
 
 def _non_doc_addresses(text):

@@ -153,13 +153,15 @@ def test_kinds_backends_and_schema(capsys):
     code, out, _ = run(capsys, "kinds")
     assert code == 0 and out.startswith("os-install\tprov/v1alpha1\tOne machine's operating-system install")
     code, out, _ = run(capsys, "backends")
-    assert code == 0 and out.startswith("ubuntu-autoinstall\tos-install\tUbuntu Server autoinstall")
+    lines = out.splitlines()
+    assert code == 0 and [line.split("\t")[:2] for line in lines] == [["nixos-disko", "os-install"], ["ubuntu-autoinstall", "os-install"]]
+    assert lines[1].startswith("ubuntu-autoinstall\tos-install\tUbuntu Server autoinstall")
     code, out2, _ = run(capsys, "backends", "--kind", "os-install")
     assert code == 0 and out2 == out
     code, out, _ = run(capsys, "schema", "os-install")
-    assert code == 0 and '"api_version"' in out and '"ubuntu-autoinstall"' in out and '"schema_version"' not in out
+    assert code == 0 and '"api_version"' in out and '"ubuntu-autoinstall"' in out and '"nixos-disko"' in out and '"schema_version"' not in out
     code, out2, _ = run(capsys, "schema", "os-install", "--backend", "ubuntu-autoinstall")
-    assert code == 0 and out2 == out  # the only built-in backend
+    assert code == 0 and '"ubuntu-autoinstall"' in out2 and '"nixos-disko"' not in out2
     with pytest.raises(SystemExit) as exc:  # removed in favour of kinds/backends
         main(["distros"])
     assert exc.value.code == 2
@@ -185,7 +187,12 @@ def test_list_examples(capsys):
     from conftest import EXAMPLES
 
     code, out, _ = run(capsys, "--root", str(EXAMPLES), "list")
-    assert code == 0 and out.splitlines() == [f"os-install/demo-{n}\tubuntu-autoinstall" for n in ("lvm", "mdraid", "zfs")]
+    assert code == 0 and out.splitlines() == [
+        "os-install/demo-lvm\tubuntu-autoinstall",
+        "os-install/demo-mdraid\tubuntu-autoinstall",
+        "os-install/demo-nixos-ext4\tnixos-disko",
+        "os-install/demo-zfs\tubuntu-autoinstall",
+    ]
 
 
 def test_list_refuses_symlinks(tmp_path, capsys):

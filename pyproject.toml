@@ -37,6 +37,7 @@ prov = "prov.cli:main"
 # Backend plugins: one module per backend; entry-point name = the backend's NAME
 # (see docs/adding-a-backend.md).
 [project.entry-points."prov.backends"]
+nixos-disko = "prov.backends.nixos_disko"
 ubuntu-autoinstall = "prov.backends.ubuntu_autoinstall"
 
 [dependency-groups]

@@ -1,0 +1,440 @@
+"""nixos-disko backend: checks, rendered files, validation, installer guard, plan."""
+
+from __future__ import annotations
+
+import copy
+import os
+import shlex
+import subprocess
+
+import pytest
+
+from prov.backends import nixos_disko as nixos
+from prov.cli import main
+from prov.plan import plan_lines
+from prov.registry import ENTRY_POINT_GROUP, Context, discover
+from prov.schema import tomllib
+from prov.spec import check_spec
+from prov.validate import ERROR, SKIPPED, WARNING
+
+DISK = "/dev/disk/by-id/nvme-EXAMPLE_SSD_SERIAL_0000000000"
+
+
+def check_host(raw):
+    return check_spec(raw, "os-install", "demo", discover())
+
+
+def starter_raw():
+    return tomllib.loads(nixos.starter("demo"))
+
+
+def host(edit=None):
+    raw = starter_raw()
+    if edit:
+        edit(raw)
+    spec, findings = check_host(raw)
+    assert spec is not None, findings
+    return spec
+
+
+def messages(findings, level=ERROR):
+    return [f.message for f in findings if f.level == level]
+
+
+def spec_findings(edit):
+    raw = starter_raw()
+    edit(raw)
+    _, findings = check_host(raw)
+    return findings
+
+
+@pytest.fixture
+def rendered(tmp_path):
+    for name, text in nixos.render(host(), Context("demo")).items():
+        (tmp_path / name).write_text(text)
+    return tmp_path
+
+
+def run(capsys, *argv):
+    code = main(list(argv))
+    out = capsys.readouterr()
+    return code, out.out, out.err
+
+
+# --- registration, starter ----------------------------------------------------------------
+
+
+def test_registered_via_entry_point():
+    from importlib.metadata import entry_points
+
+    names = {ep.name: ep.value for ep in entry_points(group=ENTRY_POINT_GROUP)}
+    assert names.get("nixos-disko") == "prov.backends.nixos_disko"
+
+
+def test_starter_is_valid_without_findings():
+    spec, findings = check_host(starter_raw())
+    assert spec is not None and findings == []
+    assert spec["nixos-disko"]["layout"] == "ext4" and spec["nixos-disko"]["release"] == "nixos-26.05"
+
+
+# --- check --------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("disks", [[DISK, "/dev/disk/by-id/ata-EXAMPLE_HDD_SERIAL_1"]])
+def test_ext4_needs_exactly_one_disk(disks):
+    findings = spec_findings(lambda r: r["storage"].update(disks=disks))
+    assert "layout 'ext4' installs to exactly one disk, got 2" in messages(findings)
+
+
+def test_zero_disks_is_rejected():
+    findings = spec_findings(lambda r: r["storage"].update(disks=[]))
+    assert "storage.disks: needs at least 1 item(s)" in messages(findings)  # the kind's schema, before check
+
+
+def test_non_by_id_disk_warns():
+    findings = spec_findings(lambda r: r["storage"].update(disks=["/dev/sda"]))
+    assert messages(findings) == []
+    assert any("is not a /dev/disk/by-id/ path" in m for m in messages(findings, WARNING))
+
+
+@pytest.mark.parametrize("shell", ["/bin/sh", "/usr/local/bin/zsh", "/bin/tcsh", "/bin/bash2"])
+def test_unsupported_shell_is_an_error(shell):
+    findings = spec_findings(lambda r: r["users"][0].update(shell=shell))
+    assert any("is not supported; use /bin/bash (the default), /bin/zsh or /bin/fish" in m for m in messages(findings))
+
+
+def test_nobody_could_log_in():
+    findings = spec_findings(lambda r: r["users"][0].update(ssh_authorized_keys=[]))
+    assert "no user has ssh_authorized_keys or password_hash; nobody could log in" in messages(findings)
+
+
+def test_arm64_bios_is_rejected():
+    findings = spec_findings(lambda r: r.update(arch="arm64", firmware="bios"))
+    assert "arm64 boots with UEFI only" in messages(findings)
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        lambda r: r["nixos-disko"].update(release="nixos-unstable"),
+        lambda r: r["nixos-disko"].update(release="26.05"),
+        lambda r: r["nixos-disko"].update(layout="zfs"),
+        lambda r: r["nixos-disko"].update(swap_size="8GB"),
+        lambda r: r["nixos-disko"].update(swap_size="0G"),
+        lambda r: r["nixos-disko"].update(packages=["git; rm"]),
+        lambda r: r["nixos-disko"].update(packages=["${evil}"]),
+        lambda r: r["nixos-disko"].update(cpu_vendor="arm"),
+        lambda r: r["nixos-disko"].pop("state_version"),
+    ],
+)
+def test_schema_rejections(edit):
+    spec, findings = check_host((lambda r: (edit(r), r)[1])(starter_raw()))
+    assert spec is None and messages(findings)
+
+
+def test_nix_keyword_package_is_rejected():
+    findings = spec_findings(lambda r: r["nixos-disko"].update(packages=["python3Packages.with"]))
+    assert any("is a Nix keyword" in m for m in messages(findings))
+
+
+def test_state_version_newer_than_release_warns():
+    findings = spec_findings(lambda r: r["nixos-disko"].update(state_version="27.05"))
+    assert any("newer than release" in m for m in messages(findings, WARNING))
+
+
+# --- render -------------------------------------------------------------------------------
+
+
+def test_render_files_and_determinism():
+    spec = host()
+    files = nixos.render(spec, Context("demo"))
+    assert sorted(files) == ["configuration.nix", "disko.nix", "flake.nix", "installer.nix"]
+    assert nixos.render(copy.deepcopy(spec), Context("demo")) == files
+    for text in files.values():
+        assert text.endswith("\n") and not any(line != line.rstrip() for line in text.splitlines())
+    assert "hardware-configuration.nix" not in files
+
+
+def test_flake_inputs_and_outputs():
+    flake = nixos.render(host(), Context("demo"))["flake.nix"]
+    assert 'nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";' in flake
+    assert f'disko.url = "github:nix-community/disko/{nixos.DISKO_REF}";' in flake
+    assert 'disko.inputs.nixpkgs.follows = "nixpkgs";' in flake
+    assert "nixosConfigurations.demo = nixpkgs.lib.nixosSystem {" in flake
+    assert "nixosConfigurations.demo-installer = nixpkgs.lib.nixosSystem {" in flake
+    assert 'nixpkgs.hostPlatform = "x86_64-linux";' in flake
+    arm = nixos.render(host(lambda r: r.update(arch="arm64")), Context("demo"))["flake.nix"]
+    assert 'nixpkgs.hostPlatform = "aarch64-linux";' in arm
+
+
+def test_uefi_renders_systemd_boot_and_esp():
+    files = nixos.render(host(), Context("demo"))
+    assert "boot.loader.systemd-boot.enable = true;" in files["configuration.nix"]
+    assert "grub" not in files["configuration.nix"]
+    assert 'type = "EF00";' in files["disko.nix"] and 'size = "512M";' in files["disko.nix"]
+    assert 'mountOptions = [ "umask=0077" ];' in files["disko.nix"] and "EF02" not in files["disko.nix"]
+    assert "--write-efi-boot-entries" in files["installer.nix"]
+
+
+def test_bios_renders_grub_and_bios_boot_partition():
+    files = nixos.render(host(lambda r: r.update(firmware="bios")), Context("demo"))
+    assert "boot.loader.grub.enable = true;" in files["configuration.nix"]
+    assert "systemd-boot" not in files["configuration.nix"]
+    assert 'type = "EF02";' in files["disko.nix"] and 'size = "1M";' in files["disko.nix"]
+    assert "EF00" not in files["disko.nix"] and "--write-efi-boot-entries" not in files["installer.nix"]
+
+
+def test_swap_present_or_absent():
+    with_swap = nixos.render(host(), Context("demo"))["disko.nix"]
+    assert 'size = "8G";' in with_swap and 'content = { type = "swap"; };' in with_swap
+    without = nixos.render(host(lambda r: r["nixos-disko"].pop("swap_size")), Context("demo"))["disko.nix"]
+    assert "swap" not in without
+
+
+def test_disk_and_root_filesystem():
+    disko = nixos.render(host(), Context("demo"))["disko.nix"]
+    assert f'device = "{DISK}";' in disko and 'format = "ext4";' in disko and 'size = "100%";' in disko
+
+
+def test_hardware_configuration_import_is_guarded():
+    conf = nixos.render(host(), Context("demo"))["configuration.nix"]
+    assert "if builtins.pathExists ./hardware-configuration.nix then [ ./hardware-configuration.nix ]" in conf
+    assert "else if builtins.pathExists ../hardware-configuration.nix then [ ../hardware-configuration.nix ]" in conf
+    assert '(modulesPath + "/installer/scan/not-detected.nix")' in conf
+    for module in nixos.INITRD_MODULES:
+        assert f'"{module}"' in conf
+
+
+def test_microcode_from_cpu_vendor():
+    assert "updateMicrocode" not in nixos.render(host(), Context("demo"))["configuration.nix"]
+    conf = nixos.render(host(lambda r: r["nixos-disko"].update(cpu_vendor="amd")), Context("demo"))["configuration.nix"]
+    assert "hardware.cpu.amd.updateMicrocode = true;" in conf
+
+
+def test_users_sudo_shell_and_password():
+    def edit(r):
+        r["users"][0].update(groups=["video"], password_hash="$6$EXAMPLE$abc")
+        r["users"].append({"name": "fishy", "shell": "/usr/bin/fish", "ssh_authorized_keys": []})
+
+    conf = nixos.render(host(edit), Context("demo"))["configuration.nix"]
+    assert 'extraGroups = [ "video" "wheel" ];' in conf
+    assert 'hashedPassword = "$6$EXAMPLE$abc";' in conf
+    assert 'users = [ "ops" ];' in conf and 'options = [ "NOPASSWD" ]' in conf
+    assert "shell = pkgs.fish;" in conf and "programs.fish.enable = true;" in conf
+    assert "programs.zsh" not in conf and "programs.bash" not in conf
+
+
+def test_network_static_dhcp_mac_mtu():
+    def edit(r):
+        r["network"]["interfaces"][0].update(macaddress="02:00:00:00:00:01", mtu=9000)
+        r["network"]["interfaces"].append({"name": "eth1", "dhcp4": True, "dhcp6": True})
+
+    conf = nixos.render(host(edit), Context("demo"))["configuration.nix"]
+    assert 'matchConfig.PermanentMACAddress = "02:00:00:00:00:01";' in conf and 'linkConfig.Name = "eth0";' in conf
+    assert 'address = [ "192.0.2.10/24" "2001:db8::10/64" ];' in conf
+    assert 'gateway = [ "192.0.2.1" "2001:db8::1" ];' in conf
+    assert 'linkConfig.MTUBytes = "9000";' in conf
+    assert 'networkConfig.DHCP = "no";' in conf and 'networkConfig.DHCP = "yes";' in conf
+    assert 'networking.nameservers = [ "192.0.2.53" "2001:db8::53" ];' in conf
+
+
+def test_ssh_hardening_and_basics():
+    conf = nixos.render(host(), Context("demo"))["configuration.nix"]
+    for needle in (
+        "PasswordAuthentication = false;",
+        "KbdInteractiveAuthentication = false;",
+        'nix.settings.experimental-features = [ "nix-command" "flakes" ];',
+        'system.stateVersion = "26.05";',
+        'networking.hostName = "demo";',
+        'networking.domain = "example.com";',
+        'time.timeZone = "Etc/UTC";',
+        'i18n.defaultLocale = "en_US.UTF-8";',
+        'console.keyMap = "us";',
+        "pkgs.git",
+    ):
+        assert needle in conf, needle
+
+
+def test_nix_strings_are_escaped():
+    assert nixos.nix_str('a"b\\c${x}$y') == '"a\\"b\\\\c\\${x}$y"'
+    conf = nixos.render(host(lambda r: r["users"][0].update(gecos='Op "${builtins.abort 1}" \\')), Context("demo"))["configuration.nix"]
+    assert 'description = "Op \\"\\${builtins.abort 1}\\" \\\\";' in conf
+    assert nixos.nix_attr("1host") == '"1host"' and nixos.nix_attr("demo-1") == "demo-1" and nixos.nix_attr("in") == '"in"'
+
+
+def test_installer_guard_and_offline_closure():
+    inst = nixos.render(host(), Context("demo"))["installer.nix"]
+    assert '(modulesPath + "/installer/cd-dvd/installation-cd-minimal.nix")' in inst
+    assert 'name = "install-${hostName}";' in inst and 'hostName = "demo";' in inst and f'disk = "{DISK}";' in inst
+    assert 'if [ ! -b "$disk" ]; then' in inst
+    assert 'lsblk -o NAME,MODEL,SERIAL,SIZE,TYPE,FSTYPE,LABEL,MOUNTPOINTS "$disk"' in inst
+    assert "read -r answer || true" in inst
+    guard = inst.index('if [ "$answer" != "$host" ]; then')
+    assert "aborted, nothing was changed" in inst[guard:] and "exit 1" in inst[guard:]
+    assert guard < inst.index("exec disko-install")
+    assert 'exec disko-install --write-efi-boot-entries --flake ${lib.escapeShellArg "${installFlake}#${hostName}"} --disk main "$disk"' in inst
+    for dep in ("toplevel", "toplevel.drvPath", "diskoScript", "diskoScript.drvPath", "stdenv.drvPath", "closureInfo { rootPaths = [ ]; }).drvPath"):
+        assert dep in inst, dep
+    assert "flakeOutPaths" in inst and 'environment.etc."install-closure".source' in inst
+    assert nixos.DISKO_REF_COMMIT in inst
+    assert "systemd.services" not in inst and "autologinUser" not in inst
+
+
+# --- validate -----------------------------------------------------------------------------
+
+
+def test_clean_render_validates(rendered):
+    findings = nixos.validate(rendered)
+    assert messages(findings) == []
+    assert messages(findings, SKIPPED) == ["nix not installed (nix-instantiate --parse)"]
+
+
+@pytest.mark.parametrize(
+    "name,edit,needle",
+    [
+        ("flake.nix", lambda t: t.replace("disko.inputs.nixpkgs.follows", "# no follows"), "follows is missing"),
+        ("flake.nix", lambda t: t.replace("nixosConfigurations.demo-installer", "nixosConfigurations.other"), "nixosConfigurations.<host>-installer"),
+        ("configuration.nix", lambda t: t.replace('networking.hostName = "demo"', 'networking.hostName = "other"'), "networking.hostName differs"),
+        ("configuration.nix", lambda t: t.replace("boot.loader.systemd-boot.enable = true;", ""), "no boot loader"),
+        ("configuration.nix", lambda t: t.replace("../hardware-configuration.nix", "../hw.nix"), "guarded hardware-configuration.nix import"),
+        ("disko.nix", lambda t: t.replace(DISK, "/dev/disk/by-id/other"), "but disko.nix partitions"),
+        ("disko.nix", lambda t: t.replace('mountpoint = "/";', 'mountpoint = "/srv";'), "a root filesystem is missing"),
+        ("installer.nix", lambda t: t.replace('if [ "$answer" != "$host" ]; then', "if false; then"), "typed-hostname confirmation"),
+        ("installer.nix", lambda t: t.replace('hostName = "demo";', 'hostName = "x";'), "hostName differs"),
+        ("installer.nix", lambda t: t.replace("in\n{\n", 'in\n{\n  systemd.services.go.script = "install-demo";\n'), "must not run anything at boot"),
+    ],
+)
+def test_broken_files_are_caught(rendered, name, edit, needle):
+    path = rendered / name
+    path.write_text(edit(path.read_text()))
+    msgs = messages(nixos.validate(rendered))
+    assert any(needle in m for m in msgs), msgs
+
+
+def test_missing_files(tmp_path):
+    msgs = [str(f) for f in nixos.validate(tmp_path)]
+    for name in nixos.FILES:
+        assert f"error: {name}: missing; run prov render" in msgs
+
+
+def test_flake_lock_is_checked_when_present(rendered):
+    (rendered / "flake.lock").write_text('{"nodes": {"root": {}}, "root": "root", "version": 7}\n')
+    assert messages(nixos.validate(rendered)) == []
+    (rendered / "flake.lock").write_text("not json\n")
+    assert any("invalid JSON" in m for m in messages(nixos.validate(rendered)))
+
+
+def test_nix_parse_runs_when_present(rendered, monkeypatch):
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        bad = argv[-1].endswith("disko.nix")
+        return subprocess.CompletedProcess(argv, 1 if bad else 0, stdout="", stderr="error: syntax error\x1b[31m" if bad else "")
+
+    monkeypatch.setattr(nixos.shutil, "which", lambda name: "/usr/bin/nix-instantiate" if name == "nix-instantiate" else None)
+    monkeypatch.setattr(nixos.subprocess, "run", fake_run)
+    findings = nixos.validate(rendered)
+    assert calls == [["/usr/bin/nix-instantiate", "--readonly-mode", "--parse", str(rendered / n)] for n in nixos.FILES]
+    assert [str(f) for f in findings if f.level == ERROR] == ["error: disko.nix: nix-instantiate --parse: error: syntax error\\x1b[31m"]
+
+
+# --- CLI: init/render/validate/plan, preserved lock, hardware file ------------------------
+
+
+@pytest.fixture
+def item(tmp_path, capsys):
+    root = str(tmp_path)
+    assert run(capsys, "--root", root, "init", "os-install/demo", "--backend", "nixos-disko")[0] == 0
+    assert run(capsys, "--root", root, "render", "os-install/demo")[0] == 0
+    return tmp_path, tmp_path / "os-install/demo"
+
+
+def test_fresh_root_round_trip(item, capsys):
+    root, idir = item
+    code, out, err = run(capsys, "--root", str(root), "validate", "os-install/demo")
+    assert code == 0 and "ok: os-install/demo" in out and "skipped: nix not installed" in out
+
+
+def test_render_keeps_flake_lock_and_hardware_file(item, capsys):
+    root, idir = item
+    lock = '{"nodes": {"root": {}}, "root": "root", "version": 7}\n'
+    (idir / "rendered/flake.lock").write_text(lock)
+    (idir / "hardware-configuration.nix").write_text("{ }\n")
+    (idir / "rendered/stray.txt").write_text("x\n")
+    code, out, _ = run(capsys, "--root", str(root), "render", "os-install/demo")
+    assert code == 0 and "removed stray.txt" in out and "flake.lock" not in out
+    assert (idir / "rendered/flake.lock").read_text() == lock
+    assert (idir / "hardware-configuration.nix").read_text() == "{ }\n"
+    assert run(capsys, "--root", str(root), "diff", "os-install/demo")[0] == 0
+    assert run(capsys, "--root", str(root), "validate", "os-install/demo")[0] == 0
+
+
+def _forbidden(*args, **kwargs):
+    raise AssertionError(f"prov plan tried to execute something: {args!r}")
+
+
+@pytest.mark.parametrize("firmware", ["uefi", "bios"])
+def test_plan_order_and_no_execution(tmp_path, capsys, monkeypatch, firmware):
+    root = str(tmp_path)
+    assert run(capsys, "--root", root, "init", "os-install/demo", "--backend", "nixos-disko")[0] == 0
+    toml = tmp_path / "os-install/demo/spec.toml"
+    toml.write_text(toml.read_text().replace('firmware = "uefi"', f'firmware = "{firmware}"'))
+    assert run(capsys, "--root", root, "render", "os-install/demo")[0] == 0
+    before = sorted((str(p), p.stat().st_mtime_ns) for p in tmp_path.rglob("*"))
+    for name in ("run", "Popen", "call", "check_call", "check_output", "getoutput", "getstatusoutput"):
+        monkeypatch.setattr(subprocess, name, _forbidden)
+    for name in ("system", "popen", "execv", "execve", "execvp", "execvpe", "spawnv", "spawnve", "posix_spawn", "fork"):
+        if hasattr(os, name):
+            monkeypatch.setattr(os, name, _forbidden)
+    code, out, _ = run(capsys, "--root", root, "plan", "os-install/demo")
+    assert code == 0
+    lines = out.splitlines()
+    order = [
+        "nixos-generate-config --no-filesystems --show-hardware-config > hardware-configuration.nix",
+        "nix flake lock",
+        "nix build .#nixosConfigurations.demo-installer.config.system.build.isoImage",
+        "sudo dd if=result/iso/<ISO-FILE> of=/dev/disk/by-id/usb-<YOUR-STICK> bs=4M conv=fsync status=progress",
+        "sudo install-demo",
+        "nixos-version",
+    ]
+    positions = [lines.index(line) for line in order]
+    assert positions == sorted(positions)
+    assert any("WIPES the stick" in line for line in lines) and any("GUI writer" in line for line in lines)
+    assert any(line.startswith("# 5. WARNING: the install WIPES " + DISK) for line in lines)
+    assert ("UEFI mode" in out) == (firmware == "uefi")
+    assert "git add ../hardware-configuration.nix" in lines
+    assert sorted((str(p), p.stat().st_mtime_ns) for p in tmp_path.rglob("*")) == before
+
+
+def test_plan_quotes_hostile_values(tmp_path):
+    spec = host()
+    spec["hostname"] = "demo;touch${IFS}/tmp/pwned"
+    spec["storage"]["disks"] = ["/dev/x;rm${IFS}-rf${IFS}~;#"]
+    spec["users"][0]["name"] = "ops$(id)"
+    spec["network"]["interfaces"][0]["addresses"] = ["192.0.2.10/24;reboot"]
+    lines = plan_lines(nixos, spec, Context("demo"), "os-install/demo", tmp_path)
+    for line in lines:
+        if line and not line.startswith("#"):
+            tokens = shlex.split(line)
+            assert not {"rm", "-rf", "touch", "id", "reboot"} & set(tokens), line
+    joined = "\n".join(lines)
+    for value in ("/dev/x;rm${IFS}-rf${IFS}~;#", "demo;touch${IFS}/tmp/pwned"):
+        assert shlex.quote(value) in joined
+    install = next(line for line in lines if line.startswith("sudo install-") or line.startswith("sudo 'install-"))
+    assert shlex.split(install) == ["sudo", "install-demo;touch${IFS}/tmp/pwned"]
+
+
+@pytest.mark.parametrize("field", ["hostname", "disk", "user"])
+def test_plan_refuses_values_with_line_breaks(tmp_path, field):
+    from prov.schema import ConfigError
+
+    spec = host()
+    if field == "hostname":
+        spec["hostname"] = "demo\nrm -rf ~"
+    elif field == "disk":
+        spec["storage"]["disks"] = ["/dev/vda\nrm -rf ~"]
+    else:
+        spec["users"][0]["name"] = "ops\rrm -rf ~"
+    with pytest.raises(ConfigError, match="line break"):
+        plan_lines(nixos, spec, Context("demo"), "os-install/demo", tmp_path)

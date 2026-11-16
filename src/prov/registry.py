@@ -121,9 +121,9 @@ def lookup(backends: Mapping[str, Backend], kind: str, name: Any) -> Backend:
 
 def builtin() -> Dict[str, ModuleType]:
     """The backends shipped with prov; the published JSON Schemas are generated from these."""
-    from .backends import ubuntu_autoinstall
+    from .backends import nixos_disko, ubuntu_autoinstall
 
-    return {ubuntu_autoinstall.NAME: ubuntu_autoinstall}
+    return {nixos_disko.NAME: nixos_disko, ubuntu_autoinstall.NAME: ubuntu_autoinstall}
 
 
 def _utf8(text: str) -> bool:
