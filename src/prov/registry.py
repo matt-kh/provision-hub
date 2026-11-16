@@ -21,7 +21,8 @@ from typing import Any, Callable, Dict, Mapping, Tuple
 
 from . import kinds
 from .kinds.common import DEFS
-from .schema import ID_PATTERN, ConfigError, short_repr
+from .schema import ID_PATTERN, ConfigError
+from .text import esc, short_repr
 from .validate import Finding, check_schema_fragment
 
 ENTRY_POINT_GROUP = "prov.backends"
@@ -65,20 +66,20 @@ def check_contract(plugin: Backend, origin: str) -> None:
     try:
         check_schema_fragment(plugin.SCHEMA, f"[{plugin.NAME}]", defs=DEFS, allow_defs=False)
     except ValueError as exc:
-        raise ConfigError(f"backend plugin {origin}: invalid SCHEMA: {exc}") from None
+        raise ConfigError(f"backend plugin {origin}: invalid SCHEMA: {esc(str(exc))}") from None
     except Exception as exc:  # backstop: a schema shape the checker did not anticipate
-        raise ConfigError(f"backend plugin {origin}: invalid SCHEMA: {type(exc).__name__}: {exc}") from None
+        raise ConfigError(f"backend plugin {origin}: invalid SCHEMA: {esc(type(exc).__name__)}: {esc(str(exc))}") from None
 
 
 def discover() -> Dict[str, Backend]:
     """Load every registered backend, keyed by NAME, ordered by (KIND, NAME)."""
     found: Dict[str, Backend] = {}
     for ep in entry_points(group=ENTRY_POINT_GROUP):
-        origin = f"{ep.name} = {ep.value}"
+        origin = esc(f"{ep.name} = {ep.value}")
         try:
             plugin = ep.load()
         except Exception as exc:  # a broken third-party plugin must not hide the others' errors
-            raise ConfigError(f"cannot load backend plugin {origin}: {exc}") from exc
+            raise ConfigError(f"cannot load backend plugin {origin}: {esc(str(exc))}") from exc
         check_contract(plugin, origin)
         if plugin.NAME != ep.name:
             raise ConfigError(f"backend plugin {origin}: entry-point name differs from NAME {plugin.NAME!r}")
@@ -134,15 +135,19 @@ RETURN_CHECKS: Dict[str, Tuple[Callable[[Any], bool], str]] = {
 
 
 def call_plugin(plugin: Backend, method: str, *args: Any) -> Any:
-    """Run a backend method; exceptions and wrongly typed results become a ConfigError."""
-    name = getattr(plugin, "NAME", "?")
+    """Run a backend method; exceptions and wrongly typed results become a ConfigError.
+
+    Plugin text in the message (exception text, a plugin's own ConfigError) is escaped with
+    ``prov.text.esc``, so it is always one printable line.
+    """
+    name = short_repr(getattr(plugin, "NAME", "?"))
     try:
         result = getattr(plugin, method)(*args)
-    except ConfigError:
-        raise
+    except ConfigError as exc:  # a plugin's own error: keep its text, escaped, and name the plugin
+        raise ConfigError(f"backend {name} failed in {method}: {esc(str(exc))}") from exc
     except Exception as exc:
-        raise ConfigError(f"backend {name!r} failed in {method}: {type(exc).__name__}: {exc}") from exc
+        raise ConfigError(f"backend {name} failed in {method}: {esc(type(exc).__name__)}: {esc(str(exc))}") from exc
     check, expected = RETURN_CHECKS.get(method, (lambda v: True, ""))
     if not check(result):
-        raise ConfigError(f"backend {name!r} failed in {method}: returned {type(result).__name__}, expected {expected}")
+        raise ConfigError(f"backend {name} failed in {method}: returned {esc(type(result).__name__)}, expected {expected}")
     return result

@@ -16,8 +16,9 @@ from .kinds.common import DEFS
 from .plan import plan_lines
 from .registry import Context, call_plugin, discover, for_kind, lookup
 from .render import atomic_write, diff_rendered, safe_item_dir, special_entries, write_rendered
-from .schema import ID_PATTERN, NAME_PATTERN, SPEC_FILE, ConfigError, api_versions, read_toml, schema_json, short_repr, show, spec_schema, tomllib
+from .schema import ID_PATTERN, NAME_PATTERN, SPEC_FILE, ConfigError, api_versions, read_toml, schema_json, spec_schema, tomllib
 from .spec import check_spec, load_spec, parse_ref
+from .text import esc, short_repr, show
 from .validate import ERROR, Finding, has_errors
 
 EXIT_OK, EXIT_FINDINGS, EXIT_USAGE = 0, 1, 2
@@ -54,7 +55,7 @@ def _print_findings(findings: List[Any]) -> None:
 
 def _summary(obj: Any) -> str:
     doc = (getattr(obj, "__doc__", None) or "").strip().splitlines()
-    return doc[0] if doc else ""
+    return esc(doc[0]) if doc else ""  # plugin text
 
 
 def cmd_kinds(args: argparse.Namespace) -> int:
@@ -90,7 +91,7 @@ def cmd_list(args: argparse.Namespace) -> int:
     """
     root = Path(args.root)
     if not root.is_dir():
-        raise ConfigError(f"root {root} does not exist or is not a directory")
+        raise ConfigError(f"root {show(str(root))} does not exist or is not a directory")
     root = root.resolve()
     problems: List[Finding] = []
     for kind in sorted(kinds.KINDS):
@@ -111,7 +112,7 @@ def cmd_list(args: argparse.Namespace) -> int:
             continue
         for entry in entries:
             valid = re.fullmatch(NAME_PATTERN.strip("^$"), entry.name) is not None
-            ref = f"{kind}/{entry.name}" if valid else f"{kind}/{short_repr(entry.name)}"
+            ref = f"{kind}/{entry.name}" if valid else f"{kind}/{show(entry.name)}"
             try:
                 what = _entry_kind(entry)
                 if what == "symlink":
@@ -123,12 +124,12 @@ def cmd_list(args: argparse.Namespace) -> int:
                 problems.append(Finding(ERROR, f"cannot read: {exc.strerror or exc}", ref))
                 continue
             if not valid:
-                problems.append(Finding(ERROR, f"invalid item name {short_repr(entry.name)} (lowercase letters, digits, '-'; one DNS label)", ref))
+                problems.append(Finding(ERROR, f"invalid item name '{show(entry.name)}' (lowercase letters, digits, '-'; one DNS label)", ref))
                 continue
             try:
                 raw = read_toml(entry / SPEC_FILE)
             except ConfigError as exc:
-                problems.append(Finding(ERROR, str(exc).replace(str(entry / SPEC_FILE) + ": ", ""), ref))
+                problems.append(Finding(ERROR, str(exc).replace(show(str(entry / SPEC_FILE)) + ": ", ""), ref))
                 continue
             backend = raw.get("backend")
             print(f"{ref}\t{backend if isinstance(backend, str) and re.fullmatch(ID_PATTERN.strip('^$'), backend) else '-'}")
@@ -153,19 +154,19 @@ def cmd_init(args: argparse.Namespace) -> int:
         raise ConfigError(f"backend {args.backend!r} provides no starter spec.toml")
     path = safe_item_dir(args.root, kind, name) / SPEC_FILE
     if path.is_symlink():
-        raise ConfigError(f"{path} is a symlink; prov refuses to write through symlinks")
+        raise ConfigError(f"{show(str(path))} is a symlink; prov refuses to write through symlinks")
     if path.exists() and not args.force:
-        raise ConfigError(f"{path} exists (use --force to overwrite)")
+        raise ConfigError(f"{show(str(path))} exists (use --force to overwrite)")
     text = call_plugin(plugin, "starter", name)
     try:
         spec, findings = check_spec(tomllib.loads(text), kind, name, backends)
     except (ConfigError, tomllib.TOMLDecodeError) as exc:
-        raise ConfigError(f"starter spec.toml of backend {args.backend!r} is invalid: {exc}") from None
+        raise ConfigError(f"starter spec.toml of backend {args.backend!r} is invalid: {esc(str(exc))}") from None
     if spec is None:  # a broken starter is a plugin bug; never write it
         raise ConfigError("starter spec.toml is invalid: " + "; ".join(str(f) for f in findings))
     path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write(path, text)
-    print(f"wrote {path}")
+    print(f"wrote {show(str(path))}")
     return EXIT_OK
 
 
@@ -175,7 +176,7 @@ def cmd_render(args: argparse.Namespace) -> int:
     changes = write_rendered(idir / "rendered", call_plugin(plugin, "render", spec, ctx))
     for line in changes:
         print(line)
-    print(f"rendered {args.ref} ({plugin.NAME}): {len(changes)} change(s) in {idir / 'rendered'}")
+    print(f"rendered {args.ref} ({plugin.NAME}): {len(changes)} change(s) in {show(str(idir / 'rendered'))}")
     return EXIT_OK
 
 
@@ -197,7 +198,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
     try:
         spec, findings = check_spec(raw, kind, name, backends)
     except ConfigError as exc:
-        raise ConfigError(f"{path}: {exc}") from None
+        raise ConfigError(f"{show(str(path))}: {exc}") from None
     if spec is not None:
         plugin, ctx = backends[spec["backend"]], Context(name)
         rendered = idir / "rendered"
@@ -278,8 +279,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     except ValueError as exc:  # e.g. an unsupported schema keyword or $ref
         message = str(exc)
     except OSError as exc:  # IsADirectoryError, PermissionError, ...
-        message = f"{exc.filename + ': ' if exc.filename else ''}{exc.strerror or exc}"
-    print(f"prov: error: {message}", file=sys.stderr)
+        filename = show(os.fsdecode(exc.filename)) + ": " if exc.filename else ""
+        message = f"{filename}{exc.strerror or exc}"
+    # The printing boundary: plugin and filesystem text was escaped where it entered the
+    # message; escape again here so nothing unsafe can reach the terminal. Only core's own
+    # multi-line messages (a spec's list of errors) keep their newlines.
+    print(f"prov: error: {esc(message, keep=chr(10))}", file=sys.stderr)
     return EXIT_USAGE
 
 

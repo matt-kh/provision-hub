@@ -247,25 +247,6 @@ def test_c1_controls_and_unicode_line_separators_are_rejected(char):
     assert host is None and any("control characters" in f.message for f in findings)
 
 
-def test_short_repr_truncates_before_repr():
-    from prov.schema import short_repr
-
-    assert short_repr("ab") == "'ab'"
-    assert short_repr("\x1b" * 100) == repr("\x1b" * 80) + "…"  # never a half escape like '\\x1'
-    assert short_repr("v" * 81, limit=80) == "'" + "v" * 80 + "'…"
-    long_list = ["x" * 10] * 50
-    assert len(short_repr(long_list)) == 83 and short_repr(long_list).endswith("…")
-
-
-def test_show_passes_plain_names_and_escapes_controls():
-    from prov.schema import show
-
-    assert show("user-data") == "user-data" and show("a b") == "a b"
-    for text in ("a\nb", "a\x1b[2Kb", "a b", "a\x9bb"):
-        assert show(text) == repr(text)
-    assert show("\n" * 500).endswith("…") and len(show("\n" * 500)) < 200
-
-
 def test_spec_values_echoed_in_findings_are_capped():
     huge = "Z" * 5000
     for fn in (

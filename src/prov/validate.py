@@ -12,7 +12,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, List, Mapping, Optional
 
-from .schema import CONTROL_CHARS, short_repr
+from .text import esc, short_repr
 
 
 ERROR = "error"
@@ -37,7 +37,9 @@ class Finding:
     where: str = ""
 
     def __str__(self) -> str:
-        return f"{self.level}: {self.where + ': ' if self.where else ''}{self.message}"
+        """One printable line: every field is escaped (``prov.text.esc``); findings may come from plugins."""
+        where = esc(str(self.where))
+        return f"{esc(str(self.level))}: {where + ': ' if where else ''}{esc(str(self.message))}"
 
 
 def has_errors(findings: List[Finding]) -> bool:
@@ -60,7 +62,8 @@ _TYPES = {
     "number": _is_number,
 }
 
-_CONTROL = CONTROL_CHARS
+# Spec values may not hold C0/C1 controls, DEL or the Unicode line/paragraph separators.
+_CONTROL = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029]")
 
 
 def json_equal(a: Any, b: Any) -> bool:

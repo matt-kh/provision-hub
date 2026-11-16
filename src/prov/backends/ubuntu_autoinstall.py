@@ -15,6 +15,7 @@ from typing import Any, Dict, List
 
 import yaml
 
+from ..text import esc
 from ..util import NotRegularFileError, dump_yaml, read_regular_text
 from ..validate import ERROR, SKIPPED, WARNING, Finding
 
@@ -363,7 +364,7 @@ def _external(path: Path) -> List[Finding]:
         return [Finding(ERROR, f"cloud-init schema could not run: {exc.strerror or exc}", path.name)]
     if proc.returncode != 0:
         detail = (proc.stdout + proc.stderr).strip().splitlines()
-        return [Finding(ERROR, "cloud-init schema: " + " | ".join(detail[-5:]), path.name)]
+        return [Finding(ERROR, "cloud-init schema: " + esc(" | ".join(detail[-5:])), path.name)]
     return []
 
 

@@ -14,7 +14,8 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 from . import kinds
 from .kinds.common import DEFS
 from .registry import Context, call_plugin, for_kind, lookup
-from .schema import ID_PATTERN, LEGACY_KEYS, LEGACY_TABLES, NAME_PATTERN, ConfigError, api_versions, read_toml, short_repr, spec_schema
+from .schema import ID_PATTERN, LEGACY_KEYS, LEGACY_TABLES, NAME_PATTERN, ConfigError, api_versions, read_toml, spec_schema
+from .text import show, short_repr
 from .validate import ERROR, WARNING, Finding, apply_defaults, has_errors, schema_errors
 
 
@@ -109,8 +110,8 @@ def load_spec(path: Path, kind_name: str, name: str, backends: Mapping[str, Any]
     try:
         spec, findings = check_spec(raw, kind_name, name, backends)
     except ConfigError as exc:
-        raise ConfigError(f"{path}: {exc}") from None
+        raise ConfigError(f"{show(str(path))}: {exc}") from None
     if spec is None:
         lines = "\n".join(f"  {f}" for f in findings if f.level == ERROR)
-        raise ConfigError(f"{path}: invalid spec:\n{lines}")
+        raise ConfigError(f"{show(str(path))}: invalid spec:\n{lines}")
     return spec, findings

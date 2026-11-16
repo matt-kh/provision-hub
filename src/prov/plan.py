@@ -2,8 +2,10 @@
 
 The backend's ``plan(spec, ctx)`` returns lines (shell commands and ``#`` comments) written
 relative to the item's rendered directory; this module adds the common header and refuses
-any line that would print as more than one line (a spec value smuggling a newline could
-otherwise turn a comment into a command).
+any line holding a line break or another unsafe character (``prov.text.unsafe``): a spec
+value smuggling a newline could otherwise turn a comment into a command, and an escape or
+bidi control could make a pasted line differ from what the terminal shows. Plan lines are
+refused, never escaped, so what is printed is exactly what a human pastes.
 """
 
 from __future__ import annotations
@@ -13,7 +15,8 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from .registry import Context, call_plugin
-from .schema import ConfigError, short_repr
+from .schema import ConfigError
+from .text import short_repr, unsafe
 
 
 def plan_lines(plugin: Any, spec: Dict[str, Any], ctx: Context, ref: str, rendered_dir: Path) -> List[str]:
@@ -22,8 +25,20 @@ def plan_lines(plugin: Any, spec: Dict[str, Any], ctx: Context, ref: str, render
         f"# review them and run them yourself. Render first: prov render {shlex.quote(ref)}.",
         f"cd {shlex.quote(str(rendered_dir))}",
     ]
-    lines.extend(call_plugin(plugin, "plan", spec, ctx))
     for n, line in enumerate(lines):
-        if "\n" in line or "\r" in line:
-            raise ConfigError(f"plan line {n} contains a line break; refusing to print it: {short_repr(line)}")
+        if _refused(line):
+            raise ConfigError(f"plan header line {n} contains a line break or an unsafe character; refusing to print it: {short_repr(line)}")
+    for n, line in enumerate(call_plugin(plugin, "plan", spec, ctx)):
+        if _refused(line):
+            raise ConfigError(
+                f"backend {short_repr(plugin.NAME)} plan line {n} contains a line break or an unsafe character; "
+                f"refusing to print it: {short_repr(line)}"
+            )
+        lines.append(line)
     return lines
+
+
+def _refused(line: str) -> bool:
+    """Plan lines must stay paste-able, so they are refused rather than escaped: a line break
+    (``\\n``, ``\\r``) or any character ``prov.text.unsafe`` flags, except the tab."""
+    return any(ch != "\t" and unsafe(ch) for ch in line)

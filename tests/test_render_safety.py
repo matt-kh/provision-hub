@@ -316,9 +316,10 @@ HOSTILE_NAMES = ["evil\nok: forged\x1b[2K", "\x1b[31mred", "\x1b]0;title\x07", "
 
 
 def _has_raw_controls(text):
-    from prov.schema import CONTROL_CHARS
+    """True if ``text`` holds anything but printable characters, newlines and tabs."""
+    from prov.text import has_unsafe
 
-    return CONTROL_CHARS.search(text.replace("\n", "")) is not None
+    return has_unsafe(text.replace("\n", "").replace("\t", ""))
 
 
 @pytest.mark.parametrize("name", HOSTILE_NAMES)
@@ -336,19 +337,25 @@ def test_unsafe_names_in_rendered_are_reported_never_printed_raw(tmp_path, capsy
         bad = rendered / name
         rel = name
     bad.write_text("TOPSECRET\n")
-    shown = repr(rel)
+    from prov.text import esc
+
+    shown = esc(rel)
 
     code, out, err = run(capsys, "--root", str(tmp_path), "diff", "os-install/demo")
-    assert code == 1 and out == f"file with an unsafe name {shown} would be removed\n"
+    kind = "directory with an unsafe name" if nested else "file with an unsafe name"
+    expected = f"file with an unsafe name {shown} would be removed\n"
+    if nested:  # the directory sorts before its content
+        expected = f"directory with an unsafe name {esc(name)} would be removed\n" + expected
+    assert code == 1 and out == expected
     assert "TOPSECRET" not in out + err and not _has_raw_controls(out + err)
 
     code, out, err = run(capsys, "--root", str(tmp_path), "validate", "os-install/demo")
     assert code == 1 and f"error: rendered/{shown}: symlink, special file or unsafely named file" in err
-    assert err.count("\n") == 2 and "error: rendered: out of date" in err  # one line per finding, no forged lines
+    assert err.count("\n") == (3 if nested else 2) and "error: rendered: out of date" in err  # one line per finding
     assert "TOPSECRET" not in out + err and not _has_raw_controls(out + err)
 
     code, out, err = run(capsys, "--root", str(tmp_path), "render", "os-install/demo")
-    assert code == 0 and f"removed file with an unsafe name {shown}\n" in out
+    assert code == 0 and f"removed file with an unsafe name {shown}\n" in out and kind
     assert not _has_raw_controls(out + err) and not any(line.startswith("ok: forged") for line in out.splitlines())
     assert sorted(p.name for p in rendered.iterdir()) == ["kernel-cmdline", "meta-data", "user-data"]
     assert run(capsys, "--root", str(tmp_path), "validate", "os-install/demo")[0] == 0

@@ -349,6 +349,8 @@ def test_wrongly_typed_plugin_results_exit_2(tmp_path, capsys, monkeypatch, meth
 @pytest.mark.parametrize("name", ["x\nerror: forged line\x1b[2K", "\x1b]0;title\x07", "Bad Name\r"])
 def test_list_never_prints_raw_hostile_names(tmp_path, capsys, name):
     """Review W1: a planted name cannot forge output lines or terminal escapes."""
+    from prov.text import esc
+
     root = tmp_path / "root"
     run(capsys, "--root", str(root), "init", "os-install/web", "--backend", "ubuntu-autoinstall")
     (root / "os-install" / name).symlink_to(tmp_path, target_is_directory=True)
@@ -356,13 +358,13 @@ def test_list_never_prints_raw_hostile_names(tmp_path, capsys, name):
     assert code == 1 and out == "os-install/web\tubuntu-autoinstall\n"
     assert "\x1b" not in out + err and "\r" not in out + err
     assert err.count("\n") == 1 and "forged line\n" not in err
-    assert f"error: os-install/{name!r}: is a symlink; refused" in err
+    assert f"error: os-install/{esc(name)}: is a symlink; refused" in err
     (root / "os-install" / name).unlink()
     (root / "os-install" / name).mkdir()
     (root / "os-install" / name / "spec.toml").write_text("x = 1\n")
     code, out, err = run(capsys, "--root", str(root), "list")
     assert code == 1 and "\x1b" not in out + err and err.count("\n") == 1
-    assert f"error: os-install/{name!r}: invalid item name {name!r}" in err
+    assert f"error: os-install/{esc(name)}: invalid item name '{esc(name)}'" in err
 
 
 def test_list_invalid_name_without_spec_is_ignored(tmp_path, capsys):

@@ -146,7 +146,7 @@ def test_call_plugin_checks_return_types(method, value, needle):
         call_plugin(plugin, method, None, None) if method not in ("validate", "starter") else call_plugin(plugin, method, None)
 
 
-def test_call_plugin_wraps_exceptions_but_passes_config_errors():
+def test_call_plugin_wraps_exceptions_and_names_the_plugin_in_its_config_errors():
     def boom(*a):
         raise KeyError("oops")
 
@@ -155,7 +155,7 @@ def test_call_plugin_wraps_exceptions_but_passes_config_errors():
 
     with pytest.raises(ConfigError, match="backend 'talos' failed in render: KeyError"):
         call_plugin(fake_backend(render=boom), "render", {}, Context("x"))
-    with pytest.raises(ConfigError, match="^plugin says no$"):
+    with pytest.raises(ConfigError, match="^backend 'talos' failed in render: plugin says no$"):
         call_plugin(fake_backend(render=config), "render", {}, Context("x"))
 
 

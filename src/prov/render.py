@@ -15,7 +15,8 @@ import tempfile
 from pathlib import Path, PurePosixPath
 from typing import Dict, List, Tuple
 
-from .schema import CONTROL_CHARS, ConfigError, short_repr, show
+from .schema import ConfigError
+from .text import esc, has_unsafe, show
 
 
 def safe_item_dir(root: Path, kind: str, name: str) -> Path:
@@ -32,12 +33,12 @@ def safe_item_dir(root: Path, kind: str, name: str) -> Path:
     owned = (idir / "rendered", idir / "build")
     for path in (kdir, idir) + owned:
         if path.is_symlink():
-            raise ConfigError(f"{path} is a symlink; prov refuses to write through symlinks")
+            raise ConfigError(f"{show(str(path))} is a symlink; prov refuses to write through symlinks")
     if kdir.exists() and not kdir.resolve().is_relative_to(root):
-        raise ConfigError(f"{kdir} resolves outside {root}")
+        raise ConfigError(f"{show(str(kdir))} resolves outside {show(str(root))}")
     for path in (idir,) + owned:
         if path.exists() and not path.resolve().is_relative_to(kdir.resolve()):
-            raise ConfigError(f"{path} resolves outside {kdir}")
+            raise ConfigError(f"{show(str(path))} resolves outside {show(str(kdir))}")
     return idir
 
 
@@ -45,26 +46,29 @@ def check_paths(files: Dict[str, str]) -> None:
     """Reject absolute, escaping or control-character paths returned by a plugin."""
     for name in files:
         p = PurePosixPath(name)
-        if p.is_absolute() or ".." in p.parts or not p.parts or CONTROL_CHARS.search(name):
-            raise ConfigError(f"plugin returned an unsafe output path: {short_repr(name)}")
+        if p.is_absolute() or ".." in p.parts or not p.parts or has_unsafe(name):
+            raise ConfigError(f"plugin returned an unsafe output path: '{show(name)}'")
 
 
 def _walk(rendered_dir: Path) -> Tuple[List[Path], List[Path], List[Path]]:
     """(regular files, others, directories) under ``rendered_dir``, classified by lstat.
 
     "Others" are symlinks and special files (FIFOs, sockets, devices): never followed, never
-    opened (opening a FIFO would block). Regular files whose relative path holds a control
-    character are "others" too: no backend can have written them (``check_paths``), so they
-    are never read or diffed, only reported and removed.
+    opened (opening a FIFO would block). Any entry whose relative path holds an unsafe
+    character (``prov.text.unsafe``: controls, bidi/zero-width, lone surrogates from a
+    non-UTF-8 name ...) is an "other" too, directories included: no backend can have written
+    it (``check_paths``), so it is never read or diffed, only reported and removed.
     """
     files, others, dirs = [], [], []
     for top, dirnames, filenames in os.walk(rendered_dir, followlinks=False):
         for name in dirnames + filenames:
             path = Path(top) / name
             mode = os.lstat(path).st_mode
-            if stat.S_ISDIR(mode):
+            if has_unsafe(path.relative_to(rendered_dir).as_posix()):
+                others.append(path)
+            elif stat.S_ISDIR(mode):
                 dirs.append(path)
-            elif stat.S_ISREG(mode) and not CONTROL_CHARS.search(path.relative_to(rendered_dir).as_posix()):
+            elif stat.S_ISREG(mode):
                 files.append(path)
             else:
                 others.append(path)
@@ -76,13 +80,17 @@ def describe_other(path: Path) -> str:
     mode = os.lstat(path).st_mode
     if stat.S_ISLNK(mode):
         return "symlink"
-    return "file with an unsafe name" if stat.S_ISREG(mode) else "special file"
+    if stat.S_ISREG(mode):
+        return "file with an unsafe name"
+    if stat.S_ISDIR(mode):
+        return "directory with an unsafe name"
+    return "special file"
 
 
 def special_entries(rendered_dir: Path) -> List[str]:
     """Relative paths of symlinks, special files and unsafely named files under ``rendered_dir``.
 
-    The paths are raw; print them through ``prov.schema.show``.
+    The paths are raw; print them through ``prov.text.show``.
     """
     if rendered_dir.is_symlink() or not rendered_dir.is_dir():
         return []
@@ -140,10 +148,10 @@ def _write(rendered_dir: Path, name: str, text: str) -> None:
     for part in PurePosixPath(name).parts[:-1]:
         current = current / part
         if current.is_symlink():
-            raise ConfigError(f"{current} is a symlink; prov refuses to write through symlinks")
+            raise ConfigError(f"{show(str(current))} is a symlink; prov refuses to write through symlinks")
         current.mkdir(exist_ok=True)
     if not target.parent.resolve().is_relative_to(base):
-        raise ConfigError(f"{target} resolves outside {rendered_dir}")
+        raise ConfigError(f"{show(str(target))} resolves outside {show(str(rendered_dir))}")
     atomic_write(target, text)
 
 
@@ -151,13 +159,18 @@ def write_rendered(rendered_dir: Path, files: Dict[str, str]) -> List[str]:
     """Make ``rendered_dir`` hold exactly ``files``; return a sorted change summary."""
     check_paths(files)
     if rendered_dir.is_symlink():
-        raise ConfigError(f"{rendered_dir} is a symlink; prov refuses to write through symlinks")
+        raise ConfigError(f"{show(str(rendered_dir))} is a symlink; prov refuses to write through symlinks")
     changes: List[str] = []
     if rendered_dir.is_dir():
         _, others, _ = _walk(rendered_dir)
-        for other in others:  # never prov output; unlink does not touch a link's target
+        # never prov output; deepest first so an unsafely named directory is empty when removed;
+        # unlink does not touch a link's target
+        for other in sorted(others, key=lambda p: len(p.parts), reverse=True):
             kind = describe_other(other)
-            other.unlink()
+            if kind == "directory with an unsafe name":
+                other.rmdir()
+            else:
+                other.unlink()
             changes.append(f"removed {kind} {show(other.relative_to(rendered_dir).as_posix())}")
     current = existing_files(rendered_dir)
     for name in sorted(set(current) - set(files)):
@@ -180,8 +193,9 @@ def write_rendered(rendered_dir: Path, files: Dict[str, str]) -> List[str]:
 def diff_rendered(rendered_dir: Path, files: Dict[str, str]) -> str:
     """Unified diff from what is on disk to a fresh render; empty when identical.
 
-    File names are shown through ``show``; file contents appear raw, behind the diff's
-    ``+``/``-``/`` `` prefix, as in ``git diff``.
+    File names are shown through ``show``; in file contents every unsafe character except
+    newline and tab is escaped too (``prov.text.esc``), so the output is for reading, not a
+    patch to apply.
     """
     check_paths(files)
     current = existing_files(rendered_dir)
@@ -202,4 +216,4 @@ def diff_rendered(rendered_dir: Path, files: Dict[str, str]) -> str:
                 tofile=f"b/{show(name)}" if new is not None else "/dev/null",
             )
         )
-    return "".join(line if line.endswith("\n") else line + "\n" for line in chunks)
+    return "".join(esc(line if line.endswith("\n") else line + "\n", keep="\n\t") for line in chunks)

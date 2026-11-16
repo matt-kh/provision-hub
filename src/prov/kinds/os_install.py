@@ -10,6 +10,7 @@ import ipaddress
 from typing import Any, Dict, List
 
 from ..schema import NAME_PATTERN
+from ..text import short_repr
 from ..validate import ERROR, WARNING, Finding
 from .common import string, string_list
 
@@ -71,25 +72,25 @@ def semantic(spec: Dict[str, Any]) -> List[Finding]:
     ifaces = spec["network"]["interfaces"]
     names = [i["name"] for i in ifaces]
     for dup in sorted({n for n in names if names.count(n) > 1}):
-        out.append(Finding(ERROR, f"interface {dup!r} defined more than once", "network.interfaces"))
+        out.append(Finding(ERROR, f"interface {short_repr(dup)} defined more than once", "network.interfaces"))
     for n, iface in enumerate(ifaces):
         where = f"network.interfaces[{n}]"
         families = set()
         for a, addr in enumerate(iface["addresses"]):
             if "/" not in addr:
-                out.append(Finding(ERROR, f"{addr!r} needs a prefix length (CIDR form)", f"{where}.addresses[{a}]"))
+                out.append(Finding(ERROR, f"{short_repr(addr)} needs a prefix length (CIDR form)", f"{where}.addresses[{a}]"))
                 continue
             try:
                 families.add(ipaddress.ip_interface(addr).version)
             except ValueError:
-                out.append(Finding(ERROR, f"{addr!r} is not an IP address in CIDR form", f"{where}.addresses[{a}]"))
+                out.append(Finding(ERROR, f"{short_repr(addr)} is not an IP address in CIDR form", f"{where}.addresses[{a}]"))
         for key, version in (("gateway4", 4), ("gateway6", 6)):
             if key not in iface:
                 continue
             try:
                 gw = ipaddress.ip_address(iface[key])
             except ValueError:
-                out.append(Finding(ERROR, f"{iface[key]!r} is not an IP address", f"{where}.{key}"))
+                out.append(Finding(ERROR, f"{short_repr(iface[key])} is not an IP address", f"{where}.{key}"))
                 continue
             if gw.version != version:
                 out.append(Finding(ERROR, f"{iface[key]} is not an IPv{version} address", f"{where}.{key}"))
@@ -101,9 +102,9 @@ def semantic(spec: Dict[str, Any]) -> List[Finding]:
         try:
             ipaddress.ip_address(server)
         except ValueError:
-            out.append(Finding(ERROR, f"{server!r} is not an IP address", f"network.dns.nameservers[{s}]"))
+            out.append(Finding(ERROR, f"{short_repr(server)} is not an IP address", f"network.dns.nameservers[{s}]"))
 
     users = [u["name"] for u in spec["users"]]
     for dup in sorted({n for n in users if users.count(n) > 1}):
-        out.append(Finding(ERROR, f"user {dup!r} defined more than once", "users"))
+        out.append(Finding(ERROR, f"user {short_repr(dup)} defined more than once", "users"))
     return out

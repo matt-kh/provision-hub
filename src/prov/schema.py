@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import copy
 import json
-import re
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Mapping
@@ -42,29 +41,6 @@ ENVELOPE_KEYS = ("api_version", "kind", "backend")
 LEGACY_KEYS = ("schema_version", "distro")
 # Tables of that format; a hint only when api_version is missing (a backend could own the name later).
 LEGACY_TABLES = ("ubuntu",)
-
-REPR_LIMIT = 80
-
-# C0 and C1 controls, DEL, and the Unicode line/paragraph separators: never printed raw.
-CONTROL_CHARS = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029]")
-
-
-def short_repr(value: object, limit: int = REPR_LIMIT) -> str:
-    """``repr(value)`` for echoing user values in errors, capped near ``limit`` characters.
-
-    A string is shortened *before* ``repr`` (then "…"), so an escape sequence is never cut in
-    half; other values are repr'd whole and cut. ``repr`` escapes every control character.
-    """
-    if isinstance(value, str) and len(value) > limit:
-        return repr(value[:limit]) + "…"
-    text = repr(value)
-    return text if len(text) <= limit + 2 else text[: limit + 2] + "…"
-
-
-def show(text: str) -> str:
-    """A filesystem- or user-derived name as printable text: as is, or a capped repr if it
-    holds a control character (newline, ESC, U+2028 ...), so it can never forge output lines."""
-    return short_repr(text) if CONTROL_CHARS.search(text) else text
 
 
 class ConfigError(Exception):
@@ -122,8 +98,12 @@ def spec_schema(kind: Any, backends: Mapping[str, Any], defs: Mapping[str, Any])
 
 
 def schema_json(schema: Mapping[str, Any]) -> str:
-    """Canonical serialisation used for the published file."""
-    return json.dumps(schema, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+    """Canonical serialisation used for the published file and ``prov schema``.
+
+    ASCII only: any non-ASCII character (including a plugin description's controls or bidi
+    marks) is a JSON ``\\uNNNN`` escape, so the output is safe to print and still valid JSON.
+    """
+    return json.dumps(schema, indent=2, sort_keys=True, ensure_ascii=True) + "\n"
 
 
 MAX_SPEC_FILE_BYTES = 1024 * 1024
@@ -135,21 +115,24 @@ def read_toml(path: Path) -> Dict[str, Any]:
     spec.toml must be a regular file of at most 1 MiB. Symlinks are refused outright (as are
     FIFOs and devices, which would block or never end): keep spec files as plain files.
     """
+    from .text import esc, show
     from .util import FileTooLargeError, NotRegularFileError, read_regular_bytes
+
+    shown = show(str(path))
 
     try:
         return tomllib.loads(read_regular_bytes(path, MAX_SPEC_FILE_BYTES).decode("utf-8"))
     except FileNotFoundError:
-        raise ConfigError(f"{path}: not found") from None
+        raise ConfigError(f"{shown}: not found") from None
     except IsADirectoryError:
-        raise ConfigError(f"{path}: is a directory, expected a file") from None
+        raise ConfigError(f"{shown}: is a directory, expected a file") from None
     except NotRegularFileError:
-        raise ConfigError(f"{path}: not a regular file; symlinks and special files are refused") from None
+        raise ConfigError(f"{shown}: not a regular file; symlinks and special files are refused") from None
     except FileTooLargeError:
-        raise ConfigError(f"{path}: larger than {MAX_SPEC_FILE_BYTES} bytes") from None
+        raise ConfigError(f"{shown}: larger than {MAX_SPEC_FILE_BYTES} bytes") from None
     except UnicodeDecodeError as exc:
-        raise ConfigError(f"{path}: not valid UTF-8: {exc}") from None
+        raise ConfigError(f"{shown}: not valid UTF-8: {esc(str(exc))}") from None
     except tomllib.TOMLDecodeError as exc:
-        raise ConfigError(f"{path}: invalid TOML: {exc}") from None
+        raise ConfigError(f"{shown}: invalid TOML: {esc(str(exc))}") from None
     except OSError as exc:
-        raise ConfigError(f"{path}: cannot read: {exc.strerror or exc}") from None
+        raise ConfigError(f"{shown}: cannot read: {esc(str(exc.strerror or exc))}") from None
