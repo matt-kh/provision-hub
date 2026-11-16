@@ -101,6 +101,9 @@ def test_optional_members_must_be_callable(member):
         (["/etc/passwd"], "PRESERVE: plugin returned an unsafe output path"),
         (["../spec.toml"], "PRESERVE: plugin returned an unsafe output path"),
         (["a\nb"], "PRESERVE: plugin returned an unsafe output path"),
+        (["./flake.lock"], "PRESERVE: './flake.lock' is not a normalised relative path"),
+        (["a//b"], "PRESERVE: 'a//b' is not a normalised relative path"),
+        (["a/"], "PRESERVE: 'a/' is not a normalised relative path"),
     ],
 )
 def test_preserve_must_be_safe_relative_paths(value, needle):

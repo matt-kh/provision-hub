@@ -14,6 +14,7 @@ typed results into a ConfigError (exit 2) naming the backend.
 from __future__ import annotations
 
 import re
+from pathlib import PurePosixPath
 from dataclasses import dataclass, field
 from importlib.metadata import entry_points
 from types import MappingProxyType, ModuleType
@@ -66,6 +67,9 @@ def check_contract(plugin: Backend, origin: str) -> None:
             check_paths(dict.fromkeys(keep, ""))
         except ConfigError as exc:
             raise ConfigError(f"backend plugin {origin}: PRESERVE: {exc}") from None
+        for path in keep:
+            if PurePosixPath(path).as_posix() != path:  # "./x", "a//b", "a/": never what render writes
+                raise ConfigError(f"backend plugin {origin}: PRESERVE: {short_repr(path)} is not a normalised relative path")
     if hasattr(plugin, "REFS") and not isinstance(plugin.REFS, dict):
         raise ConfigError(f"backend plugin {origin}: REFS must be a dict")
     if hasattr(plugin, "build"):
