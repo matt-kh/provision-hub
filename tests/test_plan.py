@@ -8,6 +8,7 @@ import subprocess
 import pytest
 
 from prov.cli import main
+from prov.registry import Context
 
 
 def _forbidden(*args, **kwargs):
@@ -21,10 +22,10 @@ def _tree(root):
 @pytest.mark.parametrize("firmware", ["uefi", "bios"])
 def test_plan_never_executes_or_writes(tmp_path, capsys, monkeypatch, firmware):
     root = str(tmp_path)
-    assert main(["--root", root, "init", "ubuntu", "demo"]) == 0
-    toml = tmp_path / "hosts/demo/host.toml"
+    assert main(["--root", root, "init", "os-install/demo", "--backend", "ubuntu-autoinstall"]) == 0
+    toml = tmp_path / "os-install/demo/spec.toml"
     toml.write_text(toml.read_text().replace('firmware = "uefi"', f'firmware = "{firmware}"'))
-    assert main(["--root", root, "render", "demo"]) == 0
+    assert main(["--root", root, "render", "os-install/demo"]) == 0
     capsys.readouterr()
     before = _tree(tmp_path)
 
@@ -34,7 +35,7 @@ def test_plan_never_executes_or_writes(tmp_path, capsys, monkeypatch, firmware):
         if hasattr(os, name):
             monkeypatch.setattr(os, name, _forbidden)
 
-    assert main(["--root", root, "plan", "demo"]) == 0
+    assert main(["--root", root, "plan", "os-install/demo"]) == 0
     out = capsys.readouterr().out
     assert "cloud-localds seed.iso user-data meta-data" in out
     assert ("--boot uefi" in out) == (firmware == "uefi")
@@ -49,12 +50,12 @@ HOSTILE = {
 
 
 def _hostile_host():
-    from prov.distros import ubuntu
+    from prov.backends import ubuntu_autoinstall as ubuntu
     from prov.registry import discover
     from prov.schema import tomllib
-    from prov.validate import check_host
+    from prov.spec import check_spec
 
-    host, _ = check_host(tomllib.loads(ubuntu.starter("demo")), discover())
+    host, _ = check_spec(tomllib.loads(ubuntu.starter("demo")), "os-install", "demo", discover())
     host["hostname"] = HOSTILE["hostname"]
     host["storage"]["disks"] = [HOSTILE["disk"], "/dev/vdb"]
     host["users"][0]["name"] = HOSTILE["user"]
@@ -68,7 +69,7 @@ def test_plan_quotes_hostile_values(tmp_path):
     from prov.plan import plan_lines
 
     plugin, host = _hostile_host()
-    lines = plan_lines(plugin, host, tmp_path / "ren dered")
+    lines = plan_lines(plugin, host, Context("demo"), "os-install/demo", tmp_path / "ren dered")
     for line in lines:
         assert "\n" not in line and "\r" not in line
         if line and not line.startswith("#"):
@@ -96,4 +97,4 @@ def test_plan_refuses_values_with_line_breaks(tmp_path, field):
     else:
         host["users"][0]["name"] = "ops\rrm -rf ~"
     with pytest.raises(ConfigError, match="line break"):
-        plan_lines(plugin, host, tmp_path)
+        plan_lines(plugin, host, Context("demo"), "os-install/demo", tmp_path)

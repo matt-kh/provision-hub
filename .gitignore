@@ -30,4 +30,6 @@ venv/
 htmlcov/
 dist/
 build/
+# prov: <root>/<kind>/<name>/build/ is reserved for local build artefacts (prov build)
+**/build/
 *.egg-info/

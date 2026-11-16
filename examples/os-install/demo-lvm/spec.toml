@@ -1,9 +1,10 @@
 # Synthetic example: LVM over two disks, UEFI, static dual-stack plus a DHCP interface.
 # Documentation addresses only (RFC 5737 / RFC 3849); example.com is reserved (RFC 2606).
-schema_version = 1
+api_version = "prov/v1alpha1"
+kind = "os-install"
+backend = "ubuntu-autoinstall"
 hostname = "demo-lvm"
 domain = "example.com"
-distro = "ubuntu"
 arch = "amd64"
 firmware = "uefi"
 timezone = "Etc/UTC"
@@ -43,9 +44,9 @@ dhcp4 = true
 [storage]
 disks = ["/dev/vda", "/dev/vdb"]
 
-[ubuntu]
+[ubuntu-autoinstall]
 release = "24.04"
 packages = ["qemu-guest-agent", "lvm2"]
 
-[ubuntu.storage]
+[ubuntu-autoinstall.storage]
 layout = "lvm"

@@ -1,9 +1,9 @@
 """Writing rendered artefacts to disk and diffing them against a fresh render.
 
-``<root>/hosts/<host>/rendered/`` is owned by prov: ``render`` rewrites it so that it holds
-exactly the files the distro plugin produced. Stale files, stale symlinks and directories
-left empty are removed. Symlinks are never followed: not on the path from the root to
-``rendered/`` (see ``safe_host_dir``) and not inside it.
+``<root>/<kind>/<name>/rendered/`` is owned by prov: ``render`` rewrites it so that it holds
+exactly the files the backend produced. Stale files, stale symlinks and directories left
+empty are removed. Symlinks are never followed: not on the path from the root to
+``rendered/`` or the reserved ``build/`` (see ``safe_item_dir``) and not inside it.
 """
 
 from __future__ import annotations
@@ -18,23 +18,27 @@ from typing import Dict, List, Tuple
 from .schema import ConfigError
 
 
-def safe_host_dir(root: Path, host: str) -> Path:
-    """``<root>/hosts/<host>``, refusing symlinks on the way to ``rendered/``.
+def safe_item_dir(root: Path, kind: str, name: str) -> Path:
+    """``<root>/<kind>/<name>``, refusing symlinks on the way to ``rendered/`` and ``build/``.
 
-    The root itself may be a symlink (it is resolved first); ``hosts``, ``hosts/<host>`` and
-    ``hosts/<host>/rendered`` may not, and every resolved path must stay inside
-    ``<root>/hosts``.
+    The root itself may be a symlink (it is resolved first); ``<kind>``, ``<kind>/<name>``,
+    and the item's ``rendered`` and ``build`` directories may not, and every resolved path
+    must stay inside ``<root>/<kind>``. Callers validate ``kind`` and ``name`` first
+    (``prov.spec.parse_ref``).
     """
     root = Path(root).resolve()
-    hosts = root / "hosts"
-    hdir = hosts / host
-    for path in (hosts, hdir, hdir / "rendered"):
+    kdir = root / kind
+    idir = kdir / name
+    owned = (idir / "rendered", idir / "build")
+    for path in (kdir, idir) + owned:
         if path.is_symlink():
             raise ConfigError(f"{path} is a symlink; prov refuses to write through symlinks")
-    for path in (hdir, hdir / "rendered"):
-        if path.exists() and not path.resolve().is_relative_to(hosts.resolve()):
-            raise ConfigError(f"{path} resolves outside {hosts}")
-    return hdir
+    if kdir.exists() and not kdir.resolve().is_relative_to(root):
+        raise ConfigError(f"{kdir} resolves outside {root}")
+    for path in (idir,) + owned:
+        if path.exists() and not path.resolve().is_relative_to(kdir.resolve()):
+            raise ConfigError(f"{path} resolves outside {kdir}")
+    return idir
 
 
 def check_paths(files: Dict[str, str]) -> None:

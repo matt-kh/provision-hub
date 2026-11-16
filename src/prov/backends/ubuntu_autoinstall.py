@@ -1,4 +1,4 @@
-"""Ubuntu Server autoinstall (subiquity) renderer.
+"""Ubuntu Server autoinstall (subiquity): NoCloud seed for an os-install spec.
 
 Renders a NoCloud seed: ``user-data`` (``#cloud-config`` with ``autoinstall:`` version 1,
 explicit curtin storage actions, netplan v2 network, ssh-key identity through the
@@ -18,7 +18,8 @@ import yaml
 from ..util import NotRegularFileError, dump_yaml, read_regular_text
 from ..validate import ERROR, SKIPPED, WARNING, Finding
 
-NAME = "ubuntu"
+NAME = "ubuntu-autoinstall"
+KIND = "os-install"
 
 SCHEMA: Dict[str, Any] = {
     "type": "object",
@@ -62,14 +63,14 @@ BOOT_SIZE = 2 * GiB
 # --- contract: check ----------------------------------------------------------------------
 
 
-def check(host: Dict[str, Any]) -> List[Finding]:
-    """Ubuntu-specific host rules beyond the JSON Schema."""
+def check(host: Dict[str, Any], ctx: Any) -> List[Finding]:
+    """Ubuntu-specific rules beyond the JSON Schema."""
     out: List[Finding] = []
-    storage = host["ubuntu"]["storage"]
+    storage = host[NAME]["storage"]
     layout = storage["layout"]
     disks = host["storage"]["disks"]
     if "raid_level" in storage and layout != "mdraid":
-        out.append(Finding(ERROR, "raid_level applies to layout 'mdraid' only", "ubuntu.storage.raid_level"))
+        out.append(Finding(ERROR, "raid_level applies to layout 'mdraid' only", f"{NAME}.storage.raid_level"))
     if layout == "mdraid":
         level = storage.get("raid_level", 1)
         if len(disks) < RAID_MIN_DISKS[level]:
@@ -131,7 +132,7 @@ def storage_config(host: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Explicit curtin storage actions for the host's layout (deterministic order)."""
     disks = host["storage"]["disks"]
     firmware = host["firmware"]
-    layout = host["ubuntu"]["storage"]["layout"]
+    layout = host[NAME]["storage"]["layout"]
     actions: List[Dict[str, Any]] = []
 
     if layout == "lvm":
@@ -158,7 +159,7 @@ def storage_config(host: Dict[str, Any]) -> List[Dict[str, Any]]:
             actions += _boot_partitions(i, firmware, mount_esp=(i == 0))
             actions.append(_partition(i, 2, "raid", -1))
             members.append(f"disk{i}-raid")
-        level = int(host["ubuntu"]["storage"].get("raid_level", 1))
+        level = int(host[NAME]["storage"].get("raid_level", 1))
         actions.append({"type": "raid", "id": "md0", "name": "md0", "raidlevel": level, "devices": members, "spare_devices": [], "preserve": False})
         actions += _fs("md0", "ext4", "/")
 
@@ -236,7 +237,7 @@ def _user(user: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def user_data(host: Dict[str, Any]) -> Dict[str, Any]:
-    ubuntu = host["ubuntu"]
+    ubuntu = host[NAME]
     cloud: Dict[str, Any] = {
         "disable_root": True,
         "hostname": host["hostname"],
@@ -261,7 +262,7 @@ def user_data(host: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def render(host: Dict[str, Any]) -> Dict[str, str]:
+def render(host: Dict[str, Any], ctx: Any) -> Dict[str, str]:
     """Return the NoCloud seed files (relative path -> text)."""
     meta = {"instance-id": f"iid-{host['hostname']}", "local-hostname": host["hostname"]}
     return {
@@ -419,14 +420,14 @@ def validate(rendered_dir: Path) -> List[Finding]:
 # --- contract: plan -----------------------------------------------------------------------
 
 
-def plan(host: Dict[str, Any]) -> List[str]:
+def plan(host: Dict[str, Any], ctx: Any) -> List[str]:
     """Seed-ISO and boot steps for a human, relative to the rendered directory.
 
-    Every host value is shell-quoted, in comments too, so a copied line never splits.
+    Every spec value is shell-quoted, in comments too, so a copied line never splits.
     """
     q = shlex.quote
     name = host["hostname"]
-    release = host["ubuntu"]["release"]
+    release = host[NAME]["release"]
     arch = host["arch"]
     iso = q(f"ubuntu-{release}-live-server-{arch}.iso")
     disks = host["storage"]["disks"]
@@ -465,12 +466,13 @@ def plan(host: Dict[str, Any]) -> List[str]:
 # --- optional: starter --------------------------------------------------------------------
 
 STARTER = """\
-# prov host file (schema v1). Synthetic starter values: replace them before real use.
+# prov spec (os-install, ubuntu-autoinstall). Synthetic starter values: replace them before real use.
 # Documentation addresses only (RFC 5737 / RFC 3849); example.com is reserved (RFC 2606).
-schema_version = 1
+api_version = "prov/v1alpha1"
+kind = "os-install"
+backend = "ubuntu-autoinstall"
 hostname = "{hostname}"
 domain = "example.com"
-distro = "ubuntu"
 arch = "amd64"
 firmware = "uefi"
 timezone = "Etc/UTC"
@@ -501,15 +503,15 @@ gateway6 = "2001:db8::1"
 # Every listed disk is wiped by the installer.
 disks = ["/dev/vda"]
 
-[ubuntu]
+[ubuntu-autoinstall]
 release = "24.04"
 packages = ["qemu-guest-agent"]
 
-[ubuntu.storage]
+[ubuntu-autoinstall.storage]
 layout = "lvm"
 """
 
 
 def starter(hostname: str) -> str:
-    """A valid synthetic host.toml for ``prov init ubuntu <host>``."""
+    """A valid synthetic spec.toml for ``prov init os-install/<name> --backend ubuntu-autoinstall``."""
     return STARTER.format(hostname=hostname)

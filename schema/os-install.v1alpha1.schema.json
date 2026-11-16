@@ -103,30 +103,34 @@
       "type": "object"
     }
   },
-  "$id": "https://raw.githubusercontent.com/matt-kh/provision-hub/main/schema/host.v1.schema.json",
+  "$id": "https://raw.githubusercontent.com/matt-kh/provision-hub/main/schema/os-install.v1alpha1.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "allOf": [
     {
       "if": {
         "properties": {
-          "distro": {
-            "const": "ubuntu"
+          "backend": {
+            "const": "ubuntu-autoinstall"
           }
         },
         "required": [
-          "distro"
+          "backend"
         ]
       },
       "then": {
         "required": [
-          "ubuntu"
+          "ubuntu-autoinstall"
         ]
       }
     }
   ],
-  "description": "One host.toml describes one machine; a distro plugin renders its install artefacts.",
+  "description": "One machine's operating-system install: host identity, users, network and whole disks.",
   "properties": {
+    "api_version": {
+      "const": "prov/v1alpha1",
+      "description": "Spec format version; required."
+    },
     "arch": {
       "default": "amd64",
       "enum": [
@@ -134,10 +138,10 @@
         "arm64"
       ]
     },
-    "distro": {
-      "description": "Distro plugin that renders this host.",
+    "backend": {
+      "description": "Backend that renders this spec; names the backend table.",
       "enum": [
-        "ubuntu"
+        "ubuntu-autoinstall"
       ],
       "type": "string"
     },
@@ -163,6 +167,10 @@
       "description": "Console keyboard layout.",
       "pattern": "^[a-z0-9_-]+$",
       "type": "string"
+    },
+    "kind": {
+      "const": "os-install",
+      "description": "Kind of item; equals the directory <root>/<kind>/."
     },
     "locale": {
       "default": "en_US.UTF-8",
@@ -211,10 +219,6 @@
       ],
       "type": "object"
     },
-    "schema_version": {
-      "const": 1,
-      "description": "Host schema version; required."
-    },
     "storage": {
       "additionalProperties": false,
       "properties": {
@@ -240,7 +244,7 @@
       "pattern": "^[A-Za-z0-9_+/-]+$",
       "type": "string"
     },
-    "ubuntu": {
+    "ubuntu-autoinstall": {
       "additionalProperties": false,
       "description": "Ubuntu Server autoinstall settings.",
       "properties": {
@@ -303,7 +307,7 @@
     },
     "users": {
       "default": [],
-      "description": "Local users; distros without local users ignore or reject them.",
+      "description": "Local users; backends without local users ignore or reject them.",
       "items": {
         "$ref": "#/$defs/user"
       },
@@ -311,12 +315,13 @@
     }
   },
   "required": [
-    "schema_version",
+    "api_version",
+    "kind",
+    "backend",
     "hostname",
-    "distro",
     "network",
     "storage"
   ],
-  "title": "prov host v1",
+  "title": "prov os-install v1alpha1",
   "type": "object"
 }

@@ -8,7 +8,7 @@ from pathlib import Path
 
 from conftest import EXAMPLES, REPO
 
-from prov.distros import ubuntu
+from prov.backends import ubuntu_autoinstall as ubuntu
 
 DOC_NETS = [
     ipaddress.ip_network(n)
@@ -23,7 +23,7 @@ PUBLIC_REFERENCES = (
     "ghcr.io",
     "openssh.com",  # part of the sk-* key type names
 )
-SCANNED = [EXAMPLES, REPO / "tests", REPO / "docs", REPO / "schema", REPO / "README.md", REPO / "CLAUDE.md"]
+SCANNED = [EXAMPLES, REPO / "tests", REPO / "docs", REPO / "schema", REPO / "README.md", REPO / "CLAUDE.md", REPO / "CHANGELOG.md"]
 SELF = Path(__file__).resolve()
 
 IPV4 = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?![\w.])")
@@ -39,7 +39,7 @@ def _files():
             if path.is_file() and "__pycache__" not in path.parts and path != SELF:
                 yield path, path.read_text(encoding="utf-8")
     # The `prov init` starter is synthetic data too.
-    yield REPO / "src/prov/distros/ubuntu.py", ubuntu.starter("demo")
+    yield REPO / "src/prov/backends/ubuntu_autoinstall.py", ubuntu.starter("demo")
 
 
 def _non_doc_addresses(text):
