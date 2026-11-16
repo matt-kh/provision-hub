@@ -89,4 +89,6 @@ in
   environment.etc."install-closure".source = "${closureInfo}/store-paths";
   environment.systemPackages = [ install ];
   nix.settings.experimental-features = [ "nix-command" "flakes" ];
+  # The live ISO never imports a ZFS root; the 26.11 default, set early to silence the warning.
+  boot.zfs.forceImportRoot = false;
 }
