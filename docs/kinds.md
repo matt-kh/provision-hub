@@ -47,10 +47,13 @@ not be symlinks.
 All of these fail with a clear message and exit code 2:
 
 - `api_version` missing, or not one of the kind's versions (today only `prov/v1alpha1`);
-- a legacy `schema_version` key — the file predates `prov/v1alpha1`; see the migration in
+- a key of the old host.toml format — `schema_version` or `distro`, or an `[ubuntu]` table
+  in a file without `api_version`: the file predates `prov/v1alpha1`; see the migration in
   [CHANGELOG.md](../CHANGELOG.md);
 - `kind` missing or different from the directory kind;
 - `backend` missing, not registered, or registered for another kind.
+
+Values echoed in these messages are shown as a repr capped at 80 characters.
 
 Schema and semantic errors after the envelope are findings (`prov validate` exits 1;
 `render`, `diff` and `plan` exit 2 because they need a valid spec).

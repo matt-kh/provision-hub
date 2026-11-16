@@ -21,7 +21,7 @@ from typing import Any, Callable, Dict, Mapping, Tuple
 
 from . import kinds
 from .kinds.common import DEFS
-from .schema import ID_PATTERN, ConfigError
+from .schema import ID_PATTERN, ConfigError, short_repr
 from .validate import Finding, check_schema_fragment
 
 ENTRY_POINT_GROUP = "prov.backends"
@@ -97,7 +97,7 @@ def lookup(backends: Mapping[str, Backend], kind: str, name: Any) -> Backend:
     """The backend ``name`` for ``kind``; ConfigError when unknown or of another kind."""
     if not isinstance(name, str) or name not in backends:
         known = ", ".join(for_kind(backends, kind)) or "none"
-        raise ConfigError(f"unknown backend {name!r} for kind {kind!r} (registered: {known})")
+        raise ConfigError(f"unknown backend {short_repr(name)} for kind {kind!r} (registered: {known})")
     plugin = backends[name]
     if plugin.KIND != kind:
         raise ConfigError(f"backend {name!r} renders kind {plugin.KIND!r}, not {kind!r}")

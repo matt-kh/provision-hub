@@ -92,6 +92,14 @@ ENVELOPE_ERRORS = {
     "unknown_backend": (lambda r: r.update(backend="plan9"), "unknown backend 'plan9' for kind 'os-install' (registered: ubuntu-autoinstall)"),
     "backend_not_a_string": (lambda r: r.update(backend=["ubuntu-autoinstall"]), "unknown backend"),
     "old_distro_name": (lambda r: r.update(backend="ubuntu"), "unknown backend 'ubuntu'"),
+    "legacy_distro_key": (lambda r: r.update(distro="ubuntu"), "distro: this file predates prov/v1alpha1; see CHANGELOG migration"),
+    "legacy_ubuntu_table_without_api_version": (
+        lambda r: (r.pop("api_version"), r.update(ubuntu=r.pop("ubuntu-autoinstall"))),
+        "ubuntu: this file predates prov/v1alpha1; see CHANGELOG migration",
+    ),
+    "long_api_version_is_capped": (lambda r: r.update(api_version="v" * 500), "unsupported api_version '" + "v" * 79 + "…"),
+    "long_kind_is_capped": (lambda r: r.update(kind="k" * 500), "kind '" + "k" * 79 + "… does not match"),
+    "long_backend_is_capped": (lambda r: r.update(backend="b" * 500), "unknown backend '" + "b" * 79 + "… for kind"),
 }
 
 
@@ -292,3 +300,29 @@ def test_kind_without_backends(capsys, monkeypatch):
     assert run(capsys, "backends", "--kind", "widget") == (0, "", "")
     with pytest.raises(ConfigError, match="backend is required \\(registered for widget: none\\)"):
         check_spec({"api_version": "prov/v1alpha1", "kind": "widget", "size": 1}, "widget", "w", discover())
+
+
+def test_old_host_toml_without_schema_version_gets_the_migration_hint(tmp_path, capsys):
+    path = tmp_path / "os-install/demo/spec.toml"
+    path.parent.mkdir(parents=True)
+    path.write_text('hostname = "demo"\n\n[ubuntu]\nrelease = "24.04"\n')
+    code, _, err = run(capsys, "--root", str(tmp_path), "render", "os-install/demo")
+    assert code == 2 and "ubuntu: this file predates prov/v1alpha1; see CHANGELOG migration" in err
+
+
+def test_ubuntu_table_with_api_version_is_a_schema_error_not_a_hint():
+    host, findings = check(mutate(lambda r: r.update(ubuntu={})))
+    assert host is None and any("unknown key 'ubuntu'" in f.message for f in findings)
+
+
+@pytest.mark.parametrize("value", ["x" * 500, ["y"] * 200])
+def test_long_values_are_capped_in_messages(value):
+    for key in ("api_version", "kind", "backend"):
+        with pytest.raises(ConfigError) as exc:
+            check(mutate(lambda r: r.update({key: value})))
+        assert len(str(exc.value)) < 300, (key, str(exc.value))
+
+
+def test_registry_reserves_legacy_keys_as_backend_names():
+    with pytest.raises(ConfigError, match="NAME 'distro' collides with a core property of the spec envelope"):
+        check_contract(_widget_backend("distro", "os-install"), "distro = tests")

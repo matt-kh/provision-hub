@@ -37,7 +37,18 @@ NAME_PATTERN = "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$"
 ID_PATTERN = "^[a-z][a-z0-9-]*$"
 
 ENVELOPE_KEYS = ("api_version", "kind", "backend")
-LEGACY_KEYS = ("schema_version",)
+# Top-level keys of the pre-v1alpha1 host.toml format; reserved, and answered with a migration hint.
+LEGACY_KEYS = ("schema_version", "distro")
+# Tables of that format; a hint only when api_version is missing (a backend could own the name later).
+LEGACY_TABLES = ("ubuntu",)
+
+REPR_LIMIT = 80
+
+
+def short_repr(value: object, limit: int = REPR_LIMIT) -> str:
+    """``repr(value)`` capped at ``limit`` characters (then "…"), for echoing user values in errors."""
+    text = repr(value)
+    return text if len(text) <= limit else text[:limit] + "…"
 
 
 class ConfigError(Exception):

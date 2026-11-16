@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 from . import kinds
 from .kinds.common import DEFS
 from .registry import Context, call_plugin, for_kind, lookup
-from .schema import ID_PATTERN, NAME_PATTERN, ConfigError, api_versions, read_toml, spec_schema
+from .schema import ID_PATTERN, LEGACY_KEYS, LEGACY_TABLES, NAME_PATTERN, ConfigError, api_versions, read_toml, short_repr, spec_schema
 from .validate import ERROR, WARNING, Finding, apply_defaults, has_errors, schema_errors
 
 
@@ -30,9 +30,9 @@ def parse_ref(ref: str) -> Tuple[str, str]:
     """
     kind, sep, name = ref.partition("/")
     if not sep or not _full(ID_PATTERN, kind):
-        raise ConfigError(f"invalid ref {ref!r}: expected <kind>/<name>, for example os-install/demo")
+        raise ConfigError(f"invalid ref {short_repr(ref)}: expected <kind>/<name>, for example os-install/demo")
     if not _full(NAME_PATTERN, name):
-        raise ConfigError(f"invalid name {name!r} in ref {ref!r} (lowercase letters, digits, '-'; one DNS label)")
+        raise ConfigError(f"invalid name {short_repr(name)} in ref {short_repr(ref)} (lowercase letters, digits, '-'; one DNS label)")
     kinds.get(kind)
     return kind, name
 
@@ -40,28 +40,32 @@ def parse_ref(ref: str) -> Tuple[str, str]:
 def resolve_backend(raw: Mapping[str, Any], kind_name: str, backends: Mapping[str, Any]) -> Any:
     """Check the envelope of a parsed spec and return its backend; ConfigError (exit 2) otherwise.
 
-    Order: legacy keys, ``api_version``, ``kind`` (must equal the directory kind), ``backend``
+    Order: legacy keys (``schema_version``, ``distro``; an ``[ubuntu]`` table without
+    ``api_version``), ``api_version``, ``kind`` (must equal the directory kind), ``backend``
     (must be registered and render this kind).
     """
     kind = kinds.get(kind_name)
     supported = ", ".join(api_versions(kind))
-    if "schema_version" in raw:
+    legacy = [k for k in LEGACY_KEYS if k in raw]
+    if not legacy and "api_version" not in raw:
+        legacy = [k for k in LEGACY_TABLES if k in raw]
+    if legacy:
         raise ConfigError(
-            "schema_version: this file predates prov/v1alpha1; see CHANGELOG migration "
-            f"(replace it with api_version = {api_versions(kind)[-1]!r}, kind and backend)"
+            f"{legacy[0]}: this file predates prov/v1alpha1; see CHANGELOG migration "
+            f"(use api_version = {api_versions(kind)[-1]!r}, kind and backend; tables are named after the backend)"
         )
     if "api_version" not in raw:
         raise ConfigError(f"api_version is required (this prov supports: {supported})")
     version = raw["api_version"]
     if not isinstance(version, str) or version not in api_versions(kind):
         raise ConfigError(
-            f"unsupported api_version {version!r} for kind {kind_name!r} (this prov supports: {supported}); "
+            f"unsupported api_version {short_repr(version)} for kind {kind_name!r} (this prov supports: {supported}); "
             "use a prov release that supports it or migrate the file"
         )
     if "kind" not in raw:
         raise ConfigError(f"kind is required (the directory says {kind_name!r})")
     if raw["kind"] != kind_name:
-        raise ConfigError(f"kind {raw['kind']!r} does not match the directory kind {kind_name!r}")
+        raise ConfigError(f"kind {short_repr(raw['kind'])} does not match the directory kind {kind_name!r}")
     if "backend" not in raw:
         known = ", ".join(for_kind(backends, kind_name)) or "none"
         raise ConfigError(f"backend is required (registered for {kind_name}: {known})")

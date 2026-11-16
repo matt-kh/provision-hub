@@ -37,5 +37,6 @@ to `os-install/<host>/rendered/`). In each file replace `schema_version = 1` and
 `prov init os-install/demo --backend ubuntu-autoinstall`), and `prov distros` is
 `prov backends`. Third-party plugins move from the `prov.distros` entry-point group to
 `prov.backends`, add `KIND = "os-install"`, and accept `ctx` as the second argument of
-`render`, `plan` and `check`. A file that still has `schema_version` fails with "predates
-prov/v1alpha1; see CHANGELOG migration".
+`render`, `plan` and `check`. A file that still has `schema_version` or `distro` (or an
+`[ubuntu]` table and no `api_version`) fails with "predates prov/v1alpha1; see CHANGELOG
+migration".
