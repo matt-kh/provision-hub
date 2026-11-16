@@ -3,8 +3,9 @@
 ``<root>/<kind>/<name>/rendered/`` is owned by prov: ``render`` rewrites it so that it holds
 exactly the files the backend produced. Stale files, stale symlinks and directories left
 empty are removed, except the regular files a backend lists in its optional ``PRESERVE``
-(human-created files such as a lock file); ``diff`` ignores those too. Symlinks are never followed: not on the path from the root to
-``rendered/`` or the reserved ``build/`` (see ``safe_item_dir``) and not inside it.
+(human-created files such as a lock file); ``diff`` ignores those too. Symlinks are never
+followed: not on the path from the root to ``rendered/`` or the reserved ``build/`` (see
+``safe_item_dir``) and not inside it.
 """
 
 from __future__ import annotations
@@ -156,7 +157,9 @@ def _write(rendered_dir: Path, name: str, text: str) -> None:
     atomic_write(target, text)
 
 
-def write_rendered(rendered_dir: Path, files: Dict[str, str], preserve: Iterable[str] = ()) -> List[str]:
+def write_rendered(
+    rendered_dir: Path, files: Dict[str, str], preserve: Iterable[str] = ()
+) -> List[str]:
     """Make ``rendered_dir`` hold exactly ``files``; return a sorted change summary.
 
     Regular files named in ``preserve`` (relative POSIX paths) are kept when ``files`` does
@@ -206,7 +209,9 @@ def _lines(text: str) -> List[str]:
     return lines
 
 
-def diff_rendered(rendered_dir: Path, files: Dict[str, str], preserve: Iterable[str] = ()) -> str:
+def diff_rendered(
+    rendered_dir: Path, files: Dict[str, str], preserve: Iterable[str] = ()
+) -> str:
     """Unified diff from what is on disk to a fresh render; empty when identical.
 
     Regular files named in ``preserve`` and absent from ``files`` are not compared.

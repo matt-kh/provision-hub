@@ -14,8 +14,9 @@ may change incompatibly; every such change has a Migration paragraph. See
   and the spec disk is a whole disk with nothing mounted or used as swap that the boot
   medium does not sit on, then asks for the disk serial's last 4 characters (or the
   hostname) before disko-install wipes the disk; building the ISO requires a git-tracked
-  `rendered/flake.lock`. `keyboard` maps to the XKB layout (console follows it). Table `[nixos-disko]`: `release`, `state_version`, `layout`
-  (`ext4`), `swap_size`, `packages`, `cpu_vendor`. `validate` runs `nix-instantiate --parse`
+  `rendered/flake.lock`. `keyboard` maps to the XKB layout (console follows it). Table
+  `[nixos-disko]`: `release`, `state_version`, `layout` (`ext4`), `swap_size`, `packages`,
+  `cpu_vendor`. `validate` runs `nix-instantiate --parse`
   when nix is installed; `plan` prints lock, ISO build, USB write and install steps. Static
   validation only: the example was locked and `nix eval`-ed, never installed. Example
   `examples/os-install/demo-nixos-ext4/`; docs in `docs/backends/nixos-disko.md`.

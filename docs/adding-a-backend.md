@@ -24,7 +24,7 @@ party) exposes:
 | `plan` | yes | `plan(spec: dict, ctx: Context) -> list[str]` | Apply steps for a human, as printed lines. |
 | `check` | no | `check(spec: dict, ctx: Context) -> list[Finding]` | Cross-field rules JSON Schema cannot express. |
 | `starter` | no | `starter(name: str) -> str` | `spec.toml` text for `prov init <kind>/<name> --backend <NAME>`; without it `init` refuses. |
-| `PRESERVE` | no | `tuple[str, ...]` | Relative paths of files a human may create in `rendered/` that `render` must keep and `diff`/`validate` must not report as stale (e.g. `("flake.lock",)`), written normalised (no `./`, `//` or trailing `/`). Only regular files are kept; symlinks and special files are removed whatever their name. Never list a file `render` returns. |
+| `PRESERVE` | no | `tuple[str, ...]` | Relative paths of files a human may create in `rendered/` that `render` must keep and `diff`/`validate` must not report as stale (e.g. `("flake.lock",)`), written normalised (no `./`, `//` or trailing `/`). Only regular files are kept; symlinks and special files are removed whatever their name. A listed file that `render` also returns is written and compared like any rendered file, so list only files `render` never produces. |
 | `REFS` | no | `dict` | Reserved for cross-spec references (a later release). |
 | `artifacts` | no | `artifacts(spec: dict) -> ...` | Reserved for `prov build` (a later release). |
 | `build` + `BUILD_TOOLS` | no | `build(spec, ctx)`, `BUILD_TOOLS: tuple[str, ...]` | Reserved for `prov build`, which will write only under the item's `build/`. A backend that defines `build` must list the local tools it runs in `BUILD_TOOLS`. |

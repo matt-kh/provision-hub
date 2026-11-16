@@ -135,7 +135,9 @@ store directory itself. The installer therefore builds its own flat copy of the 
 the hardware file inside it as `hardware-configuration.installer-copy.nix`;
 `configuration.nix` imports that name first, and does not look at `../` when the flake sits
 directly in the store. A `rendered/hardware-configuration.nix` is never imported (and the
-next `prov render` deletes it): keep the file next to `spec.toml`.
+next `prov render` deletes it): keep the file next to `spec.toml`. Only that one file is
+copied onto the stick, so it must be self-contained: no `imports` of other relative
+files (the output of `nixos-generate-config` already is).
 
 ## USB walkthrough
 
@@ -147,7 +149,9 @@ next `prov render` deletes it): keep the file next to `spec.toml`.
    Copy the file to your workstation next to `spec.toml` (not into `rendered/`) and
    `git add` it.
 2. **Track and lock.** In `rendered/`: `git add . ../spec.toml` (Nix sees only tracked
-   files), `nix flake lock`, then `git add flake.lock` and commit.
+   files), `nix flake lock`, then `git add flake.lock` and commit. The plan's `nix` lines
+   pass `--extra-experimental-features 'nix-command flakes'`, so they work without flakes
+   enabled in `nix.conf`.
 3. **Build the ISO.**
    `mkdir -p "$HOME"/prov-iso` and
    `nix build .#nixosConfigurations.<hostname>-installer.config.system.build.isoImage --out-link "$HOME"/prov-iso/<hostname>-installer`;
@@ -174,7 +178,8 @@ next `prov render` deletes it): keep the file next to `spec.toml`.
    dm, md or loop devices on top) is mounted or used as swap
    (`lsblk -nro MOUNTPOINTS` is empty); and it is none of the disks the boot medium
    mounted at `/iso` sits on (every `disk` in `lsblk -nrpso NAME,TYPE` of the `/iso`
-   source, so a stick behind a partition or a dm device is caught too). It then shows the
+   source, so a stick behind a partition or a dm device is caught too). If any of these
+   `lsblk` reads fails, it refuses as well. It then shows the
    disk with `lsblk` (model, serial, size, partitions) and asks you to type the last 4
    characters of the disk's serial, or the hostname when the disk reports no serial. Any
    other answer aborts without changes. Then it runs

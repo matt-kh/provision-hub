@@ -14,9 +14,9 @@ typed results into a ConfigError (exit 2) naming the backend.
 from __future__ import annotations
 
 import re
-from pathlib import PurePosixPath
 from dataclasses import dataclass, field
 from importlib.metadata import entry_points
+from pathlib import PurePosixPath
 from types import MappingProxyType, ModuleType
 from typing import Any, Callable, Dict, Mapping, Tuple
 
