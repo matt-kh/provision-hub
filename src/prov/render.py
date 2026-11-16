@@ -190,6 +190,16 @@ def write_rendered(rendered_dir: Path, files: Dict[str, str]) -> List[str]:
     return sorted(changes, key=lambda c: c.split(" ")[-1])
 
 
+def _lines(text: str) -> List[str]:
+    """Lines split on "\\n" only, ends kept: ``str.splitlines`` would also break on \\r,
+    \\x0b, \\x0c, \\x1c-\\x1e, \\x85 and U+2028/2029 and misstate the file's lines."""
+    parts = text.split("\n")
+    lines = [part + "\n" for part in parts[:-1]]
+    if parts[-1]:
+        lines.append(parts[-1])
+    return lines
+
+
 def diff_rendered(rendered_dir: Path, files: Dict[str, str]) -> str:
     """Unified diff from what is on disk to a fresh render; empty when identical.
 
@@ -210,8 +220,8 @@ def diff_rendered(rendered_dir: Path, files: Dict[str, str]) -> str:
             continue
         chunks.extend(
             difflib.unified_diff(
-                (old or "").splitlines(keepends=True),
-                (new or "").splitlines(keepends=True),
+                _lines(old or ""),
+                _lines(new or ""),
                 fromfile=f"a/{show(name)}" if old is not None else "/dev/null",
                 tofile=f"b/{show(name)}" if new is not None else "/dev/null",
             )

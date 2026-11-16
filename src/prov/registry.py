@@ -78,7 +78,7 @@ def discover() -> Dict[str, Backend]:
         origin = esc(f"{ep.name} = {ep.value}")
         try:
             plugin = ep.load()
-        except Exception as exc:  # a broken third-party plugin must not hide the others' errors
+        except (Exception, SystemExit) as exc:  # a broken plugin must not hide the others' errors; KeyboardInterrupt still stops prov
             raise ConfigError(f"cannot load backend plugin {origin}: {esc(str(exc))}") from exc
         check_contract(plugin, origin)
         if plugin.NAME != ep.name:
@@ -112,8 +112,18 @@ def builtin() -> Dict[str, ModuleType]:
     return {ubuntu_autoinstall.NAME: ubuntu_autoinstall}
 
 
+def _utf8(text: str) -> bool:
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:  # lone surrogates
+        return False
+    return True
+
+
 def _is_file_map(value: Any) -> bool:
-    return isinstance(value, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in value.items())
+    return isinstance(value, dict) and all(
+        isinstance(k, str) and isinstance(v, str) and _utf8(k) and _utf8(v) for k, v in value.items()
+    )
 
 
 def _is_findings(value: Any) -> bool:
@@ -126,7 +136,7 @@ def _is_lines(value: Any) -> bool:
 
 # What each backend method must return; anything else is a plugin bug reported as exit 2.
 RETURN_CHECKS: Dict[str, Tuple[Callable[[Any], bool], str]] = {
-    "render": (_is_file_map, "a dict of str paths to str texts"),
+    "render": (_is_file_map, "a dict of str paths to str texts, all encodable as UTF-8"),
     "validate": (_is_findings, "a list of prov.validate.Finding"),
     "check": (_is_findings, "a list of prov.validate.Finding"),
     "plan": (_is_lines, "a list of str"),
@@ -145,7 +155,7 @@ def call_plugin(plugin: Backend, method: str, *args: Any) -> Any:
         result = getattr(plugin, method)(*args)
     except ConfigError as exc:  # a plugin's own error: keep its text, escaped, and name the plugin
         raise ConfigError(f"backend {name} failed in {method}: {esc(str(exc))}") from exc
-    except Exception as exc:
+    except (Exception, SystemExit) as exc:  # a plugin calling sys.exit is a plugin failure too
         raise ConfigError(f"backend {name} failed in {method}: {esc(type(exc).__name__)}: {esc(str(exc))}") from exc
     check, expected = RETURN_CHECKS.get(method, (lambda v: True, ""))
     if not check(result):

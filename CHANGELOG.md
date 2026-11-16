@@ -29,6 +29,11 @@ may change incompatibly; every such change has a Migration paragraph. See
 - Rendered output of the Ubuntu examples is byte-identical; they moved to
   `examples/os-install/demo-{lvm,mdraid,zfs}/`.
 
+### Known limitations
+
+- Output escaping covers non-printable characters only. Printable but invisible or
+  confusable characters (e.g. U+3164 HANGUL FILLER, combining marks) are printed as is.
+
 ### Migration
 
 Move `hosts/<host>/host.toml` to `os-install/<host>/spec.toml` (and `hosts/<host>/rendered/`

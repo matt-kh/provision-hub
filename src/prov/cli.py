@@ -26,8 +26,10 @@ EXIT_OK, EXIT_FINDINGS, EXIT_USAGE = 0, 1, 2
 
 class _Parser(argparse.ArgumentParser):
     def error(self, message: str) -> None:  # argparse exits 2 already; keep its format
+        # argparse echoes argv ("unrecognized arguments", "invalid choice"), which a shell glob
+        # over hostile names can fill: escape it like every other message.
         self.print_usage(sys.stderr)
-        self.exit(EXIT_USAGE, f"{self.prog}: error: {message}\n")
+        self.exit(EXIT_USAGE, f"{self.prog}: error: {esc(message)}\n")
 
 
 def resolve_root(arg: Optional[str]) -> Path:

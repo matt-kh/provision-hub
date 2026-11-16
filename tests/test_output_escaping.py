@@ -218,3 +218,131 @@ def test_every_verb_writes_only_printable_text(hostile_root, capsys):
     # the hostile parts were exercised, not skipped
     joined = dict(((a, c) for a, c in seen))
     assert joined["list"] == 1 and ("plan", 2) in seen and ("render", 2) in seen and ("validate", 1) in seen
+
+
+# --- argv echoed by argparse, diff line splitting, plugin edge cases ---------------------
+
+HOSTILE_ARGS = ["\x1b]0;pwn\x07X", "a\nerror: forged", "\u202eevil", os.fsdecode(b"s\xff")]
+
+
+@pytest.mark.parametrize("arg", HOSTILE_ARGS)
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["kinds", "{}"],
+        ["backends", "{}"],
+        ["list", "{}"],
+        ["schema", "os-install", "{}"],
+        ["render", "os-install/demo", "{}"],
+        ["plan", "os-install/demo", "--{}"],
+        ["{}"],
+        ["init", "os-install/demo", "--backend", "ubuntu-autoinstall", "{}"],
+    ],
+)
+def test_hostile_argv_is_escaped_by_the_parser(tmp_path, capsys, argv, arg):
+    """Review W1: argparse's "unrecognized arguments" / "invalid choice" echo argv."""
+    with pytest.raises(SystemExit) as exc:
+        main(["--root", str(tmp_path), *[a.replace("{}", arg) for a in argv]])
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert clean(err) and "prov: error:" in err
+    assert not any(line.startswith("error: forged") for line in err.splitlines())
+
+
+def test_hostile_ref_and_backend_arguments_are_escaped(tmp_path, capsys):
+    for argv in (["render", HOSTILE_ARGS[0]], ["init", "os-install/demo", "--backend", HOSTILE_ARGS[1]], ["schema", HOSTILE_ARGS[2]], ["backends", "--kind", HOSTILE_ARGS[3]]):
+        code, out, err = run(capsys, "--root", str(tmp_path), *argv)
+        assert code == 2 and clean(out + err) and err.count("\n") == 1, (argv, err)
+
+
+def test_main_escapes_unescaped_messages_at_the_boundary(tmp_path, capsys, monkeypatch):
+    """Review S5: the last escaping layer in main() is load-bearing."""
+    import prov.cli as cli
+
+    def boom(args):
+        raise ConfigError("raw \x1b]0;pwn\x07 \u202e text\nsecond line \x1b[2J")
+
+    monkeypatch.setattr(cli, "build_parser", _parser_calling(boom))
+    code, out, err = run(capsys, "kinds")
+    assert code == 2 and out == ""
+    assert err == "prov: error: raw \\x1b]0;pwn\\x07 \\u202e text\nsecond line \\x1b[2J\n"
+
+
+def test_diff_splits_lines_on_newline_only(tmp_path):
+    """Review S1: \\r, \\x0b, \\x0c, \\x1c-\\x1e, \\x85, U+2028/2029 are not line breaks of the file."""
+    from prov.render import diff_rendered, write_rendered
+
+    rendered = tmp_path / "rendered"
+    write_rendered(rendered, {"f": "one\rtwo\x0bthree\x85four\u2028five\nsix\n"})
+    diff = diff_rendered(rendered, {"f": "one\rtwo\x0bthree\x85four\u2028five\nSIX\n"})
+    assert diff.splitlines() == [
+        "--- a/f",
+        "+++ b/f",
+        "@@ -1,2 +1,2 @@",
+        " one\\x0dtwo\\x0bthree\\x85four\\u2028five",
+        "-six",
+        "+SIX",
+    ]
+    assert clean(diff)
+    no_eol = diff_rendered(rendered, {"f": "one\rtwo\x0bthree\x85four\u2028five\nsix"})
+    assert no_eol.splitlines()[-2:] == ["-six", "+six"]
+
+
+def test_render_with_lone_surrogates_fails_before_touching_rendered(tmp_path, capsys, monkeypatch):
+    """Review S2: text that cannot be written as UTF-8 is a plugin failure naming the backend."""
+    from prov.backends import ubuntu_autoinstall as ubuntu
+
+    root = str(tmp_path)
+    run(capsys, "--root", root, "init", "os-install/demo", "--backend", "ubuntu-autoinstall")
+    run(capsys, "--root", root, "render", "os-install/demo")
+    rendered = tmp_path / "os-install/demo/rendered"
+    before = {p.name: p.read_bytes() for p in rendered.iterdir()}
+    for files in ({"user-data": "x\udcff\n"}, {"s\udcff": "x\n"}):
+        monkeypatch.setattr(ubuntu, "render", lambda spec, ctx, files=files: files)
+        for verb in ("render", "diff", "validate"):
+            code, out, err = run(capsys, "--root", root, verb, "os-install/demo")
+            assert code == 2 and "backend 'ubuntu-autoinstall' failed in render: returned dict" in err and "UTF-8" in err, (verb, err)
+            assert clean(out + err)
+        assert {p.name: p.read_bytes() for p in rendered.iterdir()} == before
+
+
+@pytest.mark.parametrize("method", ["render", "validate", "plan", "check", "starter"])
+def test_plugin_sys_exit_is_a_plugin_failure(tmp_path, capsys, monkeypatch, method):
+    """Review S3: a backend calling sys.exit cannot end prov with its own code or raw text."""
+    from prov.backends import ubuntu_autoinstall as ubuntu
+
+    root = str(tmp_path)
+    run(capsys, "--root", root, "init", "os-install/demo", "--backend", "ubuntu-autoinstall")
+    run(capsys, "--root", root, "render", "os-install/demo")
+
+    def bye(*args):
+        sys.exit("bye \x1b[2J\nerror: forged")
+
+    monkeypatch.setattr(ubuntu, method, bye)
+    verb = {"render": "render", "validate": "validate", "plan": "plan", "check": "validate", "starter": "init"}[method]
+    argv = ["init", "os-install/other", "--backend", "ubuntu-autoinstall"] if verb == "init" else [verb, "os-install/demo"]
+    code, out, err = run(capsys, "--root", root, *argv)
+    assert code == 2 and f"backend 'ubuntu-autoinstall' failed in {method}: SystemExit: bye \\x1b[2J\\x0aerror: forged" in err
+    assert clean(out + err)
+
+
+def test_plugin_sys_exit_at_import_is_a_load_error(capsys, monkeypatch):
+    import prov.registry as registry
+
+    def load():
+        sys.exit("import-time \x1b]0;x\x07 exit")
+
+    ep = types.SimpleNamespace(name="talos", value="prov_talos", load=load)
+    monkeypatch.setattr(registry, "entry_points", lambda group: [ep])
+    code, out, err = run(capsys, "backends")
+    assert code == 2 and "cannot load backend plugin talos = prov_talos: import-time \\x1b]0;x\\x07 exit" in err and clean(err)
+
+
+def test_keyboard_interrupt_is_not_swallowed(monkeypatch):
+    from prov.registry import call_plugin
+
+    def stop(*args):
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        call_plugin(types.SimpleNamespace(NAME="stub", render=stop), "render", {}, Context("x"))
