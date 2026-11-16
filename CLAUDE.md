@@ -1,8 +1,10 @@
 # CLAUDE.md — working on provision-hub (`prov`)
 
-`prov` renders, validates and plans OS install artefacts from `hosts/<host>/host.toml`.
-Public and organisation-neutral; a private hosts repo pins its releases, so the host schema
-is a public API.
+`prov` renders, validates and plans provisioning artefacts from
+`<root>/<kind>/<name>/spec.toml`. Every spec has a `kind` (core, e.g. `os-install`) and a
+`backend` (plugin, e.g. `ubuntu-autoinstall`). Public and organisation-neutral; private
+repos pin its releases, so the spec format is a public API. Generic across OS installs,
+images, VMs and Kubernetes distributions; it champions no backend.
 
 ## Commands
 
@@ -10,45 +12,61 @@ is a public API.
 uv sync                                  # dev env (Python 3.12, .python-version)
 uv run pytest -q                         # all tests
 uv run --python 3.10 pytest -q           # oldest supported Python
-uv run prov --root <dir> init ubuntu demo && uv run prov --root <dir> render demo
-uv run prov --root <dir> validate demo && uv run prov --root <dir> plan demo
+uv run prov kinds && uv run prov backends --kind os-install
+uv run prov --root <dir> init os-install/demo --backend ubuntu-autoinstall
+uv run prov --root <dir> render os-install/demo && uv run prov --root <dir> validate os-install/demo
+uv run prov --root <dir> plan os-install/demo && uv run prov --root <dir> list
+uv run prov --root examples validate os-install/demo-lvm
 pre-commit run --all-files               # same hooks as the CI lint job
 ```
 
 Dependencies: `uv add <pkg>` / `uv add --group dev <pkg>`; commit `uv.lock`. Runtime deps
 stay minimal (pyyaml; tomli on 3.10 only) — justify any new one in the PR.
 
+## Layout
+
+- `src/prov/kinds/` — core kinds (`os_install.py`) and shared `$defs` (`common.py`). Kinds are
+  not pluggable; a new kind is a core change documented in `docs/kinds.md`.
+- `src/prov/backends/` — built-in backends (`ubuntu_autoinstall.py`), registered through the
+  `prov.backends` entry-point group in `pyproject.toml` (entry-point name = `NAME`).
+- `src/prov/registry.py` — discovery, contract checks, `Context`, `call_plugin` (every call
+  into a backend goes through it). `src/prov/spec.py` — refs and envelope checks.
+- Core modules (`cli`, `spec`, `registry`, `render`, `plan`, `schema`, `validate`) must stay
+  kind- and backend-neutral; `tests/test_kinds.py` proves it with a fake kind + backend.
+
 ## Rules
 
 - **Never add apply behaviour.** No command may write disks, ssh, create VMs, call the
   network or run the commands it prints. `plan` only returns text; `render` writes only
-  under `hosts/<host>/rendered/`. `validate` may run read-only local validators (e.g.
-  `cloud-init schema`) and reports a missing tool as `skipped: <tool> not installed`.
-  `tests/test_plan.py` enforces that plan executes nothing.
+  under `<kind>/<name>/rendered/`; `build/` is reserved for a later `prov build`.
+  `validate` may run read-only local validators (e.g. `cloud-init schema`) and reports a
+  missing tool as `skipped: <tool> not installed`. `tests/test_plan.py` enforces that plan
+  executes nothing.
 - **Synthetic data only.** Examples, fixtures and tests use documentation addresses
   (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24, 2001:db8::/32), example.com/org/net and
   fake ssh keys containing `EXAMPLE`. `tests/test_synthetic_data.py` enforces it. Never
   commit real hosts, keys or addresses.
-- **Schema compatibility.** Within `schema_version = 1` only additive, optional changes
-  (new optional key, new enum value). Removing/renaming a key, tightening a constraint or
-  changing a meaning needs `schema_version = 2`, support for reading v1, and a migration
-  note in the PR. After any schema change regenerate `schema/host.v1.schema.json`
-  (below); a test fails if it drifts from the code.
+- **Schema policy** (`docs/kinds.md`). `api_version = "prov/v1alpha1"`. While a kind is
+  `v1alpha*`, breaking changes are allowed but need a Migration paragraph in
+  `CHANGELOG.md` (Unreleased). From 1.0, `prov/v1` changes are additive and optional only;
+  anything breaking becomes `prov/v2` with a reader for v1. After any schema change
+  regenerate `schema/<kind>.<version>.schema.json` (below); a test fails if it drifts.
 - **Static validation only so far.** No layout has been installed in a VM; ZFS is the least
   proven. Say so when changing layouts, and never claim an artefact "works" without an install.
-- **No writes through symlinks**; plan output shell-quotes every host value, comments
-  included (`tests/test_render_safety.py`, `tests/test_plan.py`).
+- **No writes through symlinks** (`<kind>/`, `<name>/`, `rendered/`, `build/`); plan output
+  shell-quotes every spec value, comments included (`tests/test_render_safety.py`,
+  `tests/test_plan.py`).
 - **Deterministic output.** Sorted keys, stable ordering, no timestamps or random ids;
   goldens depend on it.
-- New distros follow [docs/adding-a-distro.md](docs/adding-a-distro.md).
+- New backends follow [docs/adding-a-backend.md](docs/adding-a-backend.md).
 - Don't edit `.github/workflows/*` or `.harness.toml` unless the user asks.
 
 ## Goldens
 
-The committed `examples/*/hosts/*/rendered/` directories are the golden files, and
-`schema/host.v1.schema.json` is generated from the code. After an intended change:
+The committed `examples/<kind>/<name>/rendered/` directories are the golden files, and
+`schema/<kind>.<version>.schema.json` is generated from the code. After an intended change:
 
 ```sh
-PROV_UPDATE_GOLDENS=1 uv run pytest -q   # rewrites goldens and the schema file
+PROV_UPDATE_GOLDENS=1 uv run pytest -q   # rewrites goldens and the schema files
 git diff examples/ schema/                # review every changed line before committing
 ```

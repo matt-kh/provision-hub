@@ -1,69 +1,84 @@
 # provision-hub
 
-Render and validate install artefacts for Linux distros (Ubuntu, Proxmox VE, NixOS, Talos) from one host schema
+Render, validate and plan reusable provisioning artefacts (OS installs, OS images, VMs, Kubernetes distributions) from versioned kind + backend specs
 
 ## Overview
 
 - Kind: cli
 - Languages: python (uv)
-- Notes: prov CLI: versioned host.toml schema, per-distro renderer plugins (render/validate/plan), never applies; synthetic examples only (RFC 5737/3849 IPs, example.com); Python 3.10+ with uv.
+- Notes: prov CLI: versioned spec.toml per item (`<kind>/<name>`), core kinds plus backend plugins (render/validate/plan), never applies; synthetic examples only (RFC 5737/3849 IPs, example.com); Python 3.10+ with uv.
 
-`prov` turns one versioned `host.toml` per machine into the install artefacts of its distro,
+`prov` turns one versioned `spec.toml` per item into the artefacts its backend produces,
 checks them, and prints the steps a human runs to apply them. It never applies anything: no
-disk writes outside the host's `rendered/` directory, no ssh, no VM creation, no network
+disk writes outside the item's `rendered/` directory, no ssh, no VM creation, no network
 calls.
 
-| Distro | Artefacts | Storage layouts |
-|---|---|---|
-| `ubuntu` (22.04, 24.04) | NoCloud seed: autoinstall `user-data`, `meta-data`, `kernel-cmdline` | `lvm`, `zfs`, `mdraid` |
+provision-hub is generic across domains — OS installs, OS images, VM setups, Kubernetes
+distributions — and champions no backend: a **kind** fixes what an item is (its core keys),
+any number of **backends** render it. The first wave is OS installs (`os-install`, shipped)
+and OS images (`image`, planned). See [docs/kinds.md](docs/kinds.md).
 
-Talos, NixOS and Proxmox VE follow through the same plugin contract
-([docs/adding-a-distro.md](docs/adding-a-distro.md)).
+| Kind | Backend | Artefacts | Notes |
+|---|---|---|---|
+| `os-install` | `ubuntu-autoinstall` (22.04, 24.04) | NoCloud seed: autoinstall `user-data`, `meta-data`, `kernel-cmdline` | storage layouts `lvm`, `zfs`, `mdraid` |
+
+New backends follow [docs/adding-a-backend.md](docs/adding-a-backend.md); new kinds are a
+core change ([docs/kinds.md](docs/kinds.md)).
 
 ## Usage
 
 ```sh
 uv sync
-uv run prov init ubuntu demo      # writes hosts/demo/host.toml with synthetic values
-uv run prov render demo           # writes hosts/demo/rendered/
-uv run prov validate demo         # checks host.toml and the rendered files
-uv run prov diff demo             # fresh render vs. rendered/ on disk
-uv run prov plan demo             # prints the seed-ISO and boot steps; runs nothing
+uv run prov kinds                                             # os-install ...
+uv run prov backends --kind os-install                        # ubuntu-autoinstall ...
+uv run prov init os-install/demo --backend ubuntu-autoinstall # writes os-install/demo/spec.toml (synthetic values)
+uv run prov render os-install/demo                            # writes os-install/demo/rendered/
+uv run prov validate os-install/demo                          # checks spec.toml and the rendered files
+uv run prov diff os-install/demo                              # fresh render vs. rendered/ on disk
+uv run prov plan os-install/demo                              # prints the seed-ISO and boot steps; runs nothing
+uv run prov list                                              # every item under the root
 ```
 
 | Command | Does | Exit codes |
 |---|---|---|
-| `prov distros` | list registered distro plugins | 0 |
-| `prov schema` | print the host JSON Schema for the registered distros | 0 |
-| `prov init <distro> <host> [--force]` | write a starter `hosts/<host>/host.toml` | 0, 2 |
-| `prov render <host>` | make `hosts/<host>/rendered/` hold exactly the rendered files | 0, 2 |
-| `prov validate <host>` | schema + semantic checks, rendered-file checks, staleness | 0, 1 findings, 2 |
-| `prov diff <host>` | unified diff from `rendered/` to a fresh render | 0, 1 diff, 2 |
-| `prov plan <host>` | print the apply steps for a human | 0, 2 |
+| `prov kinds` | list the kinds and their api versions | 0 |
+| `prov backends [--kind K]` | list registered backends (name, kind) | 0, 2 |
+| `prov list` | list every item under the root (ref, backend) | 0, 1 unreadable item, 2 |
+| `prov schema <kind> [--backend B]` | print the JSON Schema of a kind | 0, 2 |
+| `prov init <ref> --backend B [--force]` | write a starter `<kind>/<name>/spec.toml` | 0, 2 |
+| `prov render <ref>` | make `<kind>/<name>/rendered/` hold exactly the rendered files | 0, 2 |
+| `prov validate <ref>` | envelope, schema and semantic checks, rendered-file checks, staleness | 0, 1 findings, 2 |
+| `prov diff <ref>` | unified diff from `rendered/` to a fresh render | 0, 1 diff, 2 |
+| `prov plan <ref>` | print the apply steps for a human | 0, 2 |
 
-Exit code 2 means a usage or configuration error (missing host, invalid `host.toml`).
+A ref is `<kind>/<name>`, e.g. `os-install/demo`. Exit code 2 means a usage or configuration
+error (missing item, unknown kind or backend, bad envelope, invalid `spec.toml`).
 
 **Root.** `--root DIR`, else `$PROV_ROOT`, else the current directory. Layout:
 
 ```text
-<root>/hosts/<host>/host.toml      # you write this (prov init gives a start)
-<root>/hosts/<host>/rendered/      # owned by prov render; stale files are removed
+<root>/<kind>/<name>/spec.toml     # you write this (prov init gives a start)
+<root>/<kind>/<name>/rendered/     # owned by prov render; stale files are removed; commit it
+<root>/<kind>/<name>/build/        # reserved for a later prov build; gitignored
 ```
 
-**Host schema.** Every `host.toml` starts with `schema_version = 1`; a missing or unknown
-version is rejected. The schema is published as JSON Schema in
-[schema/host.v1.schema.json](schema/host.v1.schema.json) (editors can use it through
-taplo/Even Better TOML). Common keys: `hostname`, `domain`, `distro`, `arch`, `firmware`,
-`timezone`, `locale`, `keyboard`, `[[users]]`, `[network]`, `[storage]`; each distro adds
-its own table (`[ubuntu]`). Secrets are never inline: identity is ssh-key based and a user
-password, if any, is a crypt hash (`password_hash`). Within schema version 1 changes are
-additive only; anything else bumps the version.
+**Specs.** Every `spec.toml` starts with the envelope `api_version = "prov/v1alpha1"`,
+`kind` (equal to its directory) and `backend`; then the kind's core keys; then one table
+named after the backend (`[ubuntu-autoinstall]`). A missing or unknown `api_version`, a
+mismatched `kind`, an unknown backend or a legacy `schema_version` key is rejected. Each
+kind's schema is published as JSON Schema, e.g.
+[schema/os-install.v1alpha1.schema.json](schema/os-install.v1alpha1.schema.json) (editors
+can use it through taplo/Even Better TOML). Secrets are never inline: identity is ssh-key
+based and a user password, if any, is a crypt hash (`password_hash`). `v1alpha*` formats may
+still break, always with a migration note in [CHANGELOG.md](CHANGELOG.md); from 1.0
+`prov/v1` changes are additive only.
 
-**Examples.** Each directory under [examples/](examples/) is a root with one host and its
-committed rendered output, for example:
+**Examples.** [examples/](examples/) is one root with an item per Ubuntu storage layout and
+its committed rendered output:
 
 ```sh
-uv run prov --root examples/ubuntu-lvm diff demo-lvm
+uv run prov --root examples list
+uv run prov --root examples diff os-install/demo-lvm
 ```
 
 They use only documentation addresses (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24,
@@ -75,12 +90,12 @@ install in a VM yet, ZFS least of all (it follows curtin's documented ZFS root e
 subiquity's guided ZFS datasets, on a single disk). Test in a throwaway VM before relying on
 one.
 
-**Safety.** `render` and `init` refuse to write through symlinks (`hosts/`, the host
-directory, `rendered/`, files inside it); symlinks found inside `rendered/` are removed,
-never followed. `host.toml` itself must be a regular file of at most 1 MiB: symlinks,
-FIFOs and devices are refused. Written files get the umask's mode, or keep the mode of the
-file they replace. Host values may not contain control characters, and `plan` shell-quotes
-every host value it prints.
+**Safety.** `render` and `init` refuse to write through symlinks (`<kind>/`, the item
+directory, `rendered/`, `build/`, files inside `rendered/`); symlinks found inside
+`rendered/` are removed, never followed. `spec.toml` itself must be a regular file of at
+most 1 MiB: symlinks, FIFOs and devices are refused. Written files get the umask's mode, or
+keep the mode of the file they replace. Spec values may not contain control characters, and
+`plan` shell-quotes every spec value it prints.
 
 **External validators** are optional: `prov validate` runs `cloud-init schema` when
 cloud-init is installed and otherwise reports `skipped: cloud-init not installed`.

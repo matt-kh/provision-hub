@@ -54,6 +54,10 @@ def _non_doc_addresses(text):
     return bad
 
 
+def test_scanned_paths_exist():
+    assert [p for p in SCANNED if not p.exists()] == []
+
+
 def test_detector_catches_real_addresses():
     assert _non_doc_addresses("10.0.0.1 8.8.8.8 2a00:1450::1 fe80::1") == ["10.0.0.1", "8.8.8.8", "2a00:1450::1", "fe80::1"]
     assert _non_doc_addresses("192.0.2.1 2001:db8::1 02:00:00:00:00:01 12:30") == []
