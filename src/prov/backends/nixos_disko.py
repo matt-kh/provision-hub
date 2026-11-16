@@ -139,6 +139,16 @@ def check(spec: Dict[str, Any], ctx: Any) -> List[Finding]:
             out.append(
                 Finding(WARNING, f"{short_repr(disk)} is not a {BY_ID} path; kernel names like /dev/sda can change between boots", f"storage.disks[{d}]")
             )
+    for i, iface in enumerate(spec["network"]["interfaces"]):
+        if "macaddress" not in iface and re.fullmatch(r"eth[0-9]+", iface["name"]):
+            out.append(
+                Finding(
+                    WARNING,
+                    f"{short_repr(iface['name'])} has no macaddress; NixOS names NICs predictably (e.g. enp3s0), so it likely "
+                    "matches no NIC. Add macaddress to name the NIC, or use its predictable name",
+                    f"network.interfaces[{i}]",
+                )
+            )
     if spec["arch"] == "arm64" and spec["firmware"] == "bios":
         out.append(Finding(ERROR, "arm64 boots with UEFI only", "firmware"))
     for n, user in enumerate(spec["users"]):
@@ -225,6 +235,8 @@ def _network(spec: Dict[str, Any]) -> List[str]:
         "  networking.useDHCP = false;",
         "  networking.useNetworkd = true;",
         "  systemd.network.enable = true;",
+        "  # Boot waits for one configured interface, not all (an unplugged NIC would stall it).",
+        "  systemd.network.wait-online.anyInterface = true;",
     ]
     dns = spec["network"]["dns"]
     if dns["nameservers"]:
@@ -343,7 +355,9 @@ def configuration_nix(spec: Dict[str, Any]) -> str:
     lines += [
         f"  time.timeZone = {nix_str(spec['timezone'])};",
         f"  i18n.defaultLocale = {nix_str(spec['locale'])};",
-        f"  console.keyMap = {nix_str(spec['keyboard'])};",
+        "  # keyboard is an XKB layout; the console keymap is derived from it (X stays disabled).",
+        f"  services.xserver.xkb.layout = {nix_str(spec['keyboard'])};",
+        "  console.useXkbConfig = true;",
         "",
     ]
     lines += _network(spec)
@@ -456,6 +470,8 @@ def installer_nix(spec: Dict[str, Any]) -> str:
             f"  disk = {nix_str(disk)};",
             f"  target = {target};",
             "  disko = self.inputs.disko.packages.${pkgs.stdenv.hostPlatform.system}.disko;",
+            "  # As in configuration.nix: no ../ when this file sits directly in the store.",
+            "  storeRoot = dirOf (toString ./.) == builtins.storeDir;",
             "",
             "  # The flake disko-install evaluates on the stick. disko-install copies only the flake",
             "  # directory (a ?dir= flake ref loses its dir there), so ../hardware-configuration.nix",
@@ -475,7 +491,7 @@ def installer_nix(spec: Dict[str, Any]) -> str:
             '        cp ${./installer.nix} "$out/installer.nix"',
             '        cp ${./flake.lock} "$out/flake.lock"',
             "      ''",
-            "      + lib.optionalString (builtins.pathExists ../hardware-configuration.nix) ''",
+            "      + lib.optionalString (!storeRoot && builtins.pathExists ../hardware-configuration.nix) ''",
             f'        cp ${{../hardware-configuration.nix}} "$out/{HW_COPY}"',
             "      ''",
             "    );",
@@ -509,6 +525,10 @@ def installer_nix(spec: Dict[str, Any]) -> str:
             "    text = ''",
             "      disk=${lib.escapeShellArg disk}",
             "      host=${lib.escapeShellArg hostName}",
+            '      if [ ! -t 0 ]; then',
+            '        echo "install-$host: run it on a terminal; the confirmation must be typed" >&2',
+            "        exit 1",
+            "      fi",
             '      if [ "$(id -u)" -ne 0 ]; then',
             '        echo "install-$host: run it as root: sudo install-$host" >&2',
             "        exit 1",
@@ -524,16 +544,22 @@ def installer_nix(spec: Dict[str, Any]) -> str:
             '        echo "install-$host: $disk ($dev) is a $type, not a whole disk; refusing, nothing was changed" >&2',
             "        exit 1",
             "      fi",
-            "      # The installer medium: the NixOS ISO mounts it at /iso (iso-image.nix).",
+            "      # Anything in the disk's tree mounted or used as swap (partitions, dm, loop, md).",
+            '      if lsblk -nro MOUNTPOINTS "$dev" | grep -q .; then',
+            '        echo "install-$host: $disk ($dev) or a device on it is mounted or used as swap; refusing, nothing was changed" >&2',
+            '        lsblk -o NAME,TYPE,MOUNTPOINTS "$dev" >&2',
+            "        exit 1",
+            "      fi",
+            "      # The installer medium: the NixOS ISO mounts it at /iso (iso-image.nix); every disk",
+            "      # it sits on (through partitions, dm or md) must differ from the target.",
             '      medium=$(findmnt -no SOURCE /iso || true)',
             '      if [ -n "$medium" ] && [ -b "$medium" ]; then',
-            '        medium=$(readlink -f "$medium")',
-            '        parent=$(lsblk -no PKNAME "$medium" | head -n 1)',
-            '        if [ -n "$parent" ]; then medium="/dev/$parent"; fi',
-            '        if [ "$medium" = "$dev" ]; then',
-            '          echo "install-$host: $disk ($dev) is the USB stick this installer booted from; refusing, nothing was changed" >&2',
-            "          exit 1",
-            "        fi",
+            "        while read -r name kind; do",
+            '          if [ "$kind" = "disk" ] && [ "$(readlink -f "$name")" = "$dev" ]; then',
+            '            echo "install-$host: $disk ($dev) is the USB stick this installer booted from; refusing, nothing was changed" >&2',
+            "            exit 1",
+            "          fi",
+            '        done < <(lsblk -nrpso NAME,TYPE "$medium")',
             "      fi",
             '      serial=$(lsblk -dno SERIAL "$dev" | tr -d "[:space:]")',
             '      if [ "$(printf %s "$serial" | wc -c)" -ge 4 ]; then',
@@ -618,7 +644,9 @@ _REQUIRED = [
     ("installer.nix", "closureInfo", "the offline closure (closureInfo)"),
     ("installer.nix", 'if [ "$answer" != "$expect" ]; then', "the typed confirmation"),
     ("installer.nix", 'if [ "$type" != "disk" ]; then', "the whole-disk check"),
-    ("installer.nix", 'if [ "$medium" = "$dev" ]; then', "the installer-medium check"),
+    ("installer.nix", 'lsblk -nrpso NAME,TYPE "$medium"', "the installer-medium check"),
+    ("installer.nix", 'if lsblk -nro MOUNTPOINTS "$dev" | grep -q .; then', "the mounted-disk check"),
+    ("installer.nix", "if [ ! -t 0 ]; then", "the terminal check"),
     ("installer.nix", "builtins.pathExists ./flake.lock", "the flake.lock assertion"),
     ("installer.nix", "disko-install ", "the disko-install call"),
 ]
@@ -684,8 +712,8 @@ def validate(rendered_dir: Path) -> List[Finding]:
     if flake is not None:
         attrs = re.findall(rf"^\s*nixosConfigurations\.(?:{_STRING}|([A-Za-z_][A-Za-z0-9_'-]*)) = ", flake, re.M)
         names = [quoted or bare for quoted, bare in attrs]
-        targets = [n for n in names if not n.endswith("-installer")]
-        if len(targets) != 1 or f"{targets[0]}-installer" not in names:
+        targets = [n for n in names if f"{n}-installer" in names]
+        if len(names) != 2 or len(targets) != 1:
             findings.append(Finding(ERROR, "needs nixosConfigurations.<host> and nixosConfigurations.<host>-installer", "flake.nix"))
         else:
             host = targets[0]
@@ -740,12 +768,14 @@ def plan(spec: Dict[str, Any], ctx: Any) -> List[str]:
     mode = "UEFI" if spec["firmware"] == "uefi" else "legacy BIOS"
     login = next((u["name"] for u in spec["users"] if u["ssh_authorized_keys"]), None)
     address = next((a.split("/")[0] for i in spec["network"]["interfaces"] for a in i["addresses"]), None)
-    ssh = f"ssh {q(login)}@{q(address) if address else '<host-ip>'}" if login else None
+    # The ISO's out-link (its GC root) lives outside the hosts repository and outside every
+    # prov-owned directory: render would delete a link in rendered/, and validate/diff flag it.
+    link = f'"$HOME"/prov-iso/{q(f"{host}-installer")}'
     lines = [
         "",
         "# Static validation only: prov has not installed this configuration on hardware.",
         "# Nix copies only git-tracked files of a flake: keep this item in a git repository and",
-        "# git add rendered/, flake.lock and ../hardware-configuration.nix before every nix command.",
+        "# git add the rendered files, flake.lock and ../hardware-configuration.nix before nix runs.",
         "",
         "# 1. Optional, recommended: capture the target's hardware configuration. ON THE TARGET,",
         "#    booted from the stock NixOS minimal ISO, run:",
@@ -755,29 +785,42 @@ def plan(spec: Dict[str, Any], ctx: Any) -> List[str]:
         "git add ../hardware-configuration.nix",
         "#    configuration.nix imports it when present; without it a broad initrd driver set is used.",
         "",
-        "# 2. Lock the flake inputs here and commit the lock (render keeps rendered/flake.lock):",
+        "# 2. Track the rendered files, lock the flake inputs and commit the lock",
+        "#    (render keeps rendered/flake.lock):",
+        "git add . ../spec.toml",
         "nix flake lock",
         f"git add flake.lock && git commit -m {q(f'Lock the {host} flake inputs')}",
         "",
-        "# 3. Build the installer ISO (large: it carries the target closure for an offline install):",
-        f"nix build {installer}",
-        "ls result/iso/",
+        "# 3. Build the installer ISO (large: it carries the target closure for an offline install).",
+        "#    The out-link under ~/prov-iso keeps the ISO from garbage collection; delete the link",
+        "#    when you no longer need the ISO.",
+        'mkdir -p "$HOME"/prov-iso',
+        f"nix build {installer} --out-link {link}",
+        f"ls {link}/iso/",
         "",
         "# 4. Write the ISO to a USB stick. WARNING: this WIPES the stick. Find its by-id path with",
-        "#    ls -l /dev/disk/by-id/ | grep usb   and double-check it. A GUI writer (GNOME Disks,",
-        "#    balenaEtcher, Rufus in DD mode) is safer than dd:",
-        "sudo dd if=result/iso/<ISO-FILE> of=/dev/disk/by-id/usb-<YOUR-STICK> bs=4M conv=fsync status=progress",
+        "#    ls -l /dev/disk/by-id/ | grep usb   and set USB to it below (double-check it).",
+        "#    A GUI writer (GNOME Disks, balenaEtcher, Rufus in DD mode) is safer than dd.",
+        f"ISO=$(echo {link}/iso/*.iso)",
+        "USB=/dev/disk/by-id/usb-CHANGE-ME",
+        'if [ -b "$USB" ]; then sudo dd if="$ISO" of="$USB" bs=4M conv=fsync status=progress; else echo "USB=$USB is not a block device; set USB first" >&2; fi',
         "",
         f"# 5. WARNING: the install WIPES {disks} on the target machine.",
         f"#    Boot the target from the USB stick in {mode} mode, then run on its console:",
         f"sudo {q(f'install-{host}')}",
-        f"#    It refuses anything but the whole disk {q(disk)} (never a partition or the USB stick),",
-        "#    shows it, asks for the last 4 characters of its serial (or the hostname when it has",
-        "#    none), then runs disko-install offline. Any other answer aborts without changes.",
+        f"#    It stops unless {q(disk)} is a whole disk, has nothing mounted or used as swap,",
+        "#    is not the USB stick it booted from, and the command runs on a terminal. It shows",
+        "#    the disk, asks for the last 4 characters of its serial (or the hostname when the",
+        "#    disk reports none), then runs disko-install offline. Any other answer aborts.",
         "",
         "# 6. Post-install checks: remove the stick, reboot into the installed system, then",
     ]
-    lines.append(f"{ssh}" if ssh else "#    log in on the console (no user has an ssh key).")
+    if login and address:
+        lines.append(f"ssh {q(login)}@{q(address)}")
+    elif login:
+        lines += ["HOST_IP=CHANGE-ME", f'ssh {q(login)}@"$HOST_IP"']
+    else:
+        lines.append("#    log in on the console (no user has an ssh key).")
     lines += [
         "#    and on the installed host:",
         "nixos-version",
@@ -820,6 +863,8 @@ search = ["example.com"]
 
 [[network.interfaces]]
 name = "eth0"
+# Locally administered synthetic MAC: replace it with the NIC's real address.
+macaddress = "02:00:00:00:00:01"
 addresses = ["192.0.2.10/24", "2001:db8::10/64"]
 gateway4 = "192.0.2.1"
 gateway6 = "2001:db8::1"

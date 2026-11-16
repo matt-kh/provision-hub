@@ -11,6 +11,8 @@ let
   disk = "/dev/disk/by-id/nvme-EXAMPLE_SSD_SERIAL_0000000000";
   target = self.nixosConfigurations.demo-nixos-ext4;
   disko = self.inputs.disko.packages.${pkgs.stdenv.hostPlatform.system}.disko;
+  # As in configuration.nix: no ../ when this file sits directly in the store.
+  storeRoot = dirOf (toString ./.) == builtins.storeDir;
 
   # The flake disko-install evaluates on the stick. disko-install copies only the flake
   # directory (a ?dir= flake ref loses its dir there), so ../hardware-configuration.nix
@@ -30,7 +32,7 @@ let
         cp ${./installer.nix} "$out/installer.nix"
         cp ${./flake.lock} "$out/flake.lock"
       ''
-      + lib.optionalString (builtins.pathExists ../hardware-configuration.nix) ''
+      + lib.optionalString (!storeRoot && builtins.pathExists ../hardware-configuration.nix) ''
         cp ${../hardware-configuration.nix} "$out/hardware-configuration.installer-copy.nix"
       ''
     );
@@ -64,6 +66,10 @@ let
     text = ''
       disk=${lib.escapeShellArg disk}
       host=${lib.escapeShellArg hostName}
+      if [ ! -t 0 ]; then
+        echo "install-$host: run it on a terminal; the confirmation must be typed" >&2
+        exit 1
+      fi
       if [ "$(id -u)" -ne 0 ]; then
         echo "install-$host: run it as root: sudo install-$host" >&2
         exit 1
@@ -79,16 +85,22 @@ let
         echo "install-$host: $disk ($dev) is a $type, not a whole disk; refusing, nothing was changed" >&2
         exit 1
       fi
-      # The installer medium: the NixOS ISO mounts it at /iso (iso-image.nix).
+      # Anything in the disk's tree mounted or used as swap (partitions, dm, loop, md).
+      if lsblk -nro MOUNTPOINTS "$dev" | grep -q .; then
+        echo "install-$host: $disk ($dev) or a device on it is mounted or used as swap; refusing, nothing was changed" >&2
+        lsblk -o NAME,TYPE,MOUNTPOINTS "$dev" >&2
+        exit 1
+      fi
+      # The installer medium: the NixOS ISO mounts it at /iso (iso-image.nix); every disk
+      # it sits on (through partitions, dm or md) must differ from the target.
       medium=$(findmnt -no SOURCE /iso || true)
       if [ -n "$medium" ] && [ -b "$medium" ]; then
-        medium=$(readlink -f "$medium")
-        parent=$(lsblk -no PKNAME "$medium" | head -n 1)
-        if [ -n "$parent" ]; then medium="/dev/$parent"; fi
-        if [ "$medium" = "$dev" ]; then
-          echo "install-$host: $disk ($dev) is the USB stick this installer booted from; refusing, nothing was changed" >&2
-          exit 1
-        fi
+        while read -r name kind; do
+          if [ "$kind" = "disk" ] && [ "$(readlink -f "$name")" = "$dev" ]; then
+            echo "install-$host: $disk ($dev) is the USB stick this installer booted from; refusing, nothing was changed" >&2
+            exit 1
+          fi
+        done < <(lsblk -nrpso NAME,TYPE "$medium")
       fi
       serial=$(lsblk -dno SERIAL "$dev" | tr -d "[:space:]")
       if [ "$(printf %s "$serial" | wc -c)" -ge 4 ]; then

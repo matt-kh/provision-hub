@@ -6,6 +6,7 @@ import copy
 import re
 import os
 import shlex
+import shutil
 import subprocess
 
 import pytest
@@ -19,6 +20,7 @@ from prov.spec import check_spec
 from prov.validate import ERROR, SKIPPED, WARNING
 
 DISK = "/dev/disk/by-id/nvme-EXAMPLE_SSD_SERIAL_0000000000"
+BASH = shutil.which("bash")  # looked up at import: the autouse fixture stubs shutil.which
 
 
 def check_host(raw):
@@ -264,7 +266,9 @@ def test_ssh_hardening_and_basics():
         'networking.domain = "example.com";',
         'time.timeZone = "Etc/UTC";',
         'i18n.defaultLocale = "en_US.UTF-8";',
-        'console.keyMap = "us";',
+        'services.xserver.xkb.layout = "us";',
+        "console.useXkbConfig = true;",
+        "systemd.network.wait-online.anyInterface = true;",
         "pkgs.git",
     ):
         assert needle in conf, needle
@@ -301,11 +305,14 @@ def test_installer_refuses_partitions_and_the_boot_medium():
     whole = inst.index('if [ "$type" != "disk" ]; then')
     assert 'type=$(lsblk -dno TYPE "$dev")' in inst and whole < prompt
     assert "is a $type, not a whole disk; refusing, nothing was changed" in inst
-    medium = inst.index('if [ "$medium" = "$dev" ]; then')
+    medium = inst.index('done < <(lsblk -nrpso NAME,TYPE "$medium")')
     assert "medium=$(findmnt -no SOURCE /iso || true)" in inst
-    assert 'parent=$(lsblk -no PKNAME "$medium" | head -n 1)' in inst
     assert "is the USB stick this installer booted from; refusing, nothing was changed" in inst and medium < prompt
-    assert inst.index("exit 1", whole) < prompt and inst.index("exit 1", medium) < prompt
+    mounted = inst.index('if lsblk -nro MOUNTPOINTS "$dev" | grep -q .; then')
+    assert "or a device on it is mounted or used as swap; refusing, nothing was changed" in inst and mounted < prompt
+    tty = inst.index("if [ ! -t 0 ]; then")
+    assert "run it on a terminal; the confirmation must be typed" in inst and tty < prompt
+    assert inst.index("exit 1", whole) < prompt and inst.index("exit 1", mounted) < prompt
 
 
 def test_installer_confirms_with_serial_or_hostname():
@@ -355,7 +362,9 @@ def test_clean_render_validates(rendered):
         ("disko.nix", lambda t: t.replace('mountpoint = "/";', 'mountpoint = "/srv";'), "a root filesystem is missing"),
         ("installer.nix", lambda t: t.replace('if [ "$answer" != "$expect" ]; then', "if false; then"), "the typed confirmation"),
         ("installer.nix", lambda t: t.replace('if [ "$type" != "disk" ]; then', "if false; then"), "the whole-disk check"),
-        ("installer.nix", lambda t: t.replace('if [ "$medium" = "$dev" ]; then', "if false; then"), "the installer-medium check"),
+        ("installer.nix", lambda t: t.replace('lsblk -nrpso NAME,TYPE "$medium"', "true"), "the installer-medium check"),
+        ("installer.nix", lambda t: t.replace('if lsblk -nro MOUNTPOINTS "$dev" | grep -q .; then', "if false; then"), "the mounted-disk check"),
+        ("installer.nix", lambda t: t.replace("if [ ! -t 0 ]; then", "if false; then"), "the terminal check"),
         ("installer.nix", lambda t: t.replace("builtins.pathExists ./flake.lock", "true"), "the flake.lock assertion"),
         ("installer.nix", lambda t: t.replace('hostName = "demo";', 'hostName = "x";'), "hostName differs"),
         ("installer.nix", lambda t: t.replace("in\n{\n", 'in\n{\n  systemd.services.go.script = "install-demo";\n'), "must not run anything at boot"),
@@ -506,9 +515,11 @@ def test_plan_order_and_no_execution(tmp_path, capsys, monkeypatch, firmware):
     lines = out.splitlines()
     order = [
         "#        nixos-generate-config --no-filesystems --show-hardware-config > hardware-configuration.nix",
+        "git add . ../spec.toml",
         "nix flake lock",
-        "nix build .#nixosConfigurations.demo-installer.config.system.build.isoImage",
-        "sudo dd if=result/iso/<ISO-FILE> of=/dev/disk/by-id/usb-<YOUR-STICK> bs=4M conv=fsync status=progress",
+        'nix build .#nixosConfigurations.demo-installer.config.system.build.isoImage --out-link "$HOME"/prov-iso/demo-installer',
+        "USB=/dev/disk/by-id/usb-CHANGE-ME",
+        'if [ -b "$USB" ]; then sudo dd if="$ISO" of="$USB" bs=4M conv=fsync status=progress; else echo "USB=$USB is not a block device; set USB first" >&2; fi',
         "sudo install-demo",
         "nixos-version",
     ]
@@ -519,6 +530,17 @@ def test_plan_order_and_no_execution(tmp_path, capsys, monkeypatch, firmware):
     assert ("UEFI mode" in out) == (firmware == "uefi")
     assert "git add ../hardware-configuration.nix" in lines
     assert sorted((str(p), p.stat().st_mtime_ns) for p in tmp_path.rglob("*")) == before
+    # no default ./result link inside the item; no bare <placeholder> a paste could read as a redirect
+    build = next(line for line in lines if line.startswith("nix build "))
+    assert "--out-link" in build and not shlex.split(build)[-1].startswith((".", "result"))
+    assert not any("result" in line for line in lines if not line.startswith("#"))
+    assert not any("<" in line for line in lines if not line.startswith("#"))
+
+
+def test_plan_without_a_static_address_uses_a_variable():
+    spec = host(lambda r: r["network"]["interfaces"][0].update(addresses=[], dhcp4=True))
+    lines = nixos.plan(spec, Context("demo"))
+    assert lines[lines.index("HOST_IP=CHANGE-ME") + 1] == 'ssh ops@"$HOST_IP"'
 
 
 def test_plan_quotes_hostile_values(tmp_path):
@@ -552,3 +574,169 @@ def test_plan_refuses_values_with_line_breaks(tmp_path, field):
         spec["users"][0]["name"] = "ops\rrm -rf ~"
     with pytest.raises(ConfigError, match="line break"):
         plan_lines(nixos, spec, Context("demo"), "os-install/demo", tmp_path)
+
+
+# --- second review: pairing, warnings, guards ---------------------------------------------
+
+
+def test_hostname_ending_in_installer_validates(tmp_path, capsys):
+    root = str(tmp_path)
+    assert run(capsys, "--root", root, "init", "os-install/box-installer", "--backend", "nixos-disko")[0] == 0
+    assert run(capsys, "--root", root, "render", "os-install/box-installer")[0] == 0
+    code, out, err = run(capsys, "--root", root, "validate", "os-install/box-installer")
+    assert code == 0 and "ok: os-install/box-installer" in out, err
+    flake = (tmp_path / "os-install/box-installer/rendered/flake.nix").read_text()
+    assert "nixosConfigurations.box-installer = " in flake and "nixosConfigurations.box-installer-installer = " in flake
+
+
+def test_eth_name_without_macaddress_warns():
+    findings = spec_findings(lambda r: r["network"]["interfaces"][0].pop("macaddress"))
+    assert messages(findings) == []
+    assert any("'eth0' has no macaddress" in m for m in messages(findings, WARNING))
+    renamed = spec_findings(lambda r: (r["network"]["interfaces"][0].pop("macaddress"), r["network"]["interfaces"][0].update(name="enp3s0")))
+    assert not messages(renamed, WARNING)
+
+
+def test_starter_names_its_nic_by_a_synthetic_mac():
+    iface = host()["network"]["interfaces"][0]
+    assert iface["macaddress"] == "02:00:00:00:00:01" and int(iface["macaddress"][:2], 16) & 0b10  # locally administered
+
+
+def test_installer_reads_the_parent_hardware_file_only_outside_the_store_root():
+    inst = nixos.render(host(), Context("demo"))["installer.nix"]
+    assert "storeRoot = dirOf (toString ./.) == builtins.storeDir;" in inst
+    assert "lib.optionalString (!storeRoot && builtins.pathExists ../hardware-configuration.nix)" in inst
+
+
+def test_keyboard_is_an_xkb_layout():
+    conf = nixos.render(host(lambda r: r.update(keyboard="de")), Context("demo"))["configuration.nix"]
+    assert 'services.xserver.xkb.layout = "de";' in conf and "console.useXkbConfig = true;" in conf
+    assert "console.keyMap" not in conf and "services.xserver.enable" not in conf
+
+
+# --- behaviour of the rendered install script (stubbed lsblk/findmnt/readlink/id) ---------
+
+STUBS = {
+    "id": 'echo 0\n',
+    "readlink": 'echo "${@: -1}"\n',
+    "findmnt": 'printf "%s\\n" "$STUB_MEDIUM"\n',
+    "lsblk": r'''case "$*" in
+  "-dno TYPE "*) echo "$STUB_TYPE" ;;
+  "-nro MOUNTPOINTS "*) printf "%s" "$STUB_MOUNTS" ;;
+  "-nrpso NAME,TYPE "*) printf "%b" "$STUB_ANCESTORS" ;;
+  "-dno SERIAL "*) echo "$STUB_SERIAL" ;;
+  *) echo "lsblk $*" ;;
+esac
+''',
+    "disko-install": 'printf "%s\\n" "$@" > "$STUB_LOG"\n',
+}
+
+
+def _script(firmware, disk, tmp_path):
+    """The install-<host> script as writeShellApplication would run it.
+
+    Nix interpolations are substituted as Nix would; the three file-type tests that cannot
+    be stubbed ([ -b ] on the disk and the medium, [ -t 0 ]) become [ -e ] / always-true.
+    """
+    inst = nixos.render(host(lambda r: r.update(firmware=firmware)), Context("demo"))["installer.nix"]
+    body = inst.split("    text = ''\n", 1)[1].split("\n    '';\n", 1)[0]
+    lines = [line[6:] if line.startswith("      ") else line for line in body.split("\n")]
+    text = "\n".join(lines)
+    text = text.replace("${lib.escapeShellArg disk}", shlex.quote(disk))
+    text = text.replace("${lib.escapeShellArg hostName}", "demo")
+    text = text.replace('${lib.escapeShellArg "${installFlake}#${hostName}"}', "/nix/store/fake-install-flake#demo")
+    assert "${" not in text, "an unsubstituted Nix interpolation is left"
+    text = text.replace('[ ! -b "$disk" ]', '[ ! -e "$disk" ]').replace('[ -b "$medium" ]', '[ -e "$medium" ]')
+    text = text.replace("[ ! -t 0 ]", '[ -n "${STUB_NOTTY:-}" ]')
+    path = tmp_path / "install-demo"
+    path.write_text("#!/usr/bin/env bash\nset -o errexit -o nounset -o pipefail\n" + text + "\n")
+    return path
+
+
+@pytest.fixture
+def script_env(tmp_path):
+    bash = BASH
+    if bash is None:
+        pytest.skip("bash not available")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name, body in STUBS.items():
+        (bin_dir / name).write_text("#!/usr/bin/env bash\n" + body)
+        (bin_dir / name).chmod(0o755)
+    disk = tmp_path / "disk-by-id"
+    disk.write_text("")
+    medium = tmp_path / "iso-medium"
+    medium.write_text("")
+    env = {
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "STUB_TYPE": "disk",
+        "STUB_MOUNTS": "",
+        "STUB_MEDIUM": str(medium),
+        "STUB_ANCESTORS": f"{medium} part\\n/dev/sdz disk\\n",
+        "STUB_SERIAL": "EXAMPLE-SERIAL-9876",
+        "STUB_LOG": str(tmp_path / "disko-install.args"),
+    }
+
+    def run_script(firmware="uefi", answer="9876\n", **overrides):
+        script = _script(firmware, str(disk), tmp_path)
+        proc = subprocess.run(
+            [bash, str(script)], input=answer, capture_output=True, text=True, timeout=30, env={**env, **overrides}
+        )
+        log = tmp_path / "disko-install.args"
+        args = log.read_text().splitlines() if log.exists() else None
+        if log.exists():
+            log.unlink()
+        return proc, args
+
+    return run_script, str(disk), str(medium)
+
+
+def test_script_refuses_a_partition(script_env):
+    run_script, _, _ = script_env
+    proc, args = run_script(STUB_TYPE="part")
+    assert proc.returncode == 1 and "is a part, not a whole disk; refusing" in proc.stderr and args is None
+
+
+def test_script_refuses_a_disk_with_something_mounted(script_env):
+    run_script, _, _ = script_env
+    proc, args = run_script(STUB_MOUNTS="/mnt\n")
+    assert proc.returncode == 1 and "mounted or used as swap; refusing" in proc.stderr and args is None
+
+
+def test_script_refuses_the_boot_medium_two_levels_down(script_env):
+    run_script, disk, medium = script_env
+    # /iso on a dm device on a partition of the target disk (Ventoy-style)
+    proc, args = run_script(STUB_ANCESTORS=f"{medium} dm\\n/dev/sdz1 part\\n{disk} disk\\n")
+    assert proc.returncode == 1 and "is the USB stick this installer booted from; refusing" in proc.stderr and args is None
+
+
+def test_script_refuses_without_a_terminal(script_env):
+    run_script, _, _ = script_env
+    proc, args = run_script(STUB_NOTTY="1")
+    assert proc.returncode == 1 and "run it on a terminal" in proc.stderr and args is None
+
+
+@pytest.mark.parametrize("answer", ["nope\n", "demo\n", "", "98765\n"])
+def test_script_aborts_on_a_wrong_confirmation(script_env, answer):
+    run_script, _, _ = script_env
+    proc, args = run_script(answer=answer)
+    assert proc.returncode == 1 and "confirmation did not match; aborted, nothing was changed" in proc.stderr and args is None
+    if answer:
+        assert "Disk serial: EXAMPLE-SERIAL-9876" in proc.stdout and "last 4 characters of the disk serial" in proc.stdout
+
+
+@pytest.mark.parametrize("firmware", ["uefi", "bios"])
+def test_script_runs_disko_install_after_the_serial(script_env, firmware):
+    run_script, disk, _ = script_env
+    proc, args = run_script(firmware=firmware)
+    assert proc.returncode == 0, proc.stderr
+    efi = ["--write-efi-boot-entries"] if firmware == "uefi" else []
+    assert args == efi + ["--flake", "/nix/store/fake-install-flake#demo", "--disk", "main", disk]
+
+
+def test_script_falls_back_to_the_hostname_without_a_serial(script_env):
+    run_script, disk, _ = script_env
+    proc, args = run_script(STUB_SERIAL="", answer="demo\n")
+    assert proc.returncode == 0, proc.stderr
+    assert "the hostname (demo; the disk reports no serial)" in proc.stdout and "Disk serial: none" in proc.stdout
+    assert args[-1] == disk

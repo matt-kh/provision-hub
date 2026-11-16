@@ -28,12 +28,16 @@ in
   networking.domain = "example.com";
   time.timeZone = "Etc/UTC";
   i18n.defaultLocale = "en_US.UTF-8";
-  console.keyMap = "us";
+  # keyboard is an XKB layout; the console keymap is derived from it (X stays disabled).
+  services.xserver.xkb.layout = "us";
+  console.useXkbConfig = true;
 
   # Network: systemd-networkd, one unit per interface; NICs with a MAC are renamed by .link files.
   networking.useDHCP = false;
   networking.useNetworkd = true;
   systemd.network.enable = true;
+  # Boot waits for one configured interface, not all (an unplugged NIC would stall it).
+  systemd.network.wait-online.anyInterface = true;
   networking.nameservers = [ "192.0.2.53" "2001:db8::53" ];
   networking.search = [ "example.com" ];
   systemd.network.links."10-lan0" = {
