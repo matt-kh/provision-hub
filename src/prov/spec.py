@@ -47,6 +47,8 @@ def resolve_backend(raw: Mapping[str, Any], kind_name: str, backends: Mapping[st
     kind = kinds.get(kind_name)
     supported = ", ".join(api_versions(kind))
     legacy = [k for k in LEGACY_KEYS if k in raw]
+    if legacy and "api_version" in raw:  # a half-migrated file
+        raise ConfigError(f"`{legacy[0]}` is a pre-v1alpha1 key; remove it (see CHANGELOG migration)")
     if not legacy and "api_version" not in raw:
         legacy = [k for k in LEGACY_TABLES if k in raw]
     if legacy:
@@ -76,7 +78,7 @@ def name_findings(kind: Any, spec: Mapping[str, Any], name: str) -> List[Finding
     """Warn when the kind's NAME_KEY value differs from the item directory name."""
     key = getattr(kind, "NAME_KEY", None)
     if key and key in spec and spec[key] != name:
-        return [Finding(WARNING, f"{key} {spec[key]!r} differs from the directory name {name!r}", key)]
+        return [Finding(WARNING, f"{key} {short_repr(spec[key])} differs from the directory name {name!r}", key)]
     return []
 
 

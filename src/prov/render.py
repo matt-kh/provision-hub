@@ -15,7 +15,7 @@ import tempfile
 from pathlib import Path, PurePosixPath
 from typing import Dict, List, Tuple
 
-from .schema import ConfigError
+from .schema import CONTROL_CHARS, ConfigError, short_repr, show
 
 
 def safe_item_dir(root: Path, kind: str, name: str) -> Path:
@@ -45,15 +45,17 @@ def check_paths(files: Dict[str, str]) -> None:
     """Reject absolute, escaping or control-character paths returned by a plugin."""
     for name in files:
         p = PurePosixPath(name)
-        if p.is_absolute() or ".." in p.parts or not p.parts or any(ord(c) < 32 or c == "\x7f" for c in name):
-            raise ConfigError(f"plugin returned an unsafe output path: {name!r}")
+        if p.is_absolute() or ".." in p.parts or not p.parts or CONTROL_CHARS.search(name):
+            raise ConfigError(f"plugin returned an unsafe output path: {short_repr(name)}")
 
 
 def _walk(rendered_dir: Path) -> Tuple[List[Path], List[Path], List[Path]]:
     """(regular files, others, directories) under ``rendered_dir``, classified by lstat.
 
     "Others" are symlinks and special files (FIFOs, sockets, devices): never followed, never
-    opened (opening a FIFO would block).
+    opened (opening a FIFO would block). Regular files whose relative path holds a control
+    character are "others" too: no backend can have written them (``check_paths``), so they
+    are never read or diffed, only reported and removed.
     """
     files, others, dirs = [], [], []
     for top, dirnames, filenames in os.walk(rendered_dir, followlinks=False):
@@ -62,15 +64,26 @@ def _walk(rendered_dir: Path) -> Tuple[List[Path], List[Path], List[Path]]:
             mode = os.lstat(path).st_mode
             if stat.S_ISDIR(mode):
                 dirs.append(path)
-            elif stat.S_ISREG(mode):
+            elif stat.S_ISREG(mode) and not CONTROL_CHARS.search(path.relative_to(rendered_dir).as_posix()):
                 files.append(path)
             else:
                 others.append(path)
     return sorted(files), sorted(others), sorted(dirs)
 
 
+def describe_other(path: Path) -> str:
+    """What kind of "other" entry ``path`` is, for messages."""
+    mode = os.lstat(path).st_mode
+    if stat.S_ISLNK(mode):
+        return "symlink"
+    return "file with an unsafe name" if stat.S_ISREG(mode) else "special file"
+
+
 def special_entries(rendered_dir: Path) -> List[str]:
-    """Relative paths of symlinks and special files under ``rendered_dir``."""
+    """Relative paths of symlinks, special files and unsafely named files under ``rendered_dir``.
+
+    The paths are raw; print them through ``prov.schema.show``.
+    """
     if rendered_dir.is_symlink() or not rendered_dir.is_dir():
         return []
     return [p.relative_to(rendered_dir).as_posix() for p in _walk(rendered_dir)[1]]
@@ -143,13 +156,13 @@ def write_rendered(rendered_dir: Path, files: Dict[str, str]) -> List[str]:
     if rendered_dir.is_dir():
         _, others, _ = _walk(rendered_dir)
         for other in others:  # never prov output; unlink does not touch a link's target
-            kind = "symlink" if other.is_symlink() else "special file"
+            kind = describe_other(other)
             other.unlink()
-            changes.append(f"removed {kind} {other.relative_to(rendered_dir).as_posix()}")
+            changes.append(f"removed {kind} {show(other.relative_to(rendered_dir).as_posix())}")
     current = existing_files(rendered_dir)
     for name in sorted(set(current) - set(files)):
         (rendered_dir / name).unlink()
-        changes.append(f"removed {name}")
+        changes.append(f"removed {show(name)}")
     if rendered_dir.is_dir():
         _, _, dirs = _walk(rendered_dir)
         for path in sorted(dirs, key=lambda p: len(p.parts), reverse=True):
@@ -160,19 +173,23 @@ def write_rendered(rendered_dir: Path, files: Dict[str, str]) -> List[str]:
         if current.get(name) == files[name]:
             continue
         _write(rendered_dir, name, files[name])
-        changes.append(f"{'updated' if name in current else 'wrote'} {name}")
+        changes.append(f"{'updated' if name in current else 'wrote'} {show(name)}")
     return sorted(changes, key=lambda c: c.split(" ")[-1])
 
 
 def diff_rendered(rendered_dir: Path, files: Dict[str, str]) -> str:
-    """Unified diff from what is on disk to a fresh render; empty when identical."""
+    """Unified diff from what is on disk to a fresh render; empty when identical.
+
+    File names are shown through ``show``; file contents appear raw, behind the diff's
+    ``+``/``-``/`` `` prefix, as in ``git diff``.
+    """
     check_paths(files)
     current = existing_files(rendered_dir)
     chunks = []
     if rendered_dir.is_dir() and not rendered_dir.is_symlink():
         for other in _walk(rendered_dir)[1]:
-            kind = "symlink" if other.is_symlink() else "special file"
-            chunks.append(f"{kind} {other.relative_to(rendered_dir).as_posix()} would be removed\n")
+            kind = describe_other(other)
+            chunks.append(f"{kind} {show(other.relative_to(rendered_dir).as_posix())} would be removed\n")
     for name in sorted(set(current) | set(files)):
         old, new = current.get(name), files.get(name)
         if old == new:
@@ -181,8 +198,8 @@ def diff_rendered(rendered_dir: Path, files: Dict[str, str]) -> str:
             difflib.unified_diff(
                 (old or "").splitlines(keepends=True),
                 (new or "").splitlines(keepends=True),
-                fromfile=f"a/{name}" if old is not None else "/dev/null",
-                tofile=f"b/{name}" if new is not None else "/dev/null",
+                fromfile=f"a/{show(name)}" if old is not None else "/dev/null",
+                tofile=f"b/{show(name)}" if new is not None else "/dev/null",
             )
         )
     return "".join(line if line.endswith("\n") else line + "\n" for line in chunks)

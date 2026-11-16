@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from .registry import Context, call_plugin
-from .schema import ConfigError
+from .schema import ConfigError, short_repr
 
 
 def plan_lines(plugin: Any, spec: Dict[str, Any], ctx: Context, ref: str, rendered_dir: Path) -> List[str]:
@@ -25,5 +25,5 @@ def plan_lines(plugin: Any, spec: Dict[str, Any], ctx: Context, ref: str, render
     lines.extend(call_plugin(plugin, "plan", spec, ctx))
     for n, line in enumerate(lines):
         if "\n" in line or "\r" in line:
-            raise ConfigError(f"plan line {n} contains a line break; refusing to print it: {line!r}")
+            raise ConfigError(f"plan line {n} contains a line break; refusing to print it: {short_repr(line)}")
     return lines

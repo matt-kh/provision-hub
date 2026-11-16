@@ -16,7 +16,7 @@ from .kinds.common import DEFS
 from .plan import plan_lines
 from .registry import Context, call_plugin, discover, for_kind, lookup
 from .render import atomic_write, diff_rendered, safe_item_dir, special_entries, write_rendered
-from .schema import ID_PATTERN, NAME_PATTERN, SPEC_FILE, ConfigError, api_versions, read_toml, schema_json, short_repr, spec_schema, tomllib
+from .schema import ID_PATTERN, NAME_PATTERN, SPEC_FILE, ConfigError, api_versions, read_toml, schema_json, short_repr, show, spec_schema, tomllib
 from .spec import check_spec, load_spec, parse_ref
 from .validate import ERROR, Finding, has_errors
 
@@ -101,6 +101,8 @@ def cmd_list(args: argparse.Namespace) -> int:
             what = _entry_kind(kdir)
             if what == "symlink":
                 problems.append(Finding(ERROR, "is a symlink; refused", kind))
+            elif what != "dir":
+                problems.append(Finding(ERROR, "is not a directory; a kind directory holds <name>/ items", kind))
             if what != "dir":
                 continue
             entries = sorted(kdir.iterdir())
@@ -204,7 +206,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
         else:
             special = special_entries(rendered)
             for rel in special:  # never followed or read: could point anywhere
-                findings.append(Finding(ERROR, "symlink or special file inside rendered/; run prov render to remove it", f"rendered/{rel}"))
+                findings.append(Finding(ERROR, "symlink, special file or unsafely named file inside rendered/; run prov render to remove it", f"rendered/{show(rel)}"))
             if not special:
                 findings += call_plugin(plugin, "validate", rendered)
             if diff_rendered(rendered, call_plugin(plugin, "render", spec, ctx)):

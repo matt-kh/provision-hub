@@ -12,6 +12,8 @@ import re
 from dataclasses import dataclass
 from typing import Any, List, Mapping, Optional
 
+from .schema import CONTROL_CHARS, short_repr
+
 
 ERROR = "error"
 WARNING = "warning"
@@ -58,8 +60,7 @@ _TYPES = {
     "number": _is_number,
 }
 
-# C0 and C1 controls, DEL, and the Unicode line/paragraph separators.
-_CONTROL = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029]")
+_CONTROL = CONTROL_CHARS
 
 
 def json_equal(a: Any, b: Any) -> bool:
@@ -248,13 +249,13 @@ def schema_errors(instance: Any, schema: Mapping[str, Any], root: Mapping[str, A
     if "const" in schema and not json_equal(instance, schema["const"]):
         errors.append(f"{where}: must be {schema['const']!r}")
     if "enum" in schema and not any(json_equal(instance, e) for e in schema["enum"]):
-        errors.append(f"{where}: {instance!r} is not one of {schema['enum']}")
+        errors.append(f"{where}: {short_repr(instance)} is not one of {schema['enum']}")
 
     if isinstance(instance, str):
         if _CONTROL.search(instance):
             errors.append(f"{where}: control characters (newline, tab, ...) are not allowed")
         elif "pattern" in schema and not ecma_search(schema["pattern"], instance):
-            errors.append(f"{where}: {instance!r} does not match {schema['pattern']}")
+            errors.append(f"{where}: {short_repr(instance)} does not match {schema['pattern']}")
         if "minLength" in schema and len(instance) < schema["minLength"]:
             errors.append(f"{where}: shorter than {schema['minLength']}")
         if "maxLength" in schema and len(instance) > schema["maxLength"]:
@@ -274,7 +275,7 @@ def schema_errors(instance: Any, schema: Mapping[str, Any], root: Mapping[str, A
             seen: List[Any] = []
             for item in instance:
                 if any(json_equal(item, other) for other in seen):
-                    errors.append(f"{where}: duplicate item {item!r}")
+                    errors.append(f"{where}: duplicate item {short_repr(item)}")
                     break
                 seen.append(item)
         if "items" in schema:
@@ -289,11 +290,11 @@ def schema_errors(instance: Any, schema: Mapping[str, Any], root: Mapping[str, A
         extra = schema.get("additionalProperties", True)
         for key in sorted(instance):
             if _CONTROL.search(key):
-                errors.append(f"{where}: control characters in key {key!r}")
+                errors.append(f"{where}: control characters in key {short_repr(key)}")
             elif key in props:
                 errors += schema_errors(instance[key], props[key], root, _join(path, key))
             elif extra is False:
-                errors.append(f"{where}: unknown key {key!r}")
+                errors.append(f"{where}: unknown key {short_repr(key)}")
             elif isinstance(extra, dict):
                 errors += schema_errors(instance[key], extra, root, _join(path, key))
 

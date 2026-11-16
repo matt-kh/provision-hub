@@ -43,7 +43,7 @@ uv run prov list                                              # every item under
 |---|---|---|
 | `prov kinds` | list the kinds and their api versions | 0 |
 | `prov backends [--kind K]` | list registered backends (name, kind) | 0, 2 |
-| `prov list` | list every item under the root (ref, backend) | 0, 1 unreadable item, 2 |
+| `prov list` | list every item under the root (ref, backend) | 0, 1 findings (symlinked, unreadable or invalidly named entries), 2 missing root |
 | `prov schema <kind> [--backend B]` | print the JSON Schema of a kind | 0, 2 |
 | `prov init <ref> --backend B [--force]` | write a starter `<kind>/<name>/spec.toml` | 0, 2 |
 | `prov render <ref>` | make `<kind>/<name>/rendered/` hold exactly the rendered files | 0, 2 |
@@ -95,7 +95,11 @@ directory, `rendered/`, `build/`, files inside `rendered/`); symlinks found insi
 `rendered/` are removed, never followed. `spec.toml` itself must be a regular file of at
 most 1 MiB: symlinks, FIFOs and devices are refused. Written files get the umask's mode, or
 keep the mode of the file they replace. Spec values may not contain control characters, and
-`plan` shell-quotes every spec value it prints.
+`plan` shell-quotes every spec value it prints. Names prov did not write itself (files in
+`rendered/`, entries under the root) are printed as an escaped repr when they hold a control
+character, and a file in `rendered/` with such a name is reported and removed, never read.
+`prov diff` prints file contents raw, behind the `+`/`-`/space prefix of each line, as
+`git diff` does.
 
 **External validators** are optional: `prov validate` runs `cloud-init schema` when
 cloud-init is installed and otherwise reports `skipped: cloud-init not installed`.

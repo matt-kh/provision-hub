@@ -84,7 +84,11 @@ ENVELOPE_ERRORS = {
     "missing_api_version": (lambda r: r.pop("api_version"), "api_version is required (this prov supports: prov/v1alpha1)"),
     "unknown_api_version": (lambda r: r.update(api_version="prov/v9"), "unsupported api_version 'prov/v9' for kind 'os-install'"),
     "api_version_not_a_string": (lambda r: r.update(api_version=1), "unsupported api_version 1"),
-    "legacy_schema_version": (lambda r: r.update(schema_version=1), "schema_version: this file predates prov/v1alpha1; see CHANGELOG migration"),
+    "legacy_schema_version": (lambda r: r.update(schema_version=1), "`schema_version` is a pre-v1alpha1 key; remove it (see CHANGELOG migration)"),
+    "legacy_schema_version_without_api_version": (
+        lambda r: (r.pop("api_version"), r.update(schema_version=1)),
+        "schema_version: this file predates prov/v1alpha1; see CHANGELOG migration",
+    ),
     "legacy_wins_over_missing_api_version": (lambda r: (r.pop("api_version"), r.update(schema_version=1)), "predates prov/v1alpha1"),
     "missing_kind": (lambda r: r.pop("kind"), "kind is required (the directory says 'os-install')"),
     "kind_differs_from_directory": (lambda r: r.update(kind="image"), "kind 'image' does not match the directory kind 'os-install'"),
@@ -92,14 +96,18 @@ ENVELOPE_ERRORS = {
     "unknown_backend": (lambda r: r.update(backend="plan9"), "unknown backend 'plan9' for kind 'os-install' (registered: ubuntu-autoinstall)"),
     "backend_not_a_string": (lambda r: r.update(backend=["ubuntu-autoinstall"]), "unknown backend"),
     "old_distro_name": (lambda r: r.update(backend="ubuntu"), "unknown backend 'ubuntu'"),
-    "legacy_distro_key": (lambda r: r.update(distro="ubuntu"), "distro: this file predates prov/v1alpha1; see CHANGELOG migration"),
+    "legacy_distro_key": (lambda r: r.update(distro="ubuntu"), "`distro` is a pre-v1alpha1 key; remove it (see CHANGELOG migration)"),
+    "legacy_distro_key_without_api_version": (
+        lambda r: (r.pop("api_version"), r.update(distro="ubuntu")),
+        "distro: this file predates prov/v1alpha1; see CHANGELOG migration",
+    ),
     "legacy_ubuntu_table_without_api_version": (
         lambda r: (r.pop("api_version"), r.update(ubuntu=r.pop("ubuntu-autoinstall"))),
         "ubuntu: this file predates prov/v1alpha1; see CHANGELOG migration",
     ),
-    "long_api_version_is_capped": (lambda r: r.update(api_version="v" * 500), "unsupported api_version '" + "v" * 79 + "…"),
-    "long_kind_is_capped": (lambda r: r.update(kind="k" * 500), "kind '" + "k" * 79 + "… does not match"),
-    "long_backend_is_capped": (lambda r: r.update(backend="b" * 500), "unknown backend '" + "b" * 79 + "… for kind"),
+    "long_api_version_is_capped": (lambda r: r.update(api_version="v" * 500), "unsupported api_version '" + "v" * 80 + "'…"),
+    "long_kind_is_capped": (lambda r: r.update(kind="k" * 500), "kind '" + "k" * 80 + "'… does not match"),
+    "long_backend_is_capped": (lambda r: r.update(backend="b" * 500), "unknown backend '" + "b" * 80 + "'… for kind"),
 }
 
 

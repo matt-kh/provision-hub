@@ -39,4 +39,5 @@ to `os-install/<host>/rendered/`). In each file replace `schema_version = 1` and
 `prov.backends`, add `KIND = "os-install"`, and accept `ctx` as the second argument of
 `render`, `plan` and `check`. A file that still has `schema_version` or `distro` (or an
 `[ubuntu]` table and no `api_version`) fails with "predates prov/v1alpha1; see CHANGELOG
-migration".
+migration"; a half-migrated file that has `api_version` but still `distro` or
+`schema_version` is told to remove that key.

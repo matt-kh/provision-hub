@@ -395,3 +395,24 @@ def test_list_unreadable_kind_dir_is_one_finding(tmp_path, capsys, monkeypatch):
         (tmp_path / "widget").chmod(0o755)
     assert code == 1 and out == "os-install/web\tubuntu-autoinstall\n"
     assert err == "error: widget: cannot read: Permission denied\n"
+
+
+@pytest.mark.parametrize("make", ["file", "fifo"])
+def test_list_kind_entry_that_is_not_a_directory_is_a_finding(tmp_path, capsys, make):
+    if make == "file":
+        (tmp_path / "os-install").write_text("x\n")
+    else:
+        os.mkfifo(tmp_path / "os-install")
+    code, out, err = run(capsys, "--root", str(tmp_path), "list")
+    assert (code, out) == (1, "") and err == "error: os-install: is not a directory; a kind directory holds <name>/ items\n"
+
+
+def test_plan_line_break_refusal_caps_the_line(tmp_path):
+    from prov.plan import plan_lines
+    from prov.registry import Context
+    from prov.schema import ConfigError
+
+    plugin = types.SimpleNamespace(NAME="fake", plan=lambda spec, ctx: ["x" * 5000 + "\nrm -rf ~"])
+    with pytest.raises(ConfigError) as exc:
+        plan_lines(plugin, {}, Context("demo"), "os-install/demo", tmp_path)
+    assert len(str(exc.value)) < 200 and "\n" not in str(exc.value)

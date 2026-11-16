@@ -155,3 +155,11 @@ def test_starter_name_mismatch_is_only_a_warning():
     host, findings = check_host(raw)
     assert host is not None
     assert [(f.level, f.where) for f in findings] == [(WARNING, "hostname")]
+
+
+def test_name_warning_caps_the_value():
+    from prov.spec import name_findings
+    from prov import kinds
+
+    findings = name_findings(kinds.KINDS["os-install"], {"hostname": "h" * 500}, "demo")
+    assert len(findings) == 1 and len(str(findings[0])) < 200

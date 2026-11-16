@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Mapping
@@ -44,11 +45,26 @@ LEGACY_TABLES = ("ubuntu",)
 
 REPR_LIMIT = 80
 
+# C0 and C1 controls, DEL, and the Unicode line/paragraph separators: never printed raw.
+CONTROL_CHARS = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029]")
+
 
 def short_repr(value: object, limit: int = REPR_LIMIT) -> str:
-    """``repr(value)`` capped at ``limit`` characters (then "…"), for echoing user values in errors."""
+    """``repr(value)`` for echoing user values in errors, capped near ``limit`` characters.
+
+    A string is shortened *before* ``repr`` (then "…"), so an escape sequence is never cut in
+    half; other values are repr'd whole and cut. ``repr`` escapes every control character.
+    """
+    if isinstance(value, str) and len(value) > limit:
+        return repr(value[:limit]) + "…"
     text = repr(value)
-    return text if len(text) <= limit else text[:limit] + "…"
+    return text if len(text) <= limit + 2 else text[: limit + 2] + "…"
+
+
+def show(text: str) -> str:
+    """A filesystem- or user-derived name as printable text: as is, or a capped repr if it
+    holds a control character (newline, ESC, U+2028 ...), so it can never forge output lines."""
+    return short_repr(text) if CONTROL_CHARS.search(text) else text
 
 
 class ConfigError(Exception):

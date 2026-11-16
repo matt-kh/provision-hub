@@ -177,7 +177,7 @@ def test_fifo_in_rendered_never_blocks(tmp_path, capsys):
     code, out, _ = run(capsys, "--root", str(tmp_path), "diff", "os-install/demo")
     assert code == 1 and "special file pipe would be removed" in out
     code, _, err = run(capsys, "--root", str(tmp_path), "validate", "os-install/demo")
-    assert code == 1 and "rendered/pipe: symlink or special file" in err
+    assert code == 1 and "rendered/pipe: symlink, special file or unsafely named file" in err
     code, out, _ = run(capsys, "--root", str(tmp_path), "render", "os-install/demo")
     assert code == 0 and "removed special file pipe" in out and "removed special file meta-data" in out
     assert run(capsys, "--root", str(tmp_path), "validate", "os-install/demo")[0] == 0
@@ -194,7 +194,7 @@ def test_validate_never_reads_through_symlinks(tmp_path, capsys, outside):
         (rendered / name).symlink_to(outside / "secret.yaml")
     code, out, err = run(capsys, "--root", str(tmp_path), "validate", "os-install/demo")
     assert code == 1 and "TOPSECRET" not in out + err
-    assert "rendered/user-data: symlink or special file" in err
+    assert "rendered/user-data: symlink, special file or unsafely named file" in err
 
 
 def test_plugin_validate_refuses_non_regular_files(tmp_path, outside):
@@ -310,3 +310,63 @@ def test_replacing_a_file_keeps_its_mode(tmp_path, capsys, umask):
     code, out, _ = run(capsys, "--root", str(tmp_path), "render", "os-install/demo")
     assert code == 0 and "updated user-data" in out
     assert oct(user_data.stat().st_mode & 0o777) == "0o600"
+
+
+HOSTILE_NAMES = ["evil\nok: forged\x1b[2K", "\x1b[31mred", "\x1b]0;title\x07", "a b", "c\x85d"]
+
+
+def _has_raw_controls(text):
+    from prov.schema import CONTROL_CHARS
+
+    return CONTROL_CHARS.search(text.replace("\n", "")) is not None
+
+
+@pytest.mark.parametrize("name", HOSTILE_NAMES)
+@pytest.mark.parametrize("nested", [False, True])
+def test_unsafe_names_in_rendered_are_reported_never_printed_raw(tmp_path, capsys, name, nested):
+    """Review W2: a committed file name cannot forge output lines or terminal escapes."""
+    _seed_host(capsys, tmp_path)
+    run(capsys, "--root", str(tmp_path), "render", "os-install/demo")
+    rendered = tmp_path / "os-install/demo/rendered"
+    if nested:
+        (rendered / name).mkdir()
+        bad = rendered / name / "file"
+        rel = f"{name}/file"
+    else:
+        bad = rendered / name
+        rel = name
+    bad.write_text("TOPSECRET\n")
+    shown = repr(rel)
+
+    code, out, err = run(capsys, "--root", str(tmp_path), "diff", "os-install/demo")
+    assert code == 1 and out == f"file with an unsafe name {shown} would be removed\n"
+    assert "TOPSECRET" not in out + err and not _has_raw_controls(out + err)
+
+    code, out, err = run(capsys, "--root", str(tmp_path), "validate", "os-install/demo")
+    assert code == 1 and f"error: rendered/{shown}: symlink, special file or unsafely named file" in err
+    assert err.count("\n") == 2 and "error: rendered: out of date" in err  # one line per finding, no forged lines
+    assert "TOPSECRET" not in out + err and not _has_raw_controls(out + err)
+
+    code, out, err = run(capsys, "--root", str(tmp_path), "render", "os-install/demo")
+    assert code == 0 and f"removed file with an unsafe name {shown}\n" in out
+    assert not _has_raw_controls(out + err) and not any(line.startswith("ok: forged") for line in out.splitlines())
+    assert sorted(p.name for p in rendered.iterdir()) == ["kernel-cmdline", "meta-data", "user-data"]
+    assert run(capsys, "--root", str(tmp_path), "validate", "os-install/demo")[0] == 0
+
+
+def test_diff_headers_and_change_lines_use_show(tmp_path):
+    from prov.render import diff_rendered, write_rendered
+
+    # names a backend may return are safe by check_paths; show() is the second line of defence
+    rendered = tmp_path / "rendered"
+    write_rendered(rendered, {"a b": "x\n"})
+    assert diff_rendered(rendered, {"a b": "y\n"}).splitlines()[:2] == ["--- a/a b", "+++ b/a b"]
+
+
+@pytest.mark.parametrize("name", ["a\nb", "a\x1bb", "a\x85b", "a b", "a b", "a\x7fb", "/abs", "../up", ""])
+def test_check_paths_rejects_control_characters_and_escapes(name):
+    from prov.render import check_paths
+
+    with pytest.raises(ConfigError, match="unsafe output path") as exc:
+        check_paths({name: "x\n"})
+    assert not _has_raw_controls(str(exc.value))
