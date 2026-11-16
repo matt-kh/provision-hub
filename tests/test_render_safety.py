@@ -264,6 +264,18 @@ def test_preserved_file_in_a_subdirectory_survives_the_empty_dir_sweep(tmp_path)
     assert diff_rendered(rendered, {"a": "b\n"}, preserve=("locks/x.lock",)) == ""
 
 
+def test_preserved_name_that_is_a_rendered_parent_does_not_block_the_write(tmp_path):
+    rendered = tmp_path / "rendered"
+    rendered.mkdir()
+    (rendered / "conf").write_text("human file\n")  # preserved name, but render needs conf/ as a directory
+    changes = write_rendered(rendered, {"conf/main.nix": "{ }\n"}, preserve=("conf",))
+    assert (rendered / "conf/main.nix").read_text() == "{ }\n" and "removed conf" in changes
+    assert diff_rendered(rendered, {"conf/main.nix": "{ }\n"}, preserve=("conf",)) == ""
+    (rendered / "same.lock").write_text("old\n")  # preserved name that render also returns
+    write_rendered(rendered, {"conf/main.nix": "{ }\n", "same.lock": "new\n"}, preserve=("same.lock",))
+    assert (rendered / "same.lock").read_text() == "new\n"
+
+
 def test_fifo_named_like_a_preserved_file_is_removed(tmp_path):
     rendered = tmp_path / "rendered"
     rendered.mkdir()

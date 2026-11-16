@@ -157,6 +157,14 @@ def _write(rendered_dir: Path, name: str, text: str) -> None:
     atomic_write(target, text)
 
 
+def _kept(preserve: Iterable[str], files: Dict[str, str]) -> frozenset:
+    """The preserved names that do not collide with ``files``: a name that is a rendered file
+    or a parent directory of one is not preserved (render's output wins)."""
+    parents = {parent.as_posix() for name in files for parent in PurePosixPath(name).parents}
+    taken = set(files) | parents
+    return frozenset(preserve) - taken
+
+
 def write_rendered(
     rendered_dir: Path, files: Dict[str, str], preserve: Iterable[str] = ()
 ) -> List[str]:
@@ -165,7 +173,7 @@ def write_rendered(
     Regular files named in ``preserve`` (relative POSIX paths) are kept when ``files`` does
     not hold them; symlinks and special files are removed whatever their name.
     """
-    preserve = frozenset(preserve)
+    preserve = _kept(preserve, files)
     check_paths(files)
     if rendered_dir.is_symlink():
         raise ConfigError(f"{show(str(rendered_dir))} is a symlink; prov refuses to write through symlinks")
@@ -222,7 +230,7 @@ def diff_rendered(
     """
     check_paths(files)
     current = existing_files(rendered_dir)
-    for name in set(preserve) - set(files):
+    for name in _kept(preserve, files):
         current.pop(name, None)
     chunks = []
     if rendered_dir.is_dir() and not rendered_dir.is_symlink():
