@@ -99,8 +99,9 @@ Semantic checks: addresses in CIDR form, gateways and nameservers are IPs of the
 family, interface and user names unique, every interface has an address or DHCP.
 
 Backends: `ubuntu-autoinstall` (Ubuntu Server 22.04/24.04 NoCloud seed; layouts `lvm`,
-`zfs`, `mdraid`). Candidates: Proxmox VE answer files, NixOS with disko, Talos machine
-configs.
+`zfs`, `mdraid`), `nixos-disko` (NixOS flake with disko and an offline USB installer; layout
+`ext4`; [backends/nixos-disko.md](backends/nixos-disko.md)). Candidates: Proxmox VE answer
+files, Talos machine configs.
 
 ## Planned kinds (sketches, not implemented)
 
