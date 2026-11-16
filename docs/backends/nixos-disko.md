@@ -58,11 +58,12 @@ How the core keys map:
 | `hostname`, `domain` | `networking.hostName`, `networking.domain`; the flake outputs are `nixosConfigurations.<hostname>` and `<hostname>-installer` |
 | `arch` | `nixpkgs.hostPlatform`: `x86_64-linux` / `aarch64-linux` |
 | `firmware` | UEFI: systemd-boot (`canTouchEfiVariables = true`, the install writes an EFI boot entry). BIOS: GRUB, installed to the disk through disko's EF02 partition |
-| `timezone`, `locale`, `keyboard` | `time.timeZone`, `i18n.defaultLocale`, `console.keyMap` |
+| `timezone`, `locale` | `time.timeZone`, `i18n.defaultLocale` |
+| `keyboard` | an XKB layout (as for ubuntu-autoinstall): `services.xserver.xkb.layout`, with `console.useXkbConfig = true` so the console keymap follows it; X itself stays disabled |
 | `users` | `users.users.<name>`: `isNormalUser`, `description` (gecos), `extraGroups` (groups, plus `wheel` when `sudo`), `openssh.authorizedKeys.keys`, `hashedPassword` |
 | `users[].sudo` | wheel plus a passwordless `security.sudo.extraRules` entry |
 | `users[].shell` | `/bin/bash` (default) → NixOS default; `/bin/zsh`, `/bin/fish` (also under `/usr/bin/`, `/run/current-system/sw/bin/`) → `programs.<shell>.enable` and `shell = pkgs.<shell>`; anything else is an error |
-| `network` | systemd-networkd (see the note on `macaddress` below): one `systemd.network.networks."10-<name>"` per interface (DHCP, addresses, gateways, MTU), `systemd.network.links."10-<name>"` renames a NIC by `macaddress`; `networking.nameservers` / `networking.search` |
+| `network` | systemd-networkd (see the note on `macaddress` below): one `systemd.network.networks."10-<name>"` per interface (DHCP, addresses, gateways, MTU), `systemd.network.links."10-<name>"` renames a NIC by `macaddress`; `networking.nameservers` / `networking.search`; `systemd.network.wait-online.anyInterface = true` so boot waits for one configured interface, not all (an unplugged second NIC would otherwise stall `network-online.target` until its timeout) |
 | `storage.disks` | `disko.devices.disk.main.device` |
 
 Always set: openssh enabled with password and keyboard-interactive authentication and root
@@ -78,7 +79,9 @@ contain `:`.
 On bare metal give every interface a `macaddress`: the `.link` file then names the NIC
 exactly as in the spec. Without it the unit matches the kernel's predictable name (such as
 `enp3s0`), which you must know in advance; an interface `name` that matches no NIC leaves
-that NIC unconfigured.
+that NIC unconfigured. An `eth<N>` interface without `macaddress` is a warning, since NixOS
+does not use `eth<N>` names by default. The starter uses a synthetic, locally administered
+MAC (`02:00:00:00:00:01`): replace it with the NIC's real address.
 
 Groups are passed through as given: NixOS does not create groups such as `adm` or `sudo`
 that Ubuntu has. Users stay mutable (`users.mutableUsers` keeps its default), so a password
@@ -141,21 +144,38 @@ next `prov render` deletes it): keep the file next to `spec.toml`.
    `nixos-generate-config --no-filesystems --show-hardware-config > hardware-configuration.nix`.
    Copy the file to your workstation next to `spec.toml` (not into `rendered/`) and
    `git add` it.
-2. **Lock.** In `rendered/`: `nix flake lock`, then `git add flake.lock` and commit.
-3. **Build the ISO.** `nix build .#nixosConfigurations.<hostname>-installer.config.system.build.isoImage`;
-   the image is in `result/iso/`. It is large (several GB): it holds the target closure and
-   the build inputs for an offline install.
+2. **Track and lock.** In `rendered/`: `git add . ../spec.toml` (Nix sees only tracked
+   files), `nix flake lock`, then `git add flake.lock` and commit.
+3. **Build the ISO.**
+   `mkdir -p "$HOME"/prov-iso` and
+   `nix build .#nixosConfigurations.<hostname>-installer.config.system.build.isoImage --out-link "$HOME"/prov-iso/<hostname>-installer`;
+   the image is in `~/prov-iso/<hostname>-installer/iso/`. The out-link is the ISO's
+   garbage-collection root, kept outside the hosts repository: a default `result` link in
+   `rendered/` would make `validate`/`diff` fail and be deleted by the next `render`,
+   after which `nix-collect-garbage` could delete the ISO. Remove the link when you no
+   longer need the ISO. The ISO is large (several GB): it holds the target closure and the
+   build inputs for an offline install.
 4. **Write the USB stick. This wipes the stick.** Find the stick with
-   `ls -l /dev/disk/by-id/ | grep usb`, then
-   `sudo dd if=result/iso/<ISO-FILE> of=/dev/disk/by-id/usb-<YOUR-STICK> bs=4M conv=fsync status=progress`.
+   `ls -l /dev/disk/by-id/ | grep usb`, then set the two variables and write:
+
+   ```sh
+   ISO=$(echo "$HOME"/prov-iso/<hostname>-installer/iso/*.iso)
+   USB=/dev/disk/by-id/usb-CHANGE-ME
+   if [ -b "$USB" ]; then sudo dd if="$ISO" of="$USB" bs=4M conv=fsync status=progress; else echo "USB=$USB is not a block device; set USB first" >&2; fi
+   ```
+
    A GUI writer (GNOME Disks, balenaEtcher, Rufus in DD mode) is safer than dd.
 5. **Install. This wipes the spec disk.** Boot the target from the stick (UEFI or legacy
-   BIOS mode, matching `firmware`), then run `sudo install-<hostname>`. It checks that the
-   spec disk exists, refuses anything but a whole disk (`lsblk -dno TYPE` must be `disk`)
-   and refuses the USB stick it booted from (the disk behind `/iso`), shows the disk with
-   `lsblk` (model, serial, size, partitions), and asks you to type the last 4 characters of
-   the disk's serial, or the hostname when the disk reports no serial. Any other answer
-   aborts without changes. Then it runs
+   BIOS mode, matching `firmware`), then run `sudo install-<hostname>` on the console. It
+   stops, changing nothing, unless all of these hold: stdin is a terminal; the spec disk
+   exists; it is a whole disk (`lsblk -dno TYPE` is `disk`); nothing on it (partitions,
+   dm, md or loop devices on top) is mounted or used as swap
+   (`lsblk -nro MOUNTPOINTS` is empty); and it is none of the disks the boot medium
+   mounted at `/iso` sits on (every `disk` in `lsblk -nrpso NAME,TYPE` of the `/iso`
+   source, so a stick behind a partition or a dm device is caught too). It then shows the
+   disk with `lsblk` (model, serial, size, partitions) and asks you to type the last 4
+   characters of the disk's serial, or the hostname when the disk reports no serial. Any
+   other answer aborts without changes. Then it runs
    `disko-install --flake <flake>#<hostname> --disk main <disk>` (plus
    `--write-efi-boot-entries` on UEFI), which partitions, formats and installs.
 6. **Post-install checks.** Remove the stick, reboot, log in with ssh, and check
@@ -169,9 +189,10 @@ enabled in `/etc/wsl.conf`, or the Determinate Systems installer) and enable fla
 ```sh
 mkdir -p ~/.config/nix && echo 'experimental-features = nix-command flakes' >> ~/.config/nix/nix.conf
 cd <hosts-repo>/os-install/<name>/rendered
-nix flake lock && git add flake.lock
-nix build .#nixosConfigurations.<hostname>-installer.config.system.build.isoImage
-cp result/iso/*.iso /mnt/c/Users/<you>/Downloads/
+git add . ../spec.toml && nix flake lock && git add flake.lock && git commit -m 'Lock the flake inputs'
+mkdir -p "$HOME"/prov-iso
+nix build .#nixosConfigurations.<hostname>-installer.config.system.build.isoImage --out-link "$HOME"/prov-iso/<hostname>-installer
+cp "$HOME"/prov-iso/<hostname>-installer/iso/*.iso /mnt/c/Users/<you>/Downloads/
 ```
 
 Keep the hosts repository on the Linux file system (`~/...`), not under `/mnt/c`: Nix and
