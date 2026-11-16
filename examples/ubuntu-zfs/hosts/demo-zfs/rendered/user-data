@@ -1,0 +1,118 @@
+#cloud-config
+autoinstall:
+  keyboard:
+    layout: de
+  locale: de_DE.UTF-8
+  network:
+    ethernets:
+      lan0:
+        addresses:
+        - 198.51.100.30/24
+        dhcp4: false
+        dhcp6: false
+        match:
+          macaddress: 02:00:00:00:00:01
+        mtu: 9000
+        nameservers:
+          addresses:
+          - 198.51.100.53
+        routes:
+        - to: default
+          via: 198.51.100.1
+        set-name: lan0
+    version: 2
+  packages:
+  - zfsutils-linux
+  shutdown: reboot
+  ssh:
+    allow-pw: false
+    install-server: true
+  storage:
+    config:
+    - grub_device: false
+      id: disk0
+      path: /dev/nvme0n1
+      preserve: false
+      ptable: gpt
+      type: disk
+      wipe: superblock-recursive
+    - device: disk0
+      flag: boot
+      grub_device: true
+      id: disk0-esp
+      number: 1
+      preserve: false
+      size: 1073741824
+      type: partition
+    - fstype: fat32
+      id: disk0-esp-fs
+      preserve: false
+      type: format
+      volume: disk0-esp
+    - device: disk0
+      id: disk0-boot
+      number: 2
+      preserve: false
+      size: 2147483648
+      type: partition
+    - device: disk0
+      id: disk0-zfs
+      number: 3
+      preserve: false
+      size: -1
+      type: partition
+    - fs_properties:
+        acltype: posixacl
+        canmount: 'off'
+        relatime: 'on'
+        xattr: sa
+      id: zpool-rpool
+      mountpoint: /
+      pool: rpool
+      pool_properties:
+        ashift: 12
+      type: zpool
+      vdevs:
+      - disk0-zfs
+    - id: zfs-root-container
+      pool: zpool-rpool
+      properties:
+        canmount: 'off'
+        mountpoint: none
+      type: zfs
+      volume: ROOT
+    - id: zfs-root
+      pool: zpool-rpool
+      properties:
+        mountpoint: /
+      type: zfs
+      volume: ROOT/ubuntu
+    - fstype: ext4
+      id: disk0-boot-fs
+      preserve: false
+      type: format
+      volume: disk0-boot
+    - device: disk0-boot-fs
+      id: disk0-boot-mount
+      path: /boot
+      type: mount
+    - device: disk0-esp-fs
+      id: disk0-esp-mount
+      path: /boot/efi
+      type: mount
+  updates: all
+  user-data:
+    disable_root: true
+    fqdn: demo-zfs.example.org
+    hostname: demo-zfs
+    timezone: Europe/Berlin
+    users:
+    - groups:
+      - sudo
+      lock_passwd: true
+      name: ops
+      shell: /bin/bash
+      ssh_authorized_keys:
+      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE ops@example.org
+      sudo: ALL=(ALL) NOPASSWD:ALL
+  version: 1

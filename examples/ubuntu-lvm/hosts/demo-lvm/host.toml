@@ -1,0 +1,51 @@
+# Synthetic example: LVM over two disks, UEFI, static dual-stack plus a DHCP interface.
+# Documentation addresses only (RFC 5737 / RFC 3849); example.com is reserved (RFC 2606).
+schema_version = 1
+hostname = "demo-lvm"
+domain = "example.com"
+distro = "ubuntu"
+arch = "amd64"
+firmware = "uefi"
+timezone = "Etc/UTC"
+locale = "en_US.UTF-8"
+keyboard = "us"
+
+[[users]]
+name = "ops"
+gecos = "Operator"
+groups = ["adm", "sudo"]
+sudo = true
+ssh_authorized_keys = [
+  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE ops@example.com",
+]
+
+[[users]]
+name = "backup"
+shell = "/bin/sh"
+ssh_authorized_keys = [
+  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEKEYFORBACKUPEXAMPLEKEYFORBACKUP00 backup@example.org",
+]
+
+[network.dns]
+nameservers = ["192.0.2.53", "2001:db8::53"]
+search = ["example.com"]
+
+[[network.interfaces]]
+name = "eth0"
+addresses = ["192.0.2.20/24", "2001:db8:0:1::20/64"]
+gateway4 = "192.0.2.1"
+gateway6 = "2001:db8:0:1::1"
+
+[[network.interfaces]]
+name = "eth1"
+dhcp4 = true
+
+[storage]
+disks = ["/dev/vda", "/dev/vdb"]
+
+[ubuntu]
+release = "24.04"
+packages = ["qemu-guest-agent", "lvm2"]
+
+[ubuntu.storage]
+layout = "lvm"

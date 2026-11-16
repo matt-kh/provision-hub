@@ -1,0 +1,59 @@
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+# Distribution name differs from the import package: "prov" on PyPI is an unrelated project.
+name = "provision-hub"
+dynamic = ["version"]
+description = "prov: render, validate and plan OS install artefacts from one versioned host.toml; never applies"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+authors = [{ name = "matt-kh" }]
+classifiers = [
+  "Environment :: Console",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: System :: Installation/Setup",
+]
+dependencies = [
+  # YAML: deterministic emission of autoinstall/cloud-init files and parsing them in `validate`.
+  "pyyaml>=6.0.1",
+  # TOML reading on 3.10; 3.11+ uses the stdlib tomllib.
+  "tomli>=2.0.1; python_version < '3.11'",
+]
+
+[project.urls]
+Repository = "https://github.com/matt-kh/provision-hub"
+
+[project.scripts]
+prov = "prov.cli:main"
+
+# Distro plugins: one module per distro (see docs/adding-a-distro.md).
+[project.entry-points."prov.distros"]
+ubuntu = "prov.distros.ubuntu"
+
+[dependency-groups]
+dev = [
+  "pytest>=8.0",
+  # Cross-checks the published JSON Schema with a reference validator (tests only).
+  "jsonschema>=4.23",
+]
+
+[tool.hatch.version]
+path = "src/prov/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/prov"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/prov", "schema", "tests", "examples", "docs", "README.md", "LICENSE"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

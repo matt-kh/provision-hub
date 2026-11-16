@@ -1,0 +1,105 @@
+#cloud-config
+autoinstall:
+  keyboard:
+    layout: us
+  locale: en_US.UTF-8
+  network:
+    ethernets:
+      eno1:
+        addresses:
+        - 203.0.113.40/24
+        - 2001:db8:40::40/64
+        dhcp4: false
+        dhcp6: false
+        nameservers:
+          addresses:
+          - 203.0.113.53
+          search:
+          - example.com
+        routes:
+        - to: default
+          via: 203.0.113.1
+        - to: default
+          via: 2001:db8:40::1
+    version: 2
+  packages: []
+  shutdown: reboot
+  ssh:
+    allow-pw: false
+    install-server: true
+  storage:
+    config:
+    - grub_device: true
+      id: disk0
+      path: /dev/sda
+      preserve: false
+      ptable: gpt
+      type: disk
+      wipe: superblock-recursive
+    - device: disk0
+      flag: bios_grub
+      id: disk0-biosgrub
+      number: 1
+      preserve: false
+      size: 1048576
+      type: partition
+    - device: disk0
+      id: disk0-raid
+      number: 2
+      preserve: false
+      size: -1
+      type: partition
+    - grub_device: true
+      id: disk1
+      path: /dev/sdb
+      preserve: false
+      ptable: gpt
+      type: disk
+      wipe: superblock-recursive
+    - device: disk1
+      flag: bios_grub
+      id: disk1-biosgrub
+      number: 1
+      preserve: false
+      size: 1048576
+      type: partition
+    - device: disk1
+      id: disk1-raid
+      number: 2
+      preserve: false
+      size: -1
+      type: partition
+    - devices:
+      - disk0-raid
+      - disk1-raid
+      id: md0
+      name: md0
+      preserve: false
+      raidlevel: 1
+      spare_devices: []
+      type: raid
+    - fstype: ext4
+      id: md0-fs
+      preserve: false
+      type: format
+      volume: md0
+    - device: md0-fs
+      id: md0-mount
+      path: /
+      type: mount
+  updates: security
+  user-data:
+    disable_root: true
+    fqdn: demo-mdraid.example.com
+    hostname: demo-mdraid
+    timezone: Etc/UTC
+    users:
+    - groups:
+      - sudo
+      lock_passwd: true
+      name: ops
+      shell: /bin/bash
+      ssh_authorized_keys:
+      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE ops@example.com
+      sudo: ALL=(ALL) NOPASSWD:ALL
+  version: 1

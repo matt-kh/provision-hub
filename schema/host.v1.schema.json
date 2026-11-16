@@ -1,0 +1,322 @@
+{
+  "$defs": {
+    "interface": {
+      "additionalProperties": false,
+      "properties": {
+        "addresses": {
+          "default": [],
+          "description": "Static addresses in CIDR form (IPv4 or IPv6).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "dhcp4": {
+          "default": false,
+          "type": "boolean"
+        },
+        "dhcp6": {
+          "default": false,
+          "type": "boolean"
+        },
+        "gateway4": {
+          "description": "IPv4 default gateway.",
+          "type": "string"
+        },
+        "gateway6": {
+          "description": "IPv6 default gateway.",
+          "type": "string"
+        },
+        "macaddress": {
+          "description": "Match the NIC by MAC address.",
+          "pattern": "^([0-9a-f]{2}:){5}[0-9a-f]{2}$",
+          "type": "string"
+        },
+        "mtu": {
+          "maximum": 9216,
+          "minimum": 576,
+          "type": "integer"
+        },
+        "name": {
+          "description": "Interface name after install (renamed via macaddress when given).",
+          "pattern": "^[A-Za-z0-9._-]{1,15}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "user": {
+      "additionalProperties": false,
+      "properties": {
+        "gecos": {
+          "description": "Full name / comment field.",
+          "type": "string"
+        },
+        "groups": {
+          "default": [],
+          "description": "Supplementary groups.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "name": {
+          "description": "Login name.",
+          "pattern": "^[a-z_][a-z0-9_-]{0,31}$",
+          "type": "string"
+        },
+        "password_hash": {
+          "description": "Optional crypt(3) hash (yescrypt, SHA-512 or SHA-256). Plain passwords are never accepted.",
+          "pattern": "^\\$(y|gy|6|5)\\$[./0-9A-Za-z$=,]+$",
+          "type": "string"
+        },
+        "shell": {
+          "default": "/bin/bash",
+          "description": "Login shell.",
+          "pattern": "^/",
+          "type": "string"
+        },
+        "ssh_authorized_keys": {
+          "default": [],
+          "description": "OpenSSH public keys (identity is ssh-key based by default).",
+          "items": {
+            "pattern": "^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(256|384|521)|sk-ssh-ed25519@openssh.com|sk-ecdsa-sha2-nistp256@openssh.com) [A-Za-z0-9+/=]+( .*)?$",
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "sudo": {
+          "default": false,
+          "description": "Passwordless sudo for this user.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://raw.githubusercontent.com/matt-kh/provision-hub/main/schema/host.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "distro": {
+            "const": "ubuntu"
+          }
+        },
+        "required": [
+          "distro"
+        ]
+      },
+      "then": {
+        "required": [
+          "ubuntu"
+        ]
+      }
+    }
+  ],
+  "description": "One host.toml describes one machine; a distro plugin renders its install artefacts.",
+  "properties": {
+    "arch": {
+      "default": "amd64",
+      "enum": [
+        "amd64",
+        "arm64"
+      ]
+    },
+    "distro": {
+      "description": "Distro plugin that renders this host.",
+      "enum": [
+        "ubuntu"
+      ],
+      "type": "string"
+    },
+    "domain": {
+      "description": "DNS domain; the FQDN is hostname.domain.",
+      "pattern": "^([a-z0-9]([a-z0-9-]*[a-z0-9])?\\.)+[a-z]{2,}$",
+      "type": "string"
+    },
+    "firmware": {
+      "default": "uefi",
+      "enum": [
+        "uefi",
+        "bios"
+      ]
+    },
+    "hostname": {
+      "description": "Short host name (one DNS label).",
+      "pattern": "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$",
+      "type": "string"
+    },
+    "keyboard": {
+      "default": "us",
+      "description": "Console keyboard layout.",
+      "pattern": "^[a-z0-9_-]+$",
+      "type": "string"
+    },
+    "locale": {
+      "default": "en_US.UTF-8",
+      "description": "POSIX locale.",
+      "pattern": "^[A-Za-z0-9_.@-]+$",
+      "type": "string"
+    },
+    "network": {
+      "additionalProperties": false,
+      "properties": {
+        "dns": {
+          "additionalProperties": false,
+          "default": {},
+          "properties": {
+            "nameservers": {
+              "default": [],
+              "description": "DNS servers (IP addresses).",
+              "items": {
+                "type": "string"
+              },
+              "type": "array",
+              "uniqueItems": true
+            },
+            "search": {
+              "default": [],
+              "description": "DNS search domains.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array",
+              "uniqueItems": true
+            }
+          },
+          "type": "object"
+        },
+        "interfaces": {
+          "items": {
+            "$ref": "#/$defs/interface"
+          },
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "interfaces"
+      ],
+      "type": "object"
+    },
+    "schema_version": {
+      "const": 1,
+      "description": "Host schema version; required."
+    },
+    "storage": {
+      "additionalProperties": false,
+      "properties": {
+        "disks": {
+          "description": "Whole disks the installer may claim and wipe, in order (first = boot disk).",
+          "items": {
+            "pattern": "^/dev/[A-Za-z0-9._:+/-]+$",
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "disks"
+      ],
+      "type": "object"
+    },
+    "timezone": {
+      "default": "Etc/UTC",
+      "description": "IANA time zone.",
+      "pattern": "^[A-Za-z0-9_+/-]+$",
+      "type": "string"
+    },
+    "ubuntu": {
+      "additionalProperties": false,
+      "description": "Ubuntu Server autoinstall settings.",
+      "properties": {
+        "packages": {
+          "default": [],
+          "description": "Extra packages installed by autoinstall.",
+          "items": {
+            "pattern": "^[a-z0-9][a-z0-9+.-]+$",
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "release": {
+          "description": "LTS release of the live-server ISO.",
+          "enum": [
+            "22.04",
+            "24.04"
+          ]
+        },
+        "storage": {
+          "additionalProperties": false,
+          "properties": {
+            "layout": {
+              "description": "lvm: one VG over all disks; zfs: root pool on one disk; mdraid: md array over all disks.",
+              "enum": [
+                "lvm",
+                "zfs",
+                "mdraid"
+              ]
+            },
+            "raid_level": {
+              "description": "mdraid only; default 1.",
+              "enum": [
+                1,
+                5,
+                6,
+                10
+              ]
+            }
+          },
+          "required": [
+            "layout"
+          ],
+          "type": "object"
+        },
+        "updates": {
+          "default": "security",
+          "enum": [
+            "security",
+            "all"
+          ]
+        }
+      },
+      "required": [
+        "release",
+        "storage"
+      ],
+      "type": "object"
+    },
+    "users": {
+      "default": [],
+      "description": "Local users; distros without local users ignore or reject them.",
+      "items": {
+        "$ref": "#/$defs/user"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema_version",
+    "hostname",
+    "distro",
+    "network",
+    "storage"
+  ],
+  "title": "prov host v1",
+  "type": "object"
+}
