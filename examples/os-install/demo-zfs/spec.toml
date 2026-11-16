@@ -1,9 +1,10 @@
 # Synthetic example: ZFS root on one disk, UEFI, NIC matched by a locally administered MAC.
 # Documentation addresses only (RFC 5737 / RFC 3849); example.org is reserved (RFC 2606).
-schema_version = 1
+api_version = "prov/v1alpha1"
+kind = "os-install"
+backend = "ubuntu-autoinstall"
 hostname = "demo-zfs"
 domain = "example.org"
-distro = "ubuntu"
 timezone = "Europe/Berlin"
 locale = "de_DE.UTF-8"
 keyboard = "de"
@@ -29,10 +30,10 @@ gateway4 = "198.51.100.1"
 [storage]
 disks = ["/dev/nvme0n1"]
 
-[ubuntu]
+[ubuntu-autoinstall]
 release = "24.04"
 packages = ["zfsutils-linux"]
 updates = "all"
 
-[ubuntu.storage]
+[ubuntu-autoinstall.storage]
 layout = "zfs"

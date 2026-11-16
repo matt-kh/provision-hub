@@ -1,7 +1,6 @@
-"""Host validation: schema version, JSON Schema, semantic checks; plus the Finding type.
+"""The Finding type and a small JSON Schema validator for spec files.
 
-The JSON Schema check is a small built-in validator for the keyword subset the host schema
-uses (listed in ``SUPPORTED_KEYWORDS``), so prov has no runtime dependency on a JSON Schema
+The JSON Schema check is a built-in validator for the keyword subset spec schemas use (listed in ``SUPPORTED_KEYWORDS``), so prov has no runtime dependency on a JSON Schema
 library. The test suite cross-checks it against the ``jsonschema`` reference validator.
 """
 
@@ -9,13 +8,12 @@ from __future__ import annotations
 
 import copy
 import functools
-import ipaddress
 import re
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, List, Mapping, Optional
 
-from .schema import SUPPORTED_SCHEMA_VERSIONS, ConfigError, host_schema, read_toml
+from .text import esc, short_repr
+
 
 ERROR = "error"
 WARNING = "warning"
@@ -39,7 +37,9 @@ class Finding:
     where: str = ""
 
     def __str__(self) -> str:
-        return f"{self.level}: {self.where + ': ' if self.where else ''}{self.message}"
+        """One printable line: every field is escaped (``prov.text.esc``); findings may come from plugins."""
+        where = esc(str(self.where))
+        return f"{esc(str(self.level))}: {where + ': ' if where else ''}{esc(str(self.message))}"
 
 
 def has_errors(findings: List[Finding]) -> bool:
@@ -62,7 +62,7 @@ _TYPES = {
     "number": _is_number,
 }
 
-# C0 and C1 controls, DEL, and the Unicode line/paragraph separators.
+# Spec values may not hold C0/C1 controls, DEL or the Unicode line/paragraph separators.
 _CONTROL = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029]")
 
 
@@ -147,9 +147,10 @@ def check_schema_fragment(
     """Raise ValueError if a schema is not one prov's validator can evaluate safely.
 
     Checks keyword names *and* values (types, counts, patterns). ``defs`` are the
-    definitions ``$ref`` may point at; with ``allow_defs=False`` (distro fragments) a
-    ``$defs`` of its own is refused, because only the host schema's ``$defs`` are composed.
-    Run at plugin load so a broken distro ``SCHEMA`` is a clear error, not a crash later.
+    definitions ``$ref`` may point at; with ``allow_defs=False`` (backend fragments, kind
+    properties) a ``$defs`` of its own is refused, because only the shared ``$defs`` are
+    composed. Run at plugin load so a broken backend ``SCHEMA`` is a clear error, not a crash
+    later.
     """
     if not isinstance(schema, dict):
         raise ValueError(f"{where}: a schema must be an object, got {type(schema).__name__}")
@@ -187,7 +188,7 @@ def check_schema_fragment(
         if key in schema and not (isinstance(schema[key], dict) and all(isinstance(k, str) for k in schema[key])):
             fail(key, "must be an object keyed by strings")
     if "$defs" in schema and not allow_defs:
-        fail("$defs", "distro fragments may not define $defs; reference the host schema's #/$defs/<name>")
+        fail("$defs", "fragments may not define $defs; reference the shared #/$defs/<name>")
     if "pattern" in schema:
         if not isinstance(schema["pattern"], str):
             fail("pattern", "must be a string")
@@ -251,13 +252,13 @@ def schema_errors(instance: Any, schema: Mapping[str, Any], root: Mapping[str, A
     if "const" in schema and not json_equal(instance, schema["const"]):
         errors.append(f"{where}: must be {schema['const']!r}")
     if "enum" in schema and not any(json_equal(instance, e) for e in schema["enum"]):
-        errors.append(f"{where}: {instance!r} is not one of {schema['enum']}")
+        errors.append(f"{where}: {short_repr(instance)} is not one of {schema['enum']}")
 
     if isinstance(instance, str):
         if _CONTROL.search(instance):
             errors.append(f"{where}: control characters (newline, tab, ...) are not allowed")
         elif "pattern" in schema and not ecma_search(schema["pattern"], instance):
-            errors.append(f"{where}: {instance!r} does not match {schema['pattern']}")
+            errors.append(f"{where}: {short_repr(instance)} does not match {schema['pattern']}")
         if "minLength" in schema and len(instance) < schema["minLength"]:
             errors.append(f"{where}: shorter than {schema['minLength']}")
         if "maxLength" in schema and len(instance) > schema["maxLength"]:
@@ -277,7 +278,7 @@ def schema_errors(instance: Any, schema: Mapping[str, Any], root: Mapping[str, A
             seen: List[Any] = []
             for item in instance:
                 if any(json_equal(item, other) for other in seen):
-                    errors.append(f"{where}: duplicate item {item!r}")
+                    errors.append(f"{where}: duplicate item {short_repr(item)}")
                     break
                 seen.append(item)
         if "items" in schema:
@@ -292,11 +293,11 @@ def schema_errors(instance: Any, schema: Mapping[str, Any], root: Mapping[str, A
         extra = schema.get("additionalProperties", True)
         for key in sorted(instance):
             if _CONTROL.search(key):
-                errors.append(f"{where}: control characters in key {key!r}")
+                errors.append(f"{where}: control characters in key {short_repr(key)}")
             elif key in props:
                 errors += schema_errors(instance[key], props[key], root, _join(path, key))
             elif extra is False:
-                errors.append(f"{where}: unknown key {key!r}")
+                errors.append(f"{where}: unknown key {short_repr(key)}")
             elif isinstance(extra, dict):
                 errors += schema_errors(instance[key], extra, root, _join(path, key))
 
@@ -332,103 +333,3 @@ def apply_defaults(instance: Any, schema: Mapping[str, Any], root: Mapping[str, 
     elif isinstance(result, list) and "items" in schema:
         result = [apply_defaults(item, schema["items"], root) for item in result]
     return result
-
-
-# --- host checks ------------------------------------------------------------------------
-
-
-def _semantic(host: Dict[str, Any]) -> List[Finding]:
-    """Checks JSON Schema cannot express (addresses, cross-field rules)."""
-    out: List[Finding] = []
-    ifaces = host["network"]["interfaces"]
-    names = [i["name"] for i in ifaces]
-    for dup in sorted({n for n in names if names.count(n) > 1}):
-        out.append(Finding(ERROR, f"interface {dup!r} defined more than once", "network.interfaces"))
-    for n, iface in enumerate(ifaces):
-        where = f"network.interfaces[{n}]"
-        families = set()
-        for a, addr in enumerate(iface["addresses"]):
-            if "/" not in addr:
-                out.append(Finding(ERROR, f"{addr!r} needs a prefix length (CIDR form)", f"{where}.addresses[{a}]"))
-                continue
-            try:
-                families.add(ipaddress.ip_interface(addr).version)
-            except ValueError:
-                out.append(Finding(ERROR, f"{addr!r} is not an IP address in CIDR form", f"{where}.addresses[{a}]"))
-        for key, version in (("gateway4", 4), ("gateway6", 6)):
-            if key not in iface:
-                continue
-            try:
-                gw = ipaddress.ip_address(iface[key])
-            except ValueError:
-                out.append(Finding(ERROR, f"{iface[key]!r} is not an IP address", f"{where}.{key}"))
-                continue
-            if gw.version != version:
-                out.append(Finding(ERROR, f"{iface[key]} is not an IPv{version} address", f"{where}.{key}"))
-            elif version not in families and not iface[f"dhcp{version}"]:
-                out.append(Finding(WARNING, f"no static IPv{version} address on this interface", f"{where}.{key}"))
-        if not iface["addresses"] and not iface["dhcp4"] and not iface["dhcp6"]:
-            out.append(Finding(ERROR, "no addresses and DHCP disabled; the interface would stay down", where))
-    for s, server in enumerate(host["network"]["dns"]["nameservers"]):
-        try:
-            ipaddress.ip_address(server)
-        except ValueError:
-            out.append(Finding(ERROR, f"{server!r} is not an IP address", f"network.dns.nameservers[{s}]"))
-
-    users = [u["name"] for u in host["users"]]
-    for dup in sorted({n for n in users if users.count(n) > 1}):
-        out.append(Finding(ERROR, f"user {dup!r} defined more than once", "users"))
-    return out
-
-
-def check_host(raw: Mapping[str, Any], distros: Mapping[str, Any]) -> Tuple[Dict[str, Any] | None, List[Finding]]:
-    """Validate a parsed host.toml. Returns (host with defaults or None, findings)."""
-    supported = ", ".join(str(v) for v in SUPPORTED_SCHEMA_VERSIONS)
-    if "schema_version" not in raw:
-        return None, [Finding(ERROR, f"schema_version is required (this prov supports: {supported})", "schema_version")]
-    version = raw["schema_version"]
-    if isinstance(version, bool) or version not in SUPPORTED_SCHEMA_VERSIONS:
-        return None, [
-            Finding(
-                ERROR,
-                f"unsupported schema_version {version!r} (this prov supports: {supported}); "
-                "use a prov release that supports it or migrate the file",
-                "schema_version",
-            )
-        ]
-    distro = raw.get("distro")
-    if isinstance(distro, str) and distro not in distros:
-        known = ", ".join(sorted(distros)) or "none"
-        return None, [Finding(ERROR, f"unknown distro {distro!r} (registered: {known})", "distro")]
-
-    schema = host_schema(distros)
-    findings = [Finding(ERROR, msg) for msg in schema_errors(raw, schema)]
-    if findings:
-        return None, findings
-    host = apply_defaults(raw, schema)
-    findings = _semantic(host)
-    plugin = distros[host["distro"]]
-    if hasattr(plugin, "check"):
-        try:
-            extra = plugin.check(host)
-        except ConfigError:
-            raise
-        except Exception as exc:
-            raise ConfigError(f"distro plugin {plugin.NAME!r} failed in check: {type(exc).__name__}: {exc}") from exc
-        if not (isinstance(extra, list) and all(isinstance(f, Finding) for f in extra)):
-            raise ConfigError(
-                f"distro plugin {plugin.NAME!r} failed in check: returned {type(extra).__name__}, expected a list of prov.validate.Finding"
-            )
-        findings += extra
-    if has_errors(findings):
-        return None, findings
-    return host, findings
-
-
-def load_host(path: Path, distros: Mapping[str, Any]) -> Tuple[Dict[str, Any], List[Finding]]:
-    """Read and validate host.toml; raise ConfigError listing every error."""
-    host, findings = check_host(read_toml(path), distros)
-    if host is None:
-        lines = "\n".join(f"  {f}" for f in findings if f.level == ERROR)
-        raise ConfigError(f"{path}: invalid host:\n{lines}")
-    return host, findings

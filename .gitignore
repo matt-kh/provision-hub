@@ -29,5 +29,9 @@ venv/
 .coverage
 htmlcov/
 dist/
-build/
+/build/
+# prov: <root>/<kind>/<name>/build/ is reserved for local build artefacts (prov build);
+# item roots are this repository's root (private item repos) and examples/.
+/*/*/build/
+/examples/*/*/build/
 *.egg-info/

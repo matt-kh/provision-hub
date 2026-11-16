@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 # Distribution name differs from the import package: "prov" on PyPI is an unrelated project.
 name = "provision-hub"
 dynamic = ["version"]
-description = "prov: render, validate and plan OS install artefacts from one versioned host.toml; never applies"
+description = "prov: render, validate and plan provisioning artefacts (OS installs first) from versioned kind + backend specs; never applies"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
@@ -34,9 +34,10 @@ Repository = "https://github.com/matt-kh/provision-hub"
 [project.scripts]
 prov = "prov.cli:main"
 
-# Distro plugins: one module per distro (see docs/adding-a-distro.md).
-[project.entry-points."prov.distros"]
-ubuntu = "prov.distros.ubuntu"
+# Backend plugins: one module per backend; entry-point name = the backend's NAME
+# (see docs/adding-a-backend.md).
+[project.entry-points."prov.backends"]
+ubuntu-autoinstall = "prov.backends.ubuntu_autoinstall"
 
 [dependency-groups]
 dev = [

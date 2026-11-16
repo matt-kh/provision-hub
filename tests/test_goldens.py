@@ -7,36 +7,39 @@ renderer change, regenerate with:  PROV_UPDATE_GOLDENS=1 uv run pytest tests/tes
 from __future__ import annotations
 
 import pytest
-from conftest import UPDATE_GOLDENS, example_hosts
+from conftest import UPDATE_GOLDENS, example_items
 
-from prov.registry import discover
+from prov.registry import Context, discover
 from prov.render import diff_rendered, write_rendered
-from prov.validate import ERROR, load_host
+from prov.schema import SPEC_FILE
+from prov.spec import load_spec
+from prov.validate import ERROR
 
-EXAMPLES = example_hosts()
+EXAMPLES = example_items()
 
 
 def test_every_ubuntu_layout_has_an_example():
-    distros = discover()
+    backends = discover()
     layouts = set()
-    for root, host in EXAMPLES:
-        data, _ = load_host(root / "hosts" / host / "host.toml", distros)
-        if data["distro"] == "ubuntu":
-            layouts.add(data["ubuntu"]["storage"]["layout"])
+    for root, kind, name in EXAMPLES:
+        data, _ = load_spec(root / kind / name / SPEC_FILE, kind, name, backends)
+        if data["backend"] == "ubuntu-autoinstall":
+            layouts.add(data["ubuntu-autoinstall"]["storage"]["layout"])
     assert layouts == {"lvm", "zfs", "mdraid"}
 
 
-@pytest.mark.parametrize("root,host", EXAMPLES, ids=[f"{r.name}/{h}" for r, h in EXAMPLES])
-def test_golden(root, host):
-    distros = discover()
-    hdir = root / "hosts" / host
-    data, _ = load_host(hdir / "host.toml", distros)
-    plugin = distros[data["distro"]]
-    files = plugin.render(data)
+@pytest.mark.parametrize("root,kind,name", EXAMPLES, ids=[f"{k}/{n}" for _, k, n in EXAMPLES])
+def test_golden(root, kind, name):
+    backends = discover()
+    idir = root / kind / name
+    data, _ = load_spec(idir / SPEC_FILE, kind, name, backends)
+    plugin = backends[data["backend"]]
+    ctx = Context(name)
+    files = plugin.render(data, ctx)
     if UPDATE_GOLDENS:
-        write_rendered(hdir / "rendered", files)
-    diff = diff_rendered(hdir / "rendered", files)
+        write_rendered(idir / "rendered", files)
+    diff = diff_rendered(idir / "rendered", files)
     assert not diff, f"golden out of date (PROV_UPDATE_GOLDENS=1 to accept):\n{diff}"
-    assert plugin.render(data) == files, "render is not deterministic"
-    errors = [f for f in plugin.validate(hdir / "rendered") if f.level == ERROR]
+    assert plugin.render(data, ctx) == files, "render is not deterministic"
+    errors = [f for f in plugin.validate(idir / "rendered") if f.level == ERROR]
     assert not errors
