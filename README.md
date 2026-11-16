@@ -96,10 +96,13 @@ directory, `rendered/`, `build/`, files inside `rendered/`); symlinks found insi
 most 1 MiB: symlinks, FIFOs and devices are refused. Written files get the umask's mode, or
 keep the mode of the file they replace. Spec values may not contain control characters, and
 `plan` shell-quotes every spec value it prints. Names prov did not write itself (files in
-`rendered/`, entries under the root) are printed as an escaped repr when they hold a control
-character, and a file in `rendered/` with such a name is reported and removed, never read.
-`prov diff` prints file contents raw, behind the `+`/`-`/space prefix of each line, as
-`git diff` does.
+`rendered/`, entries under the root) are escaped when they hold an unprintable character,
+and a file or directory in `rendered/` with such a name is reported and removed, never read.
+All output is escaped at one boundary: any character that is not printable (controls, bidi
+and zero-width marks, lone surrogates from non-UTF-8 names) is printed as `\xNN`, `\uNNNN`
+or `\UNNNNNNNN` — in names, findings, errors and `prov diff` file contents alike (so `diff`
+output is for reading, not a patch) — while `plan` refuses such lines instead, so what it
+prints is exactly what you paste.
 
 **External validators** are optional: `prov validate` runs `cloud-init schema` when
 cloud-init is installed and otherwise reports `skipped: cloud-init not installed`.

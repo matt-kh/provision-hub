@@ -43,7 +43,14 @@ invalid keyword value or an invalid `pattern`. Every call into a backend goes th
 `prov.registry.call_plugin`: an exception escaping it, or a result of the wrong type (`render`
 not a `dict[str, str]`, `validate`/`check` not a `list[Finding]`, `plan` not a `list[str]`,
 `starter` not a `str`), is reported as `backend '<NAME>' failed in <method>: ...` with exit
-code 2.
+code 2; a `ConfigError` your backend raises is reported the same way, with your text.
+
+Core escapes all of your text where it is printed: finding `level`, `where` and `message`,
+exception and `ConfigError` text, and the module docstring shown by `prov backends`. Every
+character that is not printable (`str.isprintable`: controls, newlines, bidi and zero-width
+marks, lone surrogates ...) appears as `\xNN`, `\uNNNN` or `\UNNNNNNNN`, so a finding is
+always one line. Escape tool output yourself only if you want to; never rely on newlines in
+a message. Plan lines are the exception: they are refused, not escaped (section 3).
 
 ### `ctx`
 
@@ -204,7 +211,9 @@ Requirements:
   reports staleness against a fresh render.
 - **plan** only returns text; it must not run, write or download anything. Wrap every spec
   value in `shlex.quote`, in comments too, so a pasted line never splits into extra
-  commands; core refuses any line containing `\n` or `\r`. Core prints a header and
+  commands. Core refuses (exit 2, naming your backend) any line containing a line break or
+  another unprintable character other than a tab — escape sequences, bidi or zero-width
+  marks — so a pasted line is exactly the line shown. Core prints a header and
   `cd <root>/<kind>/<name>/rendered` first, so write commands relative to the rendered
   directory. Make them exact and copy-pastable, comment lines with `#`, warn about
   destructive steps (which disks are wiped), and use `<placeholders>` for values prov cannot

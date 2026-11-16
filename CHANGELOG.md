@@ -22,6 +22,10 @@ may change incompatibly; every such change has a Migration paragraph. See
 - The published schema is `schema/os-install.v1alpha1.schema.json` (replaces
   `schema/host.v1.schema.json`).
 - `<kind>/<name>/build/` is reserved for a later `prov build` and refused as a symlink.
+- Output is escaped at one boundary (`prov.text`): names, findings, errors, tool output and
+  `prov diff` contents print unprintable characters as `\xNN`/`\uNNNN`/`\UNNNNNNNN`;
+  rendered/ entries with such names are reported and removed; plan lines holding one are
+  refused (exit 2); `prov schema` output is ASCII-only JSON.
 - Rendered output of the Ubuntu examples is byte-identical; they moved to
   `examples/os-install/demo-{lvm,mdraid,zfs}/`.
 

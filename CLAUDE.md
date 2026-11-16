@@ -31,7 +31,9 @@ stay minimal (pyyaml; tomli on 3.10 only) — justify any new one in the PR.
   `prov.backends` entry-point group in `pyproject.toml` (entry-point name = `NAME`).
 - `src/prov/registry.py` — discovery, contract checks, `Context`, `call_plugin` (every call
   into a backend goes through it). `src/prov/spec.py` — refs and envelope checks.
-- Core modules (`cli`, `spec`, `registry`, `render`, `plan`, `schema`, `validate`) must stay
+- `src/prov/text.py` — the output-escaping predicate and helpers (`unsafe`, `esc`, `show`,
+  `short_repr`).
+- Core modules (`cli`, `spec`, `registry`, `render`, `plan`, `schema`, `validate`, `text`) must stay
   kind- and backend-neutral; `tests/test_kinds.py` proves it with a fake kind + backend.
 
 ## Rules
@@ -56,6 +58,10 @@ stay minimal (pyyaml; tomli on 3.10 only) — justify any new one in the PR.
 - **No writes through symlinks** (`<kind>/`, `<name>/`, `rendered/`, `build/`); plan output
   shell-quotes every spec value, comments included (`tests/test_render_safety.py`,
   `tests/test_plan.py`).
+- **Escape at the printing boundary.** Never print a file name, plugin text, exception text,
+  tool output or spec value raw: route it through `prov.text` (`show` for names, `esc` for
+  text, `short_repr` for values). Plan lines with an unsafe character are refused, never
+  escaped. `tests/test_output_escaping.py` sweeps every verb against a hostile root.
 - **Deterministic output.** Sorted keys, stable ordering, no timestamps or random ids;
   goldens depend on it.
 - New backends follow [docs/adding-a-backend.md](docs/adding-a-backend.md).
