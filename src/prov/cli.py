@@ -14,7 +14,7 @@ from typing import Any, List, Optional, Sequence, Tuple
 from . import __version__, kinds
 from .kinds.common import DEFS
 from .plan import plan_lines
-from .registry import Context, call_plugin, discover, for_kind, lookup
+from .registry import Context, call_plugin, discover, for_kind, lookup, preserved
 from .render import atomic_write, diff_rendered, safe_item_dir, special_entries, write_rendered
 from .schema import ID_PATTERN, NAME_PATTERN, SPEC_FILE, ConfigError, api_versions, read_toml, schema_json, spec_schema, tomllib
 from .spec import check_spec, load_spec, parse_ref
@@ -175,7 +175,7 @@ def cmd_init(args: argparse.Namespace) -> int:
 def cmd_render(args: argparse.Namespace) -> int:
     plugin, spec, findings, idir, ctx = _load(args)
     _print_findings(findings)
-    changes = write_rendered(idir / "rendered", call_plugin(plugin, "render", spec, ctx))
+    changes = write_rendered(idir / "rendered", call_plugin(plugin, "render", spec, ctx), preserved(plugin))
     for line in changes:
         print(line)
     print(f"rendered {args.ref} ({plugin.NAME}): {len(changes)} change(s) in {show(str(idir / 'rendered'))}")
@@ -184,7 +184,7 @@ def cmd_render(args: argparse.Namespace) -> int:
 
 def cmd_diff(args: argparse.Namespace) -> int:
     plugin, spec, _, idir, ctx = _load(args)
-    diff = diff_rendered(idir / "rendered", call_plugin(plugin, "render", spec, ctx))
+    diff = diff_rendered(idir / "rendered", call_plugin(plugin, "render", spec, ctx), preserved(plugin))
     if diff:
         sys.stdout.write(diff)
         return EXIT_FINDINGS
@@ -212,7 +212,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
                 findings.append(Finding(ERROR, "symlink, special file or unsafely named file inside rendered/; run prov render to remove it", f"rendered/{show(rel)}"))
             if not special:
                 findings += call_plugin(plugin, "validate", rendered)
-            if diff_rendered(rendered, call_plugin(plugin, "render", spec, ctx)):
+            if diff_rendered(rendered, call_plugin(plugin, "render", spec, ctx), preserved(plugin)):
                 findings.append(Finding(ERROR, "out of date with spec.toml; run prov diff / prov render", "rendered"))
     _print_findings(findings)
     if has_errors(findings):

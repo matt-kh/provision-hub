@@ -35,6 +35,7 @@ keys of a kind describe the item, not one tool's input format.
 ```text
 <root>/<kind>/<name>/spec.toml     # you write this (prov init gives a start)
 <root>/<kind>/<name>/rendered/     # owned by prov render; text only; committed
+                                   # (a backend may name files it keeps there, e.g. flake.lock)
 <root>/<kind>/<name>/build/        # reserved for a later `prov build`; gitignored
 ```
 

@@ -234,6 +234,25 @@ def test_stale_files_and_empty_dirs_are_pruned(tmp_path):
     assert sorted(os.listdir(rendered)) == ["keep"]
 
 
+def test_preserved_files_are_kept_and_not_diffed(tmp_path, outside):
+    rendered = tmp_path / "rendered"
+    rendered.mkdir()
+    (rendered / "flake.lock").write_text("{}\n")
+    (rendered / "stale").write_text("x\n")
+    changes = write_rendered(rendered, {"flake.nix": "{ }\n"}, preserve=("flake.lock",))
+    assert "removed stale" in changes and not any("flake.lock" in c for c in changes)
+    assert (rendered / "flake.lock").read_text() == "{}\n"
+    assert diff_rendered(rendered, {"flake.nix": "{ }\n"}, preserve=("flake.lock",)) == ""
+    assert "flake.lock" in diff_rendered(rendered, {"flake.nix": "{ }\n"})  # without PRESERVE it is stale
+    # a symlink is never preserved, whatever its name
+    (rendered / "flake.lock").unlink()
+    (rendered / "flake.lock").symlink_to(outside / "precious.txt")
+    assert "would be removed" in diff_rendered(rendered, {"flake.nix": "{ }\n"}, preserve=("flake.lock",))
+    changes = write_rendered(rendered, {"flake.nix": "{ }\n"}, preserve=("flake.lock",))
+    assert "removed symlink flake.lock" in changes
+    assert not os.path.lexists(rendered / "flake.lock") and (outside / "precious.txt").read_text() == "keep me\n"
+
+
 @pytest.fixture
 def alarm():
     """Fail instead of hanging forever if a read blocks (e.g. on a FIFO)."""
