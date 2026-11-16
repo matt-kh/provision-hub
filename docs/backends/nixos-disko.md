@@ -7,10 +7,14 @@ runs one confirmed command that partitions the spec disk with
 writes or installs anything.
 
 > **Static validation only — not yet installed on hardware.** prov checks the rendered
-> files structurally and with `nix-instantiate --parse`; the example flake has also been
-> locked and evaluated (`nix eval` of the target and ISO derivations, not built) in the
-> official `nixos/nix` container. No machine has been installed from these files yet. Test
-> in a throwaway VM or a spare disk first.
+> files structurally and with `nix-instantiate --parse`. The example flake has also been
+> locked and evaluated (`nix eval`, never built) in the official `nixos/nix` container for
+> UEFI and BIOS, with and without a hardware file: the target's toplevel and the ISO
+> derivations evaluate, and the target evaluated from the installer's offline flake copy
+> (directly and through disko-install's own `install-cli.nix`, with Nix 2.35 and with the
+> nixpkgs Nix the ISO ships) gives the same toplevel derivation as the one on the ISO. No
+> machine has been installed from these files yet. Test in a throwaway VM or on a spare
+> disk first.
 
 ## Spec
 
@@ -58,7 +62,7 @@ How the core keys map:
 | `users` | `users.users.<name>`: `isNormalUser`, `description` (gecos), `extraGroups` (groups, plus `wheel` when `sudo`), `openssh.authorizedKeys.keys`, `hashedPassword` |
 | `users[].sudo` | wheel plus a passwordless `security.sudo.extraRules` entry |
 | `users[].shell` | `/bin/bash` (default) → NixOS default; `/bin/zsh`, `/bin/fish` (also under `/usr/bin/`, `/run/current-system/sw/bin/`) → `programs.<shell>.enable` and `shell = pkgs.<shell>`; anything else is an error |
-| `network` | systemd-networkd: one `systemd.network.networks."10-<name>"` per interface (DHCP, addresses, gateways, MTU), `systemd.network.links."10-<name>"` renames a NIC by `macaddress`; `networking.nameservers` / `networking.search` |
+| `network` | systemd-networkd (see the note on `macaddress` below): one `systemd.network.networks."10-<name>"` per interface (DHCP, addresses, gateways, MTU), `systemd.network.links."10-<name>"` renames a NIC by `macaddress`; `networking.nameservers` / `networking.search` |
 | `storage.disks` | `disko.devices.disk.main.device` |
 
 Always set: openssh enabled with password and keyboard-interactive authentication and root
@@ -66,7 +70,15 @@ login off; `nix.settings.experimental-features = [ "nix-command" "flakes" ]`.
 
 Checks: layout `ext4` needs exactly one disk; a disk path outside `/dev/disk/by-id/` is a
 warning (kernel names like `/dev/sda` can change between boots); arm64 needs UEFI; some user
-must have an ssh key or a password hash; package names may not be Nix keywords.
+must have an ssh key or a password hash; package names may not be Nix keywords; user names
+may not be NixOS system accounts (`root`, `nobody`, `messagebus`, `sshd`, `nscd`,
+`systemd-network`, `systemd-resolve`, `systemd-timesync`, `nixbld<N>`); a gecos may not
+contain `:`.
+
+On bare metal give every interface a `macaddress`: the `.link` file then names the NIC
+exactly as in the spec. Without it the unit matches the kernel's predictable name (such as
+`enp3s0`), which you must know in advance; an interface `name` that matches no NIC leaves
+that NIC unconfigured.
 
 Groups are passed through as given: NixOS does not create groups such as `adm` or `sudo`
 that Ubuntu has. Users stay mutable (`users.mutableUsers` keeps its default), so a password
@@ -94,7 +106,12 @@ set with `passwd` survives rebuilds.
   The ISO carries the target's closure, the build inputs disko-install needs, and the flake
   with its inputs, following disko's
   [offline installer pattern](https://github.com/nix-community/disko/blob/v1.13.0/docs/disko-install.md#using-disko-install-in-an-offline-installer),
-  so the install needs no network. Nothing runs at boot.
+  so the install needs no network. The closure reaches the ISO through disko's documented
+  `environment.etc."install-closure"` pattern, which has the same effect as listing the
+  paths in `isoImage.storeContents`. Nothing runs at boot. Building the ISO fails with
+  "commit rendered/flake.lock ..." unless `rendered/flake.lock` is git-tracked: without a
+  lock, disko-install would try to lock the inputs on the offline stick, after the wipe was
+  confirmed.
 - **`flake.lock`** is not rendered. `render` keeps a `rendered/flake.lock` you create (the
   backend declares it in `PRESERVE`), and `diff`/`validate` do not call it stale; `validate`
   checks that it is JSON.
@@ -107,19 +124,23 @@ git repository and the file is `git add`ed:** Nix copies only the git-tracked fi
 flake's repository into the store, so an untracked hardware file (or an untracked
 `flake.lock`) is invisible to Nix. The same applies to every rendered file.
 
-disko-install copies only the flake directory, not the whole repository. The installer
-therefore builds its own copy of the flake with `hardware-configuration.nix` inside it, and
-`configuration.nix` checks `./hardware-configuration.nix` first; both evaluate to the same
-system (checked with `nix eval` for the example).
+disko-install copies only the flake directory into the store, not the whole repository
+(it also drops a `?dir=` part of a flake reference), so on the stick `../` would be the
+store directory itself. The installer therefore builds its own flat copy of the flake with
+the hardware file inside it as `hardware-configuration.installer-copy.nix`;
+`configuration.nix` imports that name first, and does not look at `../` when the flake sits
+directly in the store. A `rendered/hardware-configuration.nix` is never imported (and the
+next `prov render` deletes it): keep the file next to `spec.toml`.
 
 ## USB walkthrough
 
 `prov plan os-install/<name>` prints these steps; it runs none of them.
 
-1. **Optional, recommended: capture the hardware configuration.** Boot the stock NixOS
-   minimal ISO (from nixos.org) on the target and run
+1. **Optional, recommended: capture the hardware configuration.** On the target, booted
+   from the stock NixOS minimal ISO (from nixos.org), run
    `nixos-generate-config --no-filesystems --show-hardware-config > hardware-configuration.nix`.
-   Copy the file next to `spec.toml` and `git add` it.
+   Copy the file to your workstation next to `spec.toml` (not into `rendered/`) and
+   `git add` it.
 2. **Lock.** In `rendered/`: `nix flake lock`, then `git add flake.lock` and commit.
 3. **Build the ISO.** `nix build .#nixosConfigurations.<hostname>-installer.config.system.build.isoImage`;
    the image is in `result/iso/`. It is large (several GB): it holds the target closure and
@@ -130,8 +151,11 @@ system (checked with `nix eval` for the example).
    A GUI writer (GNOME Disks, balenaEtcher, Rufus in DD mode) is safer than dd.
 5. **Install. This wipes the spec disk.** Boot the target from the stick (UEFI or legacy
    BIOS mode, matching `firmware`), then run `sudo install-<hostname>`. It checks that the
-   spec disk exists, shows it with `lsblk` (model, serial, size, partitions), and asks you to
-   type the hostname; any other answer aborts without changes. Then it runs
+   spec disk exists, refuses anything but a whole disk (`lsblk -dno TYPE` must be `disk`)
+   and refuses the USB stick it booted from (the disk behind `/iso`), shows the disk with
+   `lsblk` (model, serial, size, partitions), and asks you to type the last 4 characters of
+   the disk's serial, or the hostname when the disk reports no serial. Any other answer
+   aborts without changes. Then it runs
    `disko-install --flake <flake>#<hostname> --disk main <disk>` (plus
    `--write-efi-boot-entries` on UEFI), which partitions, formats and installs.
 6. **Post-install checks.** Remove the stick, reboot, log in with ssh, and check

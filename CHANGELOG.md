@@ -10,8 +10,9 @@ may change incompatibly; every such change has a Migration paragraph. See
 
 - Backend `nixos-disko` for `os-install`: renders a pinned NixOS flake (`flake.nix`,
   `configuration.nix`, `disko.nix`, `installer.nix`) with the target system and an offline
-  USB installer ISO whose `install-<hostname>` command asks for the hostname before
-  disko-install wipes the disk. Table `[nixos-disko]`: `release`, `state_version`, `layout`
+  USB installer ISO whose `install-<hostname>` command refuses partitions and the boot stick
+  and asks for the disk serial's last 4 characters (or the hostname) before disko-install
+  wipes the disk; building the ISO requires a git-tracked `rendered/flake.lock`. Table `[nixos-disko]`: `release`, `state_version`, `layout`
   (`ext4`), `swap_size`, `packages`, `cpu_vendor`. `validate` runs `nix-instantiate --parse`
   when nix is installed; `plan` prints lock, ISO build, USB write and install steps. Static
   validation only: the example was locked and `nix eval`-ed, never installed. Example
