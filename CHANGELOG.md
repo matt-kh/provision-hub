@@ -20,6 +20,18 @@ may change incompatibly; every such change has a Migration paragraph. See
   when nix is installed; `plan` prints lock, ISO build, USB write and install steps. Static
   validation only: the example was locked and `nix eval`-ed, never installed. Example
   `examples/os-install/demo-nixos-ext4/`; docs in `docs/backends/nixos-disko.md`.
+- nixos-disko: layout `ext4-luks` (UEFI only): an ESP and one LUKS partition (`crypted`,
+  discards allowed) holding LVM volume group `pool` with an optional swap LV, an ext4 root
+  LV of `root_size` and ext4 `volumes` (`name`, `mountpoint`, `size`, `mount_options`,
+  `owner`; exactly one of them or the root is `100%FREE`, created last by disko's LV
+  priority). No key or password file: disko asks for the passphrase twice at install time
+  (the install script and `plan` warn first). New keys `esp_size` (default `512M`, at
+  least 256M), `hibernate` (`resumeDevice` on the swap device; needs `swap_size`),
+  `root_size` and `volumes`; an `owner` makes the mount point the user's through
+  `systemd.tmpfiles.rules`. `validate` checks the LUKS/LVM structure and refuses rendered
+  key files, password files or passwords. Example
+  `examples/os-install/demo-nixos-gnome-luks/` (locked and `nix eval`-ed only, never built
+  or installed). Existing specs render unchanged.
 - Backend contract: optional `PRESERVE`, relative paths of human-created regular files in
   `rendered/` that `render` keeps and `diff`/`validate` do not report as stale (used for
   nixos-disko's `flake.lock`).
