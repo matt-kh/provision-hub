@@ -154,6 +154,19 @@ SCHEMA: Dict[str, Any] = {
             "default": [],
         },
         "cpu_vendor": {"enum": ["intel", "amd"], "description": "Enables the CPU microcode updates of this vendor."},
+        "networking": {
+            "enum": ["networkd", "networkmanager"],
+            "default": "networkd",
+            "description": (
+                "networkd: systemd-networkd rendered from [network] (required). networkmanager: NetworkManager, "
+                "connections (Wi-Fi included) made on the machine with nmtui, nmcli or GNOME Settings; [network] is not allowed."
+            ),
+        },
+        "desktop": {
+            "enum": ["none", "gnome"],
+            "default": "none",
+            "description": "none: no graphical desktop. gnome: GNOME on Wayland with GDM; needs networking = networkmanager and release nixos-25.11 or newer.",
+        },
     },
 }
 
@@ -166,6 +179,9 @@ VG_NAME = "pool"
 RESERVED_LVS = frozenset({"root", "swap"})
 RESERVED_LV_PREFIXES = ("snapshot", "pvmove")
 ESP_DEFAULT = "512M"
+# First release with services.displayManager.gdm / services.desktopManager.gnome (moved out
+# of services.xserver in NixOS 25.11).
+GNOME_MIN_RELEASE = "25.11"
 ROOT_MIN_MIB = 8 * 1024
 BY_ID = "/dev/disk/by-id/"
 INITRD_MODULES = ("nvme", "ahci", "xhci_pci", "usb_storage", "sd_mod", "usbhid")
@@ -297,6 +313,50 @@ def _check_storage(spec: Dict[str, Any]) -> List[Finding]:
     return out
 
 
+def _check_networking(spec: Dict[str, Any]) -> List[Finding]:
+    """networking (networkd needs [network], NetworkManager refuses it) and desktop rules."""
+    out: List[Finding] = []
+    nixos = spec[NAME]
+    nm = nixos["networking"] == "networkmanager"
+    if not nm and "network" not in spec:
+        out.append(
+            Finding(
+                ERROR,
+                "networking 'networkd' needs [network] with at least one interface; "
+                'on a machine that joins networks interactively set networking = "networkmanager"',
+                "network",
+            )
+        )
+    if nm and "network" in spec:
+        out.append(
+            Finding(
+                ERROR,
+                "[network] is not used with networking 'networkmanager' (connections are made on the machine with "
+                'nmtui or nmcli); remove it or set networking = "networkd"',
+                "network",
+            )
+        )
+    if nixos["desktop"] == "gnome":
+        if not any("password_hash" in u for u in spec["users"]):
+            out.append(
+                Finding(WARNING, "desktop 'gnome' but no user has password_hash: nobody can log in at the GDM login screen (ssh keys only work over ssh)", "users")
+            )
+        if not nm:
+            out.append(
+                Finding(ERROR, 'desktop \'gnome\' needs networking = "networkmanager" (GNOME manages connections through NetworkManager)', f"{NAME}.desktop")
+            )
+        if nixos["release"][len("nixos-"):] < GNOME_MIN_RELEASE:
+            out.append(
+                Finding(
+                    ERROR,
+                    f"desktop 'gnome' needs release nixos-{GNOME_MIN_RELEASE} or newer (its GDM and GNOME options moved out of "
+                    f"services.xserver there); got {nixos['release']}",
+                    f"{NAME}.release",
+                )
+            )
+    return out
+
+
 def check(spec: Dict[str, Any], ctx: Any) -> List[Finding]:
     """NixOS-specific rules beyond the JSON Schema."""
     out: List[Finding] = []
@@ -310,7 +370,8 @@ def check(spec: Dict[str, Any], ctx: Any) -> List[Finding]:
             out.append(
                 Finding(WARNING, f"{short_repr(disk)} is not a plain {BY_ID} path; kernel names like /dev/sda can change between boots", f"storage.disks[{d}]")
             )
-    for i, iface in enumerate(spec["network"]["interfaces"]):
+    out += _check_networking(spec)
+    for i, iface in enumerate(spec.get("network", {}).get("interfaces", [])):
         if "macaddress" not in iface and re.fullmatch(r"eth[0-9]+", iface["name"]):
             out.append(
                 Finding(
@@ -403,6 +464,13 @@ def flake_nix(spec: Dict[str, Any]) -> str:
 
 
 def _network(spec: Dict[str, Any]) -> List[str]:
+    if spec[NAME]["networking"] == "networkmanager":
+        where = "nmtui, nmcli or GNOME Settings" if spec[NAME]["desktop"] == "gnome" else "nmtui or nmcli"
+        return [
+            "  # Network: NetworkManager. Connections, Wi-Fi included, are made on the machine with",
+            f"  # {where} after the first boot; this file holds no network credentials.",
+            "  networking.networkmanager.enable = true;",
+        ]
     lines = [
         "  # Network: systemd-networkd, one unit per interface; NICs with a MAC are renamed by .link files.",
         "  networking.useDHCP = false;",
@@ -447,12 +515,16 @@ def _users(spec: Dict[str, Any]) -> List[str]:
     lines: List[str] = []
     shells = set()
     sudoers = []
+    nm = spec[NAME]["networking"] == "networkmanager"
     for user in spec["users"]:
         groups = list(user["groups"])
         if user["sudo"]:
             sudoers.append(user["name"])
             if "wheel" not in groups:
                 groups.append("wheel")
+        # Passwordless sudo is root already: NetworkManager need not ask these users either.
+        if nm and user["sudo"] and "networkmanager" not in groups:
+            groups.append("networkmanager")
         lines += [f"  users.users.{nix_attr(user['name'])} = {{", "    isNormalUser = true;"]
         if "gecos" in user:
             lines.append(f"    description = {nix_str(user['gecos'])};")
@@ -540,13 +612,27 @@ def configuration_nix(spec: Dict[str, Any]) -> str:
     lines += [
         f"  time.timeZone = {nix_str(spec['timezone'])};",
         f"  i18n.defaultLocale = {nix_str(spec['locale'])};",
-        "  # keyboard is an XKB layout; the console keymap is derived from it (X stays disabled).",
+    ]
+    if nixos["desktop"] == "gnome":
+        lines.append("  # keyboard is an XKB layout; the console keymap is derived from it and the desktop uses the same setting.")
+    else:
+        lines.append("  # keyboard is an XKB layout; the console keymap is derived from it (X stays disabled).")
+    lines += [
         f"  services.xserver.xkb.layout = {nix_str(spec['keyboard'])};",
         "  console.useXkbConfig = true;",
         "",
     ]
     lines += _network(spec)
+    if nixos["networking"] == "networkmanager" and any(u["sudo"] for u in spec["users"]):
+        lines.append("  # Users with sudo = true are also in the networkmanager group (they have passwordless sudo).")
     lines.append("")
+    if nixos["desktop"] == "gnome":
+        lines += [
+            "  # Desktop: GNOME on Wayland with the GDM login screen (option names of NixOS 25.11 and later).",
+            "  services.displayManager.gdm.enable = true;",
+            "  services.desktopManager.gnome.enable = true;",
+            "",
+        ]
     lines += _users(spec)
     owned = sorted((v["mountpoint"], v["owner"]) for v in nixos["volumes"] if "owner" in v)
     if owned:
@@ -1051,12 +1137,78 @@ def _guard_findings(inst: str, required: List[Any], prefix: str) -> List[Finding
     return out
 
 
+# Network credentials that must never be rendered (NetworkManager connections are made on the
+# machine): wpa_supplicant networks (networking.wireless.networks.<ssid>.psk / pskRaw) and its
+# secretsFile, and NetworkManager's declarative ensureProfiles. Matched on attribute paths, so
+# a user, volume or package that happens to be named psk is not one (see _net_secret).
+_NIX_ATTR = r'(?:[A-Za-z_][A-Za-z0-9_\'-]*|"")'  # string literals are blanked to "" first
+_NIX_TOKEN = re.compile(
+    rf"(?P<open>\{{)|(?P<close>\}})"
+    rf"|(?:(?<=[{{;\n])|^)[ \t]*(?P<path>{_NIX_ATTR}(?:\.{_NIX_ATTR})*)[ \t]*=(?!=)(?P<brace>[ \t]*\{{)?",
+    re.M,
+)
+# systemd-networkd as an attribute (line start or after { or ;): boot.initrd.systemd.network
+# (the initrd's own networkd) does not count.
+_NETWORKD = re.compile(r"(?:^|[{;])[ \t]*(?:networking\.useNetworkd[ \t]*=[ \t]*true\b|systemd\.network\.)", re.M)
+_NETWORKMANAGER = re.compile(r"\bnetworking\.networkmanager\.enable[ \t]*=[ \t]*true\b")
+_GNOME = re.compile(r"\bservices\.desktopManager\.gnome\.enable[ \t]*=[ \t]*true\b")
+_GDM = re.compile(r"\bservices\.displayManager\.gdm\.enable[ \t]*=[ \t]*true\b")
+# Names NixOS 25.11 renamed (services.xserver.{desktop,display}Manager.{gnome,gdm} and friends).
+_OLD_DESKTOP = re.compile(r"\bservices\.xserver\.(desktopManager\.gnome|displayManager\.gdm)\b")
+
+
+def _code(text: str) -> str:
+    """Nix ``text`` with double-quoted string literals blanked and comments removed."""
+    code = re.sub(_STRING, '""', text)
+    return re.sub(r"#[^\n]*", "", code)
+
+
 def _secret(text: str) -> Optional[str]:
     """The first secret attribute name assigned in Nix ``text``, or None."""
-    code = re.sub(_STRING, '""', text)
-    code = re.sub(r"#[^\n]*", "", code)
-    m = _SECRET.search(code)
+    m = _SECRET.search(_code(text))
     return m.group(1) if m else None
+
+
+def _net_secret_path(path: List[str]) -> Optional[str]:
+    """The credential option a full attribute path sets, or None."""
+    for a, b in zip(path, path[1:]):
+        if a == "wireless" and b in ("networks", "secretsFile"):
+            return f"wireless.{b}"
+    if "ensureProfiles" in path:
+        return "ensureProfiles"
+    if path[-1] in ("psk", "pskRaw") and "wireless" in path:
+        return path[-1]
+    return None
+
+
+def _net_secret(text: str) -> Optional[str]:
+    """The first network-credential option assigned in Nix ``text`` (code only), or None.
+
+    Tracks nested attribute sets (``networking.wireless = { networks = ...; }``,
+    ``networkmanager = { ensureProfiles = ...; }``) by brace depth: each ``{`` opened right
+    after ``path =`` contributes ``path`` to the paths assigned inside it; other braces
+    (function arguments, list items) contribute nothing. A best-effort scanner, not a Nix
+    parser: ``rec``/``let`` sets inside attribute values and ``with`` scopes are not followed,
+    nor are sets passed to a function (``lib.mkIf c { ... }``, ``lib.mkMerge [ ... ]``,
+    ``lib.mkDefault { ... }``): their ``{`` does not follow ``path =`` directly, so the path
+    assigned before the call is not carried into them.
+    """
+    stack: List[List[str]] = []
+    for m in _NIX_TOKEN.finditer(_code(text)):
+        if m.group("open"):
+            stack.append([])
+        elif m.group("close"):
+            if stack:
+                stack.pop()
+        else:
+            path = m.group("path").split(".")
+            full = [p for frame in stack for p in frame] + path
+            hit = _net_secret_path(full)
+            if hit:
+                return hit
+            if m.group("brace"):
+                stack.append(path)
+    return None
 
 
 def _string_value(text: str, key: str) -> Optional[str]:
@@ -1103,6 +1255,27 @@ def _external(paths: List[Path]) -> List[Finding]:
     return out
 
 
+def _validate_desktop(code: str) -> List[Finding]:
+    """configuration.nix (code only): one network stack; GNOME with GDM and NetworkManager."""
+    out: List[Finding] = []
+    networkd, nm = bool(_NETWORKD.search(code)), bool(_NETWORKMANAGER.search(code))
+    if networkd and nm:
+        out.append(Finding(ERROR, "enables both systemd-networkd and NetworkManager; use exactly one", "configuration.nix"))
+    elif not networkd and not nm:
+        out.append(Finding(ERROR, "enables neither systemd-networkd nor NetworkManager", "configuration.nix"))
+    if _GNOME.search(code):
+        if not _GDM.search(code):
+            out.append(Finding(ERROR, "GNOME is enabled without services.displayManager.gdm.enable", "configuration.nix"))
+        if not nm:
+            out.append(Finding(ERROR, "GNOME is enabled without NetworkManager", "configuration.nix"))
+    old = _OLD_DESKTOP.search(code)
+    if old:
+        out.append(
+            Finding(ERROR, f"services.xserver.{old.group(1)} is the pre-25.11 name; use services.{old.group(1)} (NixOS 25.11 and later)", "configuration.nix")
+        )
+    return out
+
+
 def validate(rendered_dir: Path) -> List[Finding]:
     """Check the rendered flake: files, key attributes, cross-file consistency, optional parse."""
     findings: List[Finding] = []
@@ -1131,6 +1304,8 @@ def validate(rendered_dir: Path) -> List[Finding]:
                     findings.append(Finding(ERROR, f"does not take its offline closure from self.nixosConfigurations.{esc(host)}", "installer.nix"))
     if conf is not None and "boot.loader.systemd-boot.enable = true;" not in conf and "boot.loader.grub.enable = true;" not in conf:
         findings.append(Finding(ERROR, "no boot loader (systemd-boot or GRUB) is enabled", "configuration.nix"))
+    if conf is not None:
+        findings += _validate_desktop(_code(conf))
     if disko is not None and inst is not None:
         device, disk = _string_value(disko, "device"), _string_value(inst, "disk")
         if device is None:
@@ -1156,6 +1331,9 @@ def validate(rendered_dir: Path) -> List[Finding]:
         secret = _secret(text) if text is not None else None
         if secret:
             findings.append(Finding(ERROR, f"{secret} =: no key file, password file or password may be rendered", name))
+        net = _net_secret(text) if text is not None else None
+        if net:
+            findings.append(Finding(ERROR, f"{net}: no network credentials may be rendered (connections are made on the machine)", name))
 
     lock_path = rendered_dir / "flake.lock"
     if lock_path.exists() or lock_path.is_symlink():
@@ -1191,7 +1369,9 @@ def plan(spec: Dict[str, Any], ctx: Any) -> List[str]:
     installer = f".#nixosConfigurations.{q(host)}-installer.config.system.build.isoImage"
     mode = "UEFI" if spec["firmware"] == "uefi" else "legacy BIOS"
     login = next((u["name"] for u in spec["users"] if u["ssh_authorized_keys"]), None)
-    address = next((a.split("/")[0] for i in spec["network"]["interfaces"] for a in i["addresses"]), None)
+    address = next((a.split("/")[0] for i in spec.get("network", {}).get("interfaces", []) for a in i["addresses"]), None)
+    nm = nixos["networking"] == "networkmanager"
+    gnome = nixos["desktop"] == "gnome"
     # The ISO's out-link (its GC root) lives outside the hosts repository and outside every
     # prov-owned directory: render would delete a link in rendered/, and validate/diff flag it.
     link = f'"$HOME"/prov-iso/{q(f"{host}-installer")}'
@@ -1218,6 +1398,13 @@ def plan(spec: Dict[str, Any], ctx: Any) -> List[str]:
         "# 3. Build the installer ISO (large: it carries the target closure for an offline install).",
         "#    The out-link under ~/prov-iso keeps the ISO from garbage collection; delete the link",
         "#    when you no longer need the ISO.",
+    ]
+    if gnome:
+        lines += [
+            "#    desktop gnome: the ISO carries the whole desktop closure, likely several GB more than a",
+            "#    server install (not measured): a longer build, more store space; use a 16 GB+ stick.",
+        ]
+    lines += [
         'mkdir -p "$HOME"/prov-iso',
         f"nix --extra-experimental-features 'nix-command flakes' build {installer} --out-link {link}",
         f"ls {link}/iso/",
@@ -1231,8 +1418,15 @@ def plan(spec: Dict[str, Any], ctx: Any) -> List[str]:
         'case "$USB" in *-part[0-9]*) echo "USB=$USB is a partition; use the whole stick" >&2 ;; '
         '*) if [ -b "$USB" ]; then sudo dd if="$ISO" of="$USB" bs=4M conv=fsync status=progress; '
         'else echo "USB=$USB is not a block device; set USB first" >&2; fi ;; esac',
+        "#    WSL2 has no USB block devices: copy the ISO to Windows instead, e.g.",
+        '#        cp -L "$ISO" /mnt/c/Users/CHANGE-ME/Downloads/',
+        "#    and write it there with Rufus (DD image mode) or balenaEtcher.",
         "",
         f"# 5. WARNING: the install WIPES {disks} on the target machine.",
+    ]
+    if spec["firmware"] == "uefi":
+        lines.append("#    Disable Secure Boot in the firmware setup first: neither the installer stick nor systemd-boot is signed.")
+    lines += [
         f"#    Boot the target from the USB stick in {mode} mode, then run on its console:",
     ]
     if luks:
@@ -1258,6 +1452,15 @@ def plan(spec: Dict[str, Any], ctx: Any) -> List[str]:
         "",
         "# 6. Post-install checks: remove the stick, reboot into the installed system, then",
     ]
+    if nm:
+        lines += [
+            "#    on the TARGET console join a network with   sudo nmtui"
+            + ("   (Ctrl+Alt+F3 for a text console, or use GNOME Settings)" if gnome else "")
+            + ";",
+            "#    network credentials stay on the machine, never in spec.toml. Still on the target console:",
+            "nmcli device status",
+            "#    then from this machine:",
+        ]
     if login and address:
         lines.append(f"ssh {q(login)}@{q(address)}")
     elif login:
@@ -1276,6 +1479,8 @@ def plan(spec: Dict[str, Any], ctx: Any) -> List[str]:
         "swapon --show",
         "ip -br addr",
     ]
+    if gnome:
+        lines.append("systemctl is-active display-manager")
     if luks:
         lines += [f"sudo cryptsetup status {LUKS_NAME}", "sudo lvs"]
     if nixos["hibernate"]:
@@ -1348,6 +1553,9 @@ packages = ["git", "vim"]
 # size = "100%FREE"
 # mount_options = ["noatime"]  # optional
 # owner = "ops"                # optional: a [[users]] name; owns the mount point (0750)
+# networking = "networkd"      # or "networkmanager": connections (Wi-Fi) made on the machine
+#                              # with nmtui/nmcli; then remove [network] above
+# desktop = "none"             # or "gnome" (GNOME + GDM): needs networking = "networkmanager"
 """
 
 

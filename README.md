@@ -21,7 +21,7 @@ and OS images (`image`, planned). See [docs/kinds.md](docs/kinds.md).
 | Kind | Backend | Artefacts | Notes |
 |---|---|---|---|
 | `os-install` | `ubuntu-autoinstall` (22.04, 24.04) | NoCloud seed: autoinstall `user-data`, `meta-data`, `kernel-cmdline` | storage layouts `lvm`, `zfs`, `mdraid` |
-| `os-install` | `nixos-disko` (nixpkgs `nixos-YY.MM`) | pinned flake: `flake.nix`, `configuration.nix`, `disko.nix`, `installer.nix` (offline USB installer ISO) | layouts `ext4`, `ext4-luks` (LVM on LUKS); see [docs/backends/nixos-disko.md](docs/backends/nixos-disko.md) |
+| `os-install` | `nixos-disko` (nixpkgs `nixos-YY.MM`) | pinned flake: `flake.nix`, `configuration.nix`, `disko.nix`, `installer.nix` (offline USB installer ISO) | layouts `ext4`, `ext4-luks` (LVM on LUKS); systemd-networkd or NetworkManager, optional GNOME desktop; see [docs/backends/nixos-disko.md](docs/backends/nixos-disko.md) |
 
 New backends follow [docs/adding-a-backend.md](docs/adding-a-backend.md); new kinds are a
 core change ([docs/kinds.md](docs/kinds.md)).

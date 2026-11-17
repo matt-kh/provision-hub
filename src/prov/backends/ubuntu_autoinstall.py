@@ -70,6 +70,8 @@ def check(host: Dict[str, Any], ctx: Any) -> List[Finding]:
     storage = host[NAME]["storage"]
     layout = storage["layout"]
     disks = host["storage"]["disks"]
+    if "network" not in host:
+        out.append(Finding(ERROR, "ubuntu-autoinstall needs [network] with at least one interface (netplan is rendered from it)", "network"))
     if "raid_level" in storage and layout != "mdraid":
         out.append(Finding(ERROR, "raid_level applies to layout 'mdraid' only", f"{NAME}.storage.raid_level"))
     if layout == "mdraid":
