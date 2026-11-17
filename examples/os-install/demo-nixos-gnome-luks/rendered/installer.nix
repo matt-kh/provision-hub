@@ -152,7 +152,7 @@ let
       if [ -e /dev/mapper/crypted ] || [ "$crypt_rc" = 0 ]; then
         refuse "/dev/mapper/crypted is already open. Left over from an earlier attempt: vgchange -an pool, then cryptsetup close crypted. From another disk: unplug it"
       elif [ "$crypt_rc" != 4 ]; then
-        refuse "cannot query the LUKS mapping crypted (cryptsetup status exited $crypt_rc)"
+        refuse "cannot query the LUKS mapping crypted (cryptsetup status exited $crypt_rc); load device-mapper: modprobe dm_mod, then retry"
       fi
       serial=$(lsblk -dno SERIAL "$dev") || refuse "cannot read the serial of $dev"
       serial=$(printf %s "$serial" | tr -d "[:space:]")

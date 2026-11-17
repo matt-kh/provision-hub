@@ -47,7 +47,9 @@ may change incompatibly; every such change has a Migration paragraph. See
   by these labels and skips formatting a partition that already has a file system, so a
   leftover label could capture `/boot`, `/` or the LUKS device at install and boot time.
   This changes the rendered `installer.nix` of existing nixos-disko items (golden
-  `demo-nixos-ext4`).
+  `demo-nixos-ext4`): re-render them (`prov render`), since `validate` now requires the
+  guard. `plan` now prints one `findmnt` line per mount point and warns about foreign
+  `disk-main-*` labels before the install step.
 
 ### Changed
 

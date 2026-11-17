@@ -1348,7 +1348,7 @@ def test_script_refuses_when_the_label_scan_fails(script_env):
 def test_luks_script_refuses_when_cryptsetup_cannot_answer(script_env, rc):
     run_script, _, _ = script_env
     proc, args = run_script(layout="ext4-luks", STUB_CRYPT_RC=rc)
-    assert proc.returncode == 1 and f"cannot query the LUKS mapping crypted (cryptsetup status exited {rc})" in proc.stderr and args is None
+    assert proc.returncode == 1 and f"cannot query the LUKS mapping crypted (cryptsetup status exited {rc}); load device-mapper: modprobe dm_mod, then retry" in proc.stderr and args is None
 
 
 def test_partlabel_guard_is_rendered_for_every_layout():

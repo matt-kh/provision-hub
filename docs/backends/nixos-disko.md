@@ -16,13 +16,13 @@ writes or installs anything.
 > `ext4-luks` example (`demo-nixos-gnome-luks`) was locked and evaluated the same way
 > (toplevel and ISO derivations; the evaluated LUKS device, LVM volumes, mounts, resume
 > device and the disko format script's `lvcreate` order are recorded under
-> [Encrypted layout](#encrypted-layout-ext4-luks)), and its `install-<hostname>` script text,
-> taken from the evaluated ISO configuration with the VG/LUKS guard, passes shellcheck
-> 0.11.0 from the pinned nixpkgs; it has not been built, formatted or
+> [Encrypted layout](#encrypted-layout-ext4-luks)); it has not been built, formatted or
 > booted, so the passphrase prompts, the initrd unlock and resume from hibernation are
-> unverified on hardware. The
-> `install-<hostname>` script passes shellcheck (from the pinned nixpkgs), and its refusal
-> paths are tested with stubbed `lsblk`/`findmnt`, never against real devices. No machine
+> unverified on hardware. The current `install-<hostname>` script text of both examples
+> (`demo-nixos-ext4` and `demo-nixos-gnome-luks`, every guard included), taken from the
+> evaluated ISO configuration, passes shellcheck 0.11.0 from the pinned nixpkgs, and its
+> refusal paths are tested with stubbed `lsblk`/`findmnt`/`vgs`/`cryptsetup`, never against
+> real devices. No machine
 > has been installed from these files yet. Test in a throwaway VM or on a spare
 > disk first.
 
@@ -217,13 +217,15 @@ confirmation and changing nothing, when `vgs --noheadings -o vg_name` lists a `p
 `vgs` itself fails, or when `/dev/mapper/crypted` exists or `cryptsetup status crypted`
 answers 0, or when `cryptsetup status` answers anything but 0 or 4 ("cannot query": in
 cryptsetup 2.8.6 an inactive name is `-ENODEV`, exit 4, while a missing device-mapper
-gives 1). `lvm2` and `cryptsetup` are in the script's `runtimeInputs`. Remediation, by a
+gives 1; the refusal then suggests loading device-mapper with `modprobe dm_mod` and
+retrying). `lvm2` and `cryptsetup` are in the script's `runtimeInputs`. Remediation, by a
 human: a `pool` on **another** disk, unplug that disk or rename its group
-(`vgrename pool <other-name>`); a leftover of an earlier attempt on the target disk (for
-example a passphrase mismatch or a failure after the LUKS format, which leaves `crypted`
-open), `vgchange -an pool` **then** `cryptsetup close crypted`, in that order. The fixed
-sizes (swap, `root_size`, volumes) must fit the disk; when they do not, `lvcreate` fails
-after the LUKS format, with that same leftover.
+(`vgrename pool <other-name>`); a leftover of an earlier attempt on the target disk,
+`vgchange -an pool` **then** `cryptsetup close crypted`, in that order. Such a leftover
+comes from a failure after the LUKS format, for example fixed sizes (swap, `root_size`,
+volumes) that do not fit the disk: `lvcreate` fails with `crypted` open and `pool`
+active. A passphrase mismatch is different: disko exits before `luksFormat`, nothing is
+left open, and a rerun of `sudo install-<hostname>` is all it takes.
 The names stay fixed (`pool`, `crypted`) rather than derived from the hostname: a host
 reinstalled from a second disk would clash with its own old names anyway, a fixed name
 keeps the post-install commands identical on every host, and the guard catches every clash

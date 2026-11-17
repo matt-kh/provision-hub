@@ -729,7 +729,8 @@ _LUKS_GUARD = [
     f'        refuse "/dev/mapper/{LUKS_NAME} is already open. Left over from an earlier attempt: vgchange -an {VG_NAME}, '
     f'then cryptsetup close {LUKS_NAME}. From another disk: unplug it"',
     '      elif [ "$crypt_rc" != 4 ]; then',
-    f'        refuse "cannot query the LUKS mapping {LUKS_NAME} (cryptsetup status exited $crypt_rc)"',
+    f'        refuse "cannot query the LUKS mapping {LUKS_NAME} (cryptsetup status exited $crypt_rc); '
+    'load device-mapper: modprobe dm_mod, then retry"',
     "      fi",
 ]
 
