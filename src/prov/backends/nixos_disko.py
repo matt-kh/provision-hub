@@ -1188,7 +1188,10 @@ def _net_secret(text: str) -> Optional[str]:
     ``networkmanager = { ensureProfiles = ...; }``) by brace depth: each ``{`` opened right
     after ``path =`` contributes ``path`` to the paths assigned inside it; other braces
     (function arguments, list items) contribute nothing. A best-effort scanner, not a Nix
-    parser: ``rec``/``let`` sets inside attribute values and ``with`` scopes are not followed.
+    parser: ``rec``/``let`` sets inside attribute values and ``with`` scopes are not followed,
+    nor are sets passed to a function (``lib.mkIf c { ... }``, ``lib.mkMerge [ ... ]``,
+    ``lib.mkDefault { ... }``): their ``{`` does not follow ``path =`` directly, so the path
+    assigned before the call is not carried into them.
     """
     stack: List[List[str]] = []
     for m in _NIX_TOKEN.finditer(_code(text)):
@@ -1452,7 +1455,7 @@ def plan(spec: Dict[str, Any], ctx: Any) -> List[str]:
     if nm:
         lines += [
             "#    on the TARGET console join a network with   sudo nmtui"
-            + ("   (or in GNOME Settings after logging in)" if gnome else "")
+            + ("   (Ctrl+Alt+F3 for a text console, or use GNOME Settings)" if gnome else "")
             + ";",
             "#    network credentials stay on the machine, never in spec.toml. Still on the target console:",
             "nmcli device status",

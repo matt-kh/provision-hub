@@ -1760,7 +1760,7 @@ def test_gnome_plan_lines():
     iso = next(i for i, line in enumerate(lines) if line.startswith("nix ") and " build " in line)
     size = [i for i, line in enumerate(lines) if "whole desktop closure" in line]
     assert size and size[0] < iso and any("16 GB" in line for line in lines)
-    assert any("GNOME Settings" in line for line in lines)
+    assert any("sudo nmtui   (Ctrl+Alt+F3 for a text console, or use GNOME Settings);" in line for line in lines)
     assert lines[-1] == "systemctl is-active display-manager"
 
 

@@ -279,7 +279,9 @@ assignment to `networking.wireless.networks` (and so its `psk` / `pskRaw`),
 attribute paths, nested sets included (`networking.wireless = { networks = ...; }`,
 `networkmanager = { ensureProfiles = ...; }`), after blanking strings and comments, so a
 user, volume or package named `psk` is not one. It is a scanner, not a Nix parser: a `with`
-scope or a `let`/`rec` set inside an attribute value is not followed. `validate` also
+scope, a `let`/`rec` set inside an attribute value, and a set passed to a function
+(`lib.mkIf c { ... }`, `lib.mkMerge [ ... ]`, `lib.mkDefault { ... }`) are not followed, so
+`networking.wireless = lib.mkIf c { networks = ...; }` is not caught. `validate` also
 requires exactly one of systemd-networkd (`networking.useNetworkd`, `systemd.network.*`;
 the initrd's `boot.initrd.systemd.network` does not count) and NetworkManager in
 `configuration.nix`.
@@ -293,7 +295,10 @@ connection (`settings.modify.system`, what nmtui and GNOME Settings create by de
 administrator authentication (`auth_admin_keep`). So:
 
 - in GNOME Settings a `wheel` user is asked for their own password (GNOME Shell is the
-  polkit agent); a non-`wheel` user cannot add system-wide connections;
+  polkit agent); a non-`wheel` user cannot add system-wide connections, but in an active
+  local session can still add and change connections restricted to themselves
+  (`settings.modify.own`: `yes`, e.g. `nmcli connection add ... connection.permissions
+  user:<name>`);
 - on the console nmtui has no polkit agent, so run `sudo nmtui` (or `nmcli --ask`, which can
   act as a polkit agent in the terminal; `nmcli agent polkit` starts one explicitly);
 - users with `sudo = true` (passwordless sudo, root already) are put in the
@@ -330,8 +335,8 @@ takes longer and needs more store space; use a stick of 16 GB or more. From WSL2
 Windows (`cp -L "$ISO" /mnt/c/Users/<you>/Downloads/`) and write it with Rufus in DD image
 mode or balenaEtcher.
 
-After the install, join a network on the target console with `sudo nmtui` (or in GNOME
-Settings after logging in), check it there with `nmcli device status`, and `systemctl is-active display-manager`
+After the install, join a network on the target console with `sudo nmtui` (with GNOME,
+Ctrl+Alt+F3 for a text console, or use GNOME Settings after logging in), check it there with `nmcli device status`, and `systemctl is-active display-manager`
 should print `active`.
 
 Evaluated (locked and `nix eval`-ed in the `nixos/nix` container against nixpkgs
