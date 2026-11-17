@@ -116,16 +116,38 @@ let
       else
         echo "install-$host: no block device at /iso; the boot medium was not compared" >&2
       fi
-      # ext4-luks: refuse when another disk already provides VG pool or LUKS mapping crypted;
+      # Partition labels disko uses (disk-main-*) must not exist on any other disk.
+      parts=$(lsblk -nrpo NAME,PARTLABEL) || refuse "cannot list the partition labels (lsblk)"
+      while read -r pname plabel; do
+        case "$plabel" in
+          disk-main-*)
+            owners=$(lsblk -nrpso NAME,TYPE "$pname") || refuse "cannot read the disk under $pname"
+            while read -r oname okind; do
+              if [ "$okind" = "disk" ]; then
+                o=$(readlink -f "$oname") || refuse "cannot resolve $oname"
+                if [ "$o" != "$dev" ]; then
+                  refuse "$pname on disk $o carries the partition label $plabel that disko uses for this install; it could capture a mount at install or boot time. Unplug that disk, or wipe its partition table yourself (wipefs -a or sgdisk --zap-all on $o, NOT on the target disk)"
+                fi
+              fi
+            done <<< "$owners"
+            ;;
+        esac
+      done <<< "$parts"
+      # ext4-luks: refuse when a VG pool or LUKS mapping crypted already exists (on any disk):
       # disko would reuse them instead of creating them on the target disk.
       vgnames=$(vgs --noheadings -o vg_name) || refuse "cannot list the LVM volume groups (vgs)"
       while read -r vg; do
         if [ "$vg" = pool ]; then
-          refuse "an LVM volume group named pool already exists; disko would reuse it. Deactivate it (vgchange -an pool) or remove it first"
+          refuse "an LVM volume group named pool already exists. On another disk: unplug it or rename it (vgrename pool <other-name>). Left over from an earlier attempt on this disk: vgchange -an pool, then cryptsetup close crypted"
         fi
       done <<< "$vgnames"
-      if [ -e /dev/mapper/crypted ] || cryptsetup status crypted >/dev/null 2>&1; then
-        refuse "/dev/mapper/crypted already exists; disko would reuse it. Close it (cryptsetup close crypted) first"
+      # cryptsetup status: 0 active, 4 inactive (-ENODEV); anything else is an unanswered question.
+      crypt_rc=0
+      cryptsetup status crypted >/dev/null 2>&1 || crypt_rc=$?
+      if [ -e /dev/mapper/crypted ] || [ "$crypt_rc" = 0 ]; then
+        refuse "/dev/mapper/crypted is already open. Left over from an earlier attempt: vgchange -an pool, then cryptsetup close crypted. From another disk: unplug it"
+      elif [ "$crypt_rc" != 4 ]; then
+        refuse "cannot query the LUKS mapping crypted (cryptsetup status exited $crypt_rc)"
       fi
       serial=$(lsblk -dno SERIAL "$dev") || refuse "cannot read the serial of $dev"
       serial=$(printf %s "$serial" | tr -d "[:space:]")

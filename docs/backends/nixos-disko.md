@@ -113,10 +113,10 @@ How the core keys map:
 | Key | Type | Notes |
 |---|---|---|
 | `name` | `^[a-z][a-z0-9-]*$`, required | LV name; unique; not `root`, `swap` (prov's own LVs) and not starting with `snapshot` or `pvmove` (LVM rejects those) |
-| `mountpoint` | absolute path of `A-Za-z0-9._/-`, required | normalised (no `//`, trailing `/`, `.` or `..`), unique, not `/`, and neither `/boot`, `/nix`, `/proc`, `/sys`, `/dev`, `/run` nor anything below them |
+| `mountpoint` | absolute path of `A-Za-z0-9._/-`, required | normalised (no `//`, trailing `/`, `.` or `..`), unique, not `/`, and neither `/boot`, `/nix`, `/proc`, `/sys`, `/dev`, `/run`, `/var/run`, `/var/lock` nor anything below them |
 | `size` | `^[1-9][0-9]*[MG]$` or `100%FREE`, required | exactly one of `root_size` and all volume sizes is `100%FREE` (none or several is an error) |
 | `mount_options` | list of `^[A-Za-z0-9][A-Za-z0-9_.=:+-]*$` (`[]`) | one option per item (no commas); disko's `mountOptions`, i.e. `fileSystems.<mountpoint>.options` |
-| `owner` | user name, optional | must be a `[[users]]` name: `systemd.tmpfiles.rules` gets `d <mountpoint> 0750 <owner> users -` (sorted by mount point), so the mounted volume's root belongs to that user. Not allowed on a shared system directory: `/home`, `/tmp`, `/srv`, `/opt`, `/mnt`, `/media` themselves, or `/var`, `/etc`, `/usr` and anything below them (mount the volume below a shared directory instead, e.g. `/srv/data`) |
+| `owner` | user name, optional | must be a `[[users]]` name: `systemd.tmpfiles.rules` gets `d <mountpoint> 0750 <owner> users -` (sorted by mount point), so the mounted volume's root belongs to that user. Not allowed on a shared system directory: `/home`, `/tmp`, `/srv`, `/opt`, `/mnt`, `/media` themselves, or `/var`, `/etc`, `/usr`, `/root`, `/bin`, `/lib`, `/lib64`, `/sbin` and anything below them (mount the volume below a shared directory instead, e.g. `/srv/data`). Not allowed on a declared user's home `/home/<name>` either: NixOS creates it and keeps it at mode 0700 (`homeMode`), which a 0750 tmpfiles rule would fight |
 
 Always set: openssh enabled with password and keyboard-interactive authentication and root
 login off; `nix.settings.experimental-features = [ "nix-command" "flakes" ]`.
@@ -141,6 +141,26 @@ Groups are passed through as given: NixOS does not create groups such as `adm` o
 that Ubuntu has. Users stay mutable (`users.mutableUsers` keeps its default), so a password
 set with `passwd` survives rebuilds.
 
+## Partition labels on other disks
+
+Every layout. disko names the partitions by GPT
+partition label (`disk-main-ESP`, `disk-main-root`, `disk-main-swap`, `disk-main-luks`,
+`disk-main-boot`) and addresses them as `/dev/disk/by-partlabel/<label>` both in its
+format/mount scripts and in the installed system's `fileSystems`, `swapDevices` and
+`boot.initrd.luks.devices`. When another disk still carries such a label (a disk from an
+earlier disko install), udev points the by-partlabel link at one of the two, so at install
+time disko could mount (and, finding a file system there, not format) the other disk's
+partition, and at every boot `/boot`, `/` or the LUKS device could resolve to the wrong
+disk. `install-<hostname>` therefore refuses, before the serial prompt, when any partition
+listed by `lsblk -nrpo NAME,PARTLABEL` has a `disk-main-*` label and a `disk` ancestor
+(`lsblk -nrpso NAME,TYPE`, as for the boot medium) other than the target disk; a failing
+`lsblk` refuses as well. Labels on the target disk itself (a reinstall) are fine.
+Remediation, by a human: unplug that disk, or wipe its partition table
+(`wipefs -a` or `sgdisk --zap-all` on **that** disk, never the target). The labels on a
+disk added after the install are not checked: keep disks from other disko installs out of
+the machine, or wipe them. `validate` requires these guard lines in every rendered
+`installer.nix`, before `exec disko-install`.
+
 ## Encrypted layout (`ext4-luks`)
 
 disko's LUKS-on-LVM pattern (`example/luks-lvm.nix` at `v1.13.0`), UEFI only:
@@ -161,8 +181,12 @@ disko's LUKS-on-LVM pattern (`example/luks-lvm.nix` at `v1.13.0`), UEFI only:
 or after `{` or `;`, with or without a dotted prefix (`settings = { keyFile = ...; }` too);
 string literals and comments are ignored, so a gecos that mentions a password is not one. In
 disko `v1.13.0` (`lib/types/luks.nix`) `askPassword` then defaults to true: its format step
-prompts "Enter password for <device>" and "... again to be safe" with `read -s` and loops
-until both match, then runs `cryptsetup luksFormat` with that passphrase; prov pins the
+prompts "Enter password for <device>" and "... again to be safe" with `read -s`, then runs
+`cryptsetup luksFormat` with that passphrase. If the two entries differ, its `exit 1`
+inside the prompt function ends the whole format script (the "please try again" loop
+around it never runs again), and disko-install fails after the disk was already wiped and
+partitioned: run `sudo install-<hostname>` again (the confirmation is asked again too).
+prov pins the
 format with `extraFormatArgs = [ "--type" "luks2" ]` (the option of `lib/types/luks.nix`,
 passed to `luksFormat`). `allowDiscards` passes TRIM through to the SSD, which keeps it fast
 but lets someone with the raw disk see which blocks are unused (file system type and
@@ -172,10 +196,12 @@ now ask for the new disk passphrase twice" (after the typed serial confirmation)
 passphrase is never written to a file, cannot be recovered, and is typed at every boot:
 store it in a password manager before the install. disko also adds
 `boot.initrd.luks.devices.crypted` (device `/dev/disk/by-partlabel/disk-main-luks`,
-`allowDiscards = true`) and the LVM initrd modules (`dm-snapshot`); the evaluated format script runs `cryptsetup luksFormat ... --type luks2`. So `configuration.nix`
-does not repeat them; it adds `hid_generic` to `boot.initrd.availableKernelModules`
-(`usbhid` is already in the base set) for a USB keyboard at the prompt, and
-`console.earlySetup = true` so the console keymap is loaded before it. On nixos-26.05 the
+`allowDiscards = true`) and the LVM initrd modules (`dm-snapshot`); the evaluated format
+script runs `cryptsetup luksFormat ... --type luks2`. `configuration.nix` does not repeat
+them. It adds no keyboard drivers either: nixpkgs' default initrd modules
+(`boot.initrd.includeDefaultModules`) already carry `usbhid`, `hid_generic` and the
+common vendor HID drivers (checked with `nix eval` on a bare nixos-26.05 configuration).
+It sets `console.earlySetup = true` so the console keymap is loaded before the prompt. On nixos-26.05 the
 evaluated system uses the systemd initrd (`boot.initrd.systemd.enable = true`) with
 `lvm2` and an `/etc/crypttab` in the initrd.
 
@@ -188,8 +214,15 @@ would therefore be reused silently, and the install would land on that disk, pos
 unencrypted. For `ext4-luks` the `install-<hostname>` script refuses, before the typed
 confirmation and changing nothing, when `vgs --noheadings -o vg_name` lists a `pool`, when
 `vgs` itself fails, or when `/dev/mapper/crypted` exists or `cryptsetup status crypted`
-succeeds (`lvm2` and `cryptsetup` are in the script's `runtimeInputs`). Deactivate
-(`vgchange -an pool`) or close (`cryptsetup close crypted`) them first, or unplug that disk.
+answers 0, or when `cryptsetup status` answers anything but 0 or 4 ("cannot query": in
+cryptsetup 2.8.6 an inactive name is `-ENODEV`, exit 4, while a missing device-mapper
+gives 1). `lvm2` and `cryptsetup` are in the script's `runtimeInputs`. Remediation, by a
+human: a `pool` on **another** disk, unplug that disk or rename its group
+(`vgrename pool <other-name>`); a leftover of an earlier attempt on the target disk (for
+example a passphrase mismatch or a failure after the LUKS format, which leaves `crypted`
+open), `vgchange -an pool` **then** `cryptsetup close crypted`, in that order. The fixed
+sizes (swap, `root_size`, volumes) must fit the disk; when they do not, `lvcreate` fails
+after the LUKS format, with that same leftover.
 The names stay fixed (`pool`, `crypted`) rather than derived from the hostname: a host
 reinstalled from a second disk would clash with its own old names anyway, a fixed name
 keeps the post-install commands identical on every host, and the guard catches every clash
@@ -319,12 +352,15 @@ files (the output of `nixos-generate-config` already is).
    characters of the disk's serial, or the hostname when the disk reports no serial. Any
    other answer aborts without changes. With `ext4-luks` it also refuses, before the
    confirmation, while any disk provides an LVM volume group `pool` or an open
-   `/dev/mapper/crypted`, and disko then asks twice for the new disk passphrase (see [Encrypted layout](#encrypted-layout-ext4-luks)). Then it runs
+   `/dev/mapper/crypted`. Every layout refuses while another disk carries a `disk-main-*`
+partition label (see [Partition labels on other disks](#partition-labels-on-other-disks)). With
+`ext4-luks` disko then asks twice for the new disk passphrase (see [Encrypted layout](#encrypted-layout-ext4-luks)). Then it runs
    `disko-install --flake <flake>#<hostname> --disk main <disk>` (plus
    `--write-efi-boot-entries` on UEFI), which partitions, formats and installs.
 6. **Post-install checks.** Remove the stick, reboot (with `ext4-luks`, type the passphrase
    at the initrd prompt), log in with ssh, and check `nixos-version`, `systemctl --failed`,
-   `findmnt / /boot` (plus every volume's mount point), `swapon --show`, `ip -br addr`; with
+   `findmnt /`, `findmnt /boot` (one `findmnt` per mount point, every volume included),
+`swapon --show`, `ip -br addr`; with
    `ext4-luks` also `sudo cryptsetup status crypted` and `sudo lvs`; with `hibernate`,
    `cat /sys/power/disk` and one `systemctl hibernate` test.
 

@@ -147,15 +147,13 @@ VG_NAME = "pool"
 RESERVED_LVS = frozenset({"root", "swap"})
 RESERVED_LV_PREFIXES = ("snapshot", "pvmove")
 # A volume may not be mounted at / or at or below these (ESP, Nix store, kernel/runtime trees).
-RESERVED_MOUNT_TREES = ("/boot", "/nix", "/proc", "/sys", "/dev", "/run")
+RESERVED_MOUNT_TREES = ("/boot", "/nix", "/proc", "/sys", "/dev", "/run", "/var/run", "/var/lock")
 # An owner may not take over a shared system directory: these exactly, and anything at or
 # below the trees (a directory below /srv or /home, such as /srv/data, is fine).
 SHARED_DIRS = ("/home", "/tmp", "/srv", "/opt", "/mnt", "/media")
-SHARED_TREES = ("/var", "/etc", "/usr")
+SHARED_TREES = ("/var", "/etc", "/usr", "/root", "/bin", "/lib", "/lib64", "/sbin")
 ESP_DEFAULT = "512M"
 ROOT_MIN_MIB = 8 * 1024
-# Keyboard drivers for typing the LUKS passphrase in the initrd (usbhid is in INITRD_MODULES).
-LUKS_INITRD_MODULES = ("hid_generic",)
 BY_ID = "/dev/disk/by-id/"
 INITRD_MODULES = ("nvme", "ahci", "xhci_pci", "usb_storage", "sd_mod", "usbhid")
 SYSTEMS = {"amd64": "x86_64-linux", "arm64": "aarch64-linux"}
@@ -241,6 +239,7 @@ def _check_storage(spec: Dict[str, Any]) -> List[Finding]:
         which = "none does" if not free else "several do: " + ", ".join(short_repr(n) for n in free)
         out.append(Finding(ERROR, f"exactly one of root_size and the volumes' size must be {FREE} (the space left); {which}", f"{NAME}.volumes"))
     users = {u["name"] for u in spec["users"]}
+    homes = {f"/home/{u}": u for u in sorted(users)}
     names: Dict[str, int] = {}
     mounts: Dict[str, int] = {}
     for i, vol in enumerate(nixos["volumes"]):
@@ -263,12 +262,23 @@ def _check_storage(spec: Dict[str, Any]) -> List[Finding]:
         mounts.setdefault(mount, i)
         if "owner" in vol and vol["owner"] not in users:
             out.append(Finding(ERROR, f"owner {short_repr(vol['owner'])} is not a [[users]] name", f"{where}.owner"))
+        elif "owner" in vol and mount in homes:
+            out.append(
+                Finding(
+                    ERROR,
+                    f"owner on {short_repr(mount)}: that is the home of user {short_repr(homes[mount])}, which NixOS creates and "
+                    "keeps at mode 0700 (users.users.<name>.homeMode); a 0750 tmpfiles rule would fight it. Drop owner, or "
+                    "mount the volume elsewhere",
+                    f"{where}.owner",
+                )
+            )
         elif "owner" in vol and (mount in SHARED_DIRS or _at_or_below(mount, SHARED_TREES)):
             out.append(
                 Finding(
                     ERROR,
-                    f"owner on {short_repr(mount)}: a shared system directory (/home, /tmp, /srv, /opt, /mnt, /media, "
-                    "or /var, /etc, /usr and below) may not belong to one user; mount the volume below it instead (e.g. /srv/data)",
+                    f"owner on {short_repr(mount)}: a shared system directory (/home, /tmp, /srv, /opt, /mnt, /media, or "
+                    "/var, /etc, /usr, /root, /bin, /lib, /lib64, /sbin and below) may not belong to one user; "
+                    "mount the volume below it instead (e.g. /srv/data)",
                     f"{where}.owner",
                 )
             )
@@ -486,16 +496,14 @@ def configuration_nix(spec: Dict[str, Any]) -> str:
         "",
         "  # Fallback for hardware without a hardware-configuration.nix: broad initrd storage/USB drivers.",
     ]
+    lines.append(f"  boot.initrd.availableKernelModules = {nix_list(list(INITRD_MODULES))};")
     if luks:
         lines += [
-            "  # ext4-luks: keyboard drivers so the disk passphrase can be typed in the initrd.",
-            f"  boot.initrd.availableKernelModules = {nix_list(list(INITRD_MODULES + LUKS_INITRD_MODULES))};",
-            "  # disko.nix declares boot.initrd.luks.devices.crypted (from its luks partition) and the",
-            "  # LVM volume group; the console keymap is loaded early, before the passphrase prompt.",
+            "  # ext4-luks: disko.nix declares boot.initrd.luks.devices.crypted (from its luks partition)",
+            "  # and the LVM volume group; nixpkgs' default initrd modules carry the USB/HID keyboard",
+            "  # drivers. The console keymap is loaded early, before the passphrase prompt.",
             "  console.earlySetup = true;",
         ]
-    else:
-        lines.append(f"  boot.initrd.availableKernelModules = {nix_list(list(INITRD_MODULES))};")
     if "cpu_vendor" in nixos:
         lines.append(f"  hardware.cpu.{nixos['cpu_vendor']}.updateMicrocode = true;")
     lines.append("")
@@ -692,17 +700,52 @@ def disko_nix(spec: Dict[str, Any]) -> str:
 # "pool" or an open "crypted" mapping on ANOTHER disk would be reused silently and the
 # install would land there. Refuse before the confirmation; every probe fails closed.
 _LUKS_GUARD = [
-    f"      # ext4-luks: refuse when another disk already provides VG {VG_NAME} or LUKS mapping {LUKS_NAME};",
+    f"      # ext4-luks: refuse when a VG {VG_NAME} or LUKS mapping {LUKS_NAME} already exists (on any disk):",
     "      # disko would reuse them instead of creating them on the target disk.",
     '      vgnames=$(vgs --noheadings -o vg_name) || refuse "cannot list the LVM volume groups (vgs)"',
     "      while read -r vg; do",
     f'        if [ "$vg" = {VG_NAME} ]; then',
-    f'          refuse "an LVM volume group named {VG_NAME} already exists; disko would reuse it. Deactivate it (vgchange -an {VG_NAME}) or remove it first"',
+    f'          refuse "an LVM volume group named {VG_NAME} already exists. On another disk: unplug it or rename it '
+    f"(vgrename {VG_NAME} <other-name>). Left over from an earlier attempt on this disk: vgchange -an {VG_NAME}, "
+    f'then cryptsetup close {LUKS_NAME}"',
     "        fi",
     '      done <<< "$vgnames"',
-    f"      if [ -e /dev/mapper/{LUKS_NAME} ] || cryptsetup status {LUKS_NAME} >/dev/null 2>&1; then",
-    f'        refuse "/dev/mapper/{LUKS_NAME} already exists; disko would reuse it. Close it (cryptsetup close {LUKS_NAME}) first"',
+    "      # cryptsetup status: 0 active, 4 inactive (-ENODEV); anything else is an unanswered question.",
+    "      crypt_rc=0",
+    f"      cryptsetup status {LUKS_NAME} >/dev/null 2>&1 || crypt_rc=$?",
+    f'      if [ -e /dev/mapper/{LUKS_NAME} ] || [ "$crypt_rc" = 0 ]; then',
+    f'        refuse "/dev/mapper/{LUKS_NAME} is already open. Left over from an earlier attempt: vgchange -an {VG_NAME}, '
+    f'then cryptsetup close {LUKS_NAME}. From another disk: unplug it"',
+    '      elif [ "$crypt_rc" != 4 ]; then',
+    f'        refuse "cannot query the LUKS mapping {LUKS_NAME} (cryptsetup status exited $crypt_rc)"',
     "      fi",
+]
+
+# Every layout: disko addresses its partitions by partition label (disk-main-ESP, -root,
+# -swap, -luks, -boot) and skips mkfs/luksFormat on a partition that already has one, so a
+# disk-main-* label left on ANOTHER disk could capture /boot or / at install and at boot
+# (udev points /dev/disk/by-partlabel/<label> at one of the two). Refuse unless every such
+# label sits on the target disk; each probe fails closed.
+_PARTLABEL_GUARD = [
+    "      # Partition labels disko uses (disk-main-*) must not exist on any other disk.",
+    '      parts=$(lsblk -nrpo NAME,PARTLABEL) || refuse "cannot list the partition labels (lsblk)"',
+    "      while read -r pname plabel; do",
+    '        case "$plabel" in',
+    "          disk-main-*)",
+    '            owners=$(lsblk -nrpso NAME,TYPE "$pname") || refuse "cannot read the disk under $pname"',
+    "            while read -r oname okind; do",
+    '              if [ "$okind" = "disk" ]; then',
+    '                o=$(readlink -f "$oname") || refuse "cannot resolve $oname"',
+    '                if [ "$o" != "$dev" ]; then',
+    '                  refuse "$pname on disk $o carries the partition label $plabel that disko uses for this install; '
+    "it could capture a mount at install or boot time. Unplug that disk, or wipe its partition table yourself "
+    '(wipefs -a or sgdisk --zap-all on $o, NOT on the target disk)"',
+    "                fi",
+    "              fi",
+    '            done <<< "$owners"',
+    "            ;;",
+    "        esac",
+    '      done <<< "$parts"',
 ]
 
 
@@ -840,6 +883,7 @@ def installer_nix(spec: Dict[str, Any]) -> str:
             '        echo "install-$host: no block device at /iso; the boot medium was not compared" >&2',
             "      fi",
         ]
+        + _PARTLABEL_GUARD
         + guard
         + [
             '      serial=$(lsblk -dno SERIAL "$dev") || refuse "cannot read the serial of $dev"',
@@ -950,17 +994,40 @@ _LUKS_REQUIRED = [
 _LUKS_GUARD_REQUIRED = [
     ('vgnames=$(vgs --noheadings -o vg_name) || refuse', "the existing-VG check (vgs)"),
     (f'if [ "$vg" = {VG_NAME} ]; then', f"the VG {VG_NAME} comparison"),
-    (f"if [ -e /dev/mapper/{LUKS_NAME} ] || cryptsetup status {LUKS_NAME} >/dev/null 2>&1; then", f"the open-{LUKS_NAME} check"),
-    ("pkgs.lvm2 pkgs.cryptsetup", "lvm2 and cryptsetup in runtimeInputs"),
+    (f"cryptsetup status {LUKS_NAME} >/dev/null 2>&1 || crypt_rc=$?", f"the {LUKS_NAME} status probe"),
+    (f'if [ -e /dev/mapper/{LUKS_NAME} ] || [ "$crypt_rc" = 0 ]; then', f"the open-{LUKS_NAME} check"),
+    ('elif [ "$crypt_rc" != 4 ]; then', f"the fail-closed {LUKS_NAME} status check"),
+]
+# Every layout: the foreign disk-main-* partition label refusal.
+_PARTLABEL_GUARD_REQUIRED = [
+    ('parts=$(lsblk -nrpo NAME,PARTLABEL) || refuse', "the partition-label scan"),
+    ("          disk-main-*)", "the disk-main-* label match"),
+    ('owners=$(lsblk -nrpso NAME,TYPE "$pname") || refuse', "the label's disk lookup"),
+    ('if [ "$o" != "$dev" ]; then', "the foreign-disk label refusal"),
 ]
 # Secrets that must never be rendered: disko/NixOS key and password file options and plain
 # password attributes (hashedPassword stays allowed), as an attribute: at the start of a
-# line or after { or ;, with an optional dotted prefix (settings.keyFile =). String literals
-# and comments are blanked first, so a gecos or comment that says "password = x" is not one.
+# line or after { or ;, with an optional dotted prefix (settings.keyFile =), as the final
+# attribute assigned a value. A name prov renders as an attribute set (users.users.password
+# = {, an LV named password = {) is not a value. String literals and comments are blanked
+# first, so a gecos or comment that says "password = x" is not one.
 _SECRET = re.compile(
-    r"(?:^|[{;])[ \t]*(?:[A-Za-z_][A-Za-z0-9_'-]*\.)*(passwordFile|keyFile|additionalKeyFiles|initialPassword|password)[ \t]*=(?!=)",
+    r"(?:^|[{;])[ \t]*(?:[A-Za-z_][A-Za-z0-9_'-]*\.)*(passwordFile|keyFile|additionalKeyFiles|initialPassword|password)[ \t]*=(?!=)(?![ \t]*\{)",
     re.M,
 )
+
+
+def _guard_findings(inst: str, required: List[Any], prefix: str) -> List[Finding]:
+    """Each guard line must be present and come before the disko-install call."""
+    out: List[Finding] = []
+    call = inst.find("exec disko-install")
+    for needle, what in required:
+        pos = inst.find(needle)
+        if pos < 0:
+            out.append(Finding(ERROR, f"{prefix}{what} is missing", "installer.nix"))
+        elif call >= 0 and pos > call:
+            out.append(Finding(ERROR, f"{prefix}{what} comes after exec disko-install", "installer.nix"))
+    return out
 
 
 def _secret(text: str) -> Optional[str]:
@@ -1058,9 +1125,11 @@ def validate(rendered_dir: Path) -> List[Finding]:
         if 'type = "EF02";' in disko or 'type = "EF00";' not in disko:
             findings.append(Finding(ERROR, "layout ext4-luks needs an EF00 ESP and no EF02 BIOS boot partition (UEFI only)", "disko.nix"))
         if inst is not None:
-            for needle, what in _LUKS_GUARD_REQUIRED:
-                if needle not in inst:
-                    findings.append(Finding(ERROR, f"layout ext4-luks: {what} is missing", "installer.nix"))
+            if "pkgs.lvm2 pkgs.cryptsetup" not in inst:
+                findings.append(Finding(ERROR, "layout ext4-luks: lvm2 and cryptsetup in runtimeInputs is missing", "installer.nix"))
+            findings += _guard_findings(inst, _LUKS_GUARD_REQUIRED, "layout ext4-luks: ")
+    if inst is not None:
+        findings += _guard_findings(inst, _PARTLABEL_GUARD_REQUIRED, "")
     for name in FILES:
         text = texts[name]
         secret = _secret(text) if text is not None else None
@@ -1149,8 +1218,12 @@ def plan(spec: Dict[str, Any], ctx: Any) -> List[str]:
         lines += [
             "#    ext4-luks: after the serial, disko asks TWICE for a NEW disk passphrase. Store it in a",
             "#    password manager first: it cannot be recovered, and it is typed at every boot.",
-            f"#    It also refuses while any disk provides an LVM volume group {VG_NAME} or an open",
-            f"#    /dev/mapper/{LUKS_NAME} (disko would reuse them): deactivate or close those first.",
+            "#    If the two entries differ, disko exits after the disk was already wiped and",
+            f"#    partitioned: run sudo {q(f'install-{host}')} again.",
+            "#    The fixed sizes (swap, root, volumes) must fit the disk. A failure after the LUKS format",
+            f"#    leaves {LUKS_NAME} open; clean up with   vgchange -an {VG_NAME}   then   cryptsetup close {LUKS_NAME}",
+            f"#    (in that order) before retrying. It also refuses while an LVM volume group {VG_NAME} exists",
+            f"#    or /dev/mapper/{LUKS_NAME} is open: on another disk, unplug it or vgrename {VG_NAME} <other>.",
         ]
     lines += [
         f"sudo {q(f'install-{host}')}",
@@ -1158,6 +1231,9 @@ def plan(spec: Dict[str, Any], ctx: Any) -> List[str]:
         "#    is not the USB stick it booted from, and the command runs on a terminal. It shows",
         "#    the disk, asks for the last 4 characters of its serial (or the hostname when the",
         "#    disk reports none), then runs disko-install offline. Any other answer aborts.",
+        "#    It also refuses while another disk carries a disko-install partition label (disk-main-*),",
+        "#    which could capture /boot or / at install or boot time: unplug that disk, or wipe its",
+        "#    partition table yourself (wipefs -a or sgdisk --zap-all on THAT disk).",
         "",
         "# 6. Post-install checks: remove the stick, reboot into the installed system, then",
     ]
@@ -1173,7 +1249,9 @@ def plan(spec: Dict[str, Any], ctx: Any) -> List[str]:
         "#    and on the installed host:",
         "nixos-version",
         "systemctl --failed",
-        "findmnt " + " ".join(q(m) for m in mounts),
+    ]
+    lines += [f"findmnt {q(m)}" for m in mounts]
+    lines += [
         "swapon --show",
         "ip -br addr",
     ]

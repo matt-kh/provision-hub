@@ -116,6 +116,23 @@ let
       else
         echo "install-$host: no block device at /iso; the boot medium was not compared" >&2
       fi
+      # Partition labels disko uses (disk-main-*) must not exist on any other disk.
+      parts=$(lsblk -nrpo NAME,PARTLABEL) || refuse "cannot list the partition labels (lsblk)"
+      while read -r pname plabel; do
+        case "$plabel" in
+          disk-main-*)
+            owners=$(lsblk -nrpso NAME,TYPE "$pname") || refuse "cannot read the disk under $pname"
+            while read -r oname okind; do
+              if [ "$okind" = "disk" ]; then
+                o=$(readlink -f "$oname") || refuse "cannot resolve $oname"
+                if [ "$o" != "$dev" ]; then
+                  refuse "$pname on disk $o carries the partition label $plabel that disko uses for this install; it could capture a mount at install or boot time. Unplug that disk, or wipe its partition table yourself (wipefs -a or sgdisk --zap-all on $o, NOT on the target disk)"
+                fi
+              fi
+            done <<< "$owners"
+            ;;
+        esac
+      done <<< "$parts"
       serial=$(lsblk -dno SERIAL "$dev") || refuse "cannot read the serial of $dev"
       serial=$(printf %s "$serial" | tr -d "[:space:]")
       if [ "$(printf %s "$serial" | wc -c)" -ge 4 ]; then

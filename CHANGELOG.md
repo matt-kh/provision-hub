@@ -38,6 +38,15 @@ may change incompatibly; every such change has a Migration paragraph. See
   `rendered/` that `render` keeps and `diff`/`validate` do not report as stale (used for
   nixos-disko's `flake.lock`).
 
+### Security
+
+- nixos-disko: `install-<hostname>` (every layout) refuses, before the serial prompt, while
+  another disk carries a `disk-main-*` GPT partition label; disko addresses its partitions
+  by these labels and skips formatting a partition that already has a file system, so a
+  leftover label could capture `/boot`, `/` or the LUKS device at install and boot time.
+  This changes the rendered `installer.nix` of existing nixos-disko items (golden
+  `demo-nixos-ext4`).
+
 ### Changed
 
 - prov is generic over **kinds** and **backends**. Every item is

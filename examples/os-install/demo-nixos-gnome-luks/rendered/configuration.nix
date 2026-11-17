@@ -17,10 +17,10 @@ in
   imports = [ (modulesPath + "/installer/scan/not-detected.nix") ] ++ hardware;
 
   # Fallback for hardware without a hardware-configuration.nix: broad initrd storage/USB drivers.
-  # ext4-luks: keyboard drivers so the disk passphrase can be typed in the initrd.
-  boot.initrd.availableKernelModules = [ "nvme" "ahci" "xhci_pci" "usb_storage" "sd_mod" "usbhid" "hid_generic" ];
-  # disko.nix declares boot.initrd.luks.devices.crypted (from its luks partition) and the
-  # LVM volume group; the console keymap is loaded early, before the passphrase prompt.
+  boot.initrd.availableKernelModules = [ "nvme" "ahci" "xhci_pci" "usb_storage" "sd_mod" "usbhid" ];
+  # ext4-luks: disko.nix declares boot.initrd.luks.devices.crypted (from its luks partition)
+  # and the LVM volume group; nixpkgs' default initrd modules carry the USB/HID keyboard
+  # drivers. The console keymap is loaded early, before the passphrase prompt.
   console.earlySetup = true;
   hardware.cpu.amd.updateMicrocode = true;
 
