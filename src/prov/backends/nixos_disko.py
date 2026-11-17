@@ -2,7 +2,8 @@
 
 Renders ``flake.nix`` (nixpkgs + disko inputs; outputs ``nixosConfigurations.<host>`` and
 ``nixosConfigurations.<host>-installer``), ``configuration.nix`` (the target system),
-``disko.nix`` (GPT, ESP or BIOS boot partition, optional swap, ext4 root) and
+``disko.nix`` (GPT, ESP or BIOS boot partition, then optional swap and an ext4 root, or
+for ``ext4-luks`` LVM inside LUKS with swap, root and extra volumes) and
 ``installer.nix`` (minimal installer ISO carrying the target closure and an
 ``install-<host>`` command that checks the disk, then asks for the last 4 characters of its
 serial, or the hostname when it reports none, before it wipes the disk).
@@ -45,6 +46,7 @@ FILES = ("configuration.nix", "disko.nix", "flake.nix", "installer.nix")
 HW_COPY = "hardware-configuration.installer-copy.nix"
 
 _ATTR = "[A-Za-z_][A-Za-z0-9_-]*"
+_SIZE = "[1-9][0-9]*[MG]"
 
 SCHEMA: Dict[str, Any] = {
     "type": "object",
@@ -63,14 +65,67 @@ SCHEMA: Dict[str, Any] = {
             "description": "system.stateVersion: the release first installed; never change it afterwards.",
         },
         "layout": {
-            "enum": ["ext4"],
+            "enum": ["ext4", "ext4-luks"],
             "default": "ext4",
-            "description": "Disk layout. ext4: GPT on one disk with an ESP (UEFI) or BIOS boot partition, optional swap and an ext4 root.",
+            "description": (
+                "Disk layout. ext4: GPT on one disk with an ESP (UEFI) or BIOS boot partition, optional swap and an ext4 root. "
+                "ext4-luks (UEFI only): an ESP and one LUKS2 partition holding LVM volume group 'pool' with optional swap, "
+                "an ext4 root and the ext4 volumes; the passphrase is typed at install time and at every boot."
+            ),
         },
         "swap_size": {
             "type": "string",
-            "pattern": "^[1-9][0-9]*[MG]$",
-            "description": "Optional swap partition size (e.g. 8G); no swap partition when absent.",
+            "pattern": f"^{_SIZE}$",
+            "description": "Optional swap size (e.g. 8G): a partition (ext4) or a logical volume (ext4-luks); no swap when absent.",
+        },
+        "esp_size": {
+            "type": "string",
+            "pattern": f"^{_SIZE}$",
+            "default": "512M",
+            "description": "Size of the EFI system partition mounted at /boot (UEFI only; at least 256M).",
+        },
+        "hibernate": {
+            "type": "boolean",
+            "default": False,
+            "description": "Resume from hibernation on the swap device (boot.resumeDevice); needs swap_size, at least the RAM size.",
+        },
+        "root_size": {
+            "type": "string",
+            "pattern": f"^({_SIZE}|100%FREE)$",
+            "default": "100%FREE",
+            "description": "ext4-luks: size of the root logical volume, or 100%FREE for the space left. Exactly one of root and volumes takes 100%FREE.",
+        },
+        "volumes": {
+            "type": "array",
+            "default": [],
+            "description": "ext4-luks: extra ext4 logical volumes in volume group 'pool', each mounted at its mountpoint.",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["name", "mountpoint", "size"],
+                "properties": {
+                    "name": {"type": "string", "pattern": "^[a-z][a-z0-9-]*$", "maxLength": 32, "description": "Logical volume name (not root or swap)."},
+                    "mountpoint": {
+                        "type": "string",
+                        "pattern": "^/[A-Za-z0-9._/-]*$",
+                        "maxLength": 255,
+                        "description": "Absolute, normalised mount point; not /, /boot (or below it) or /nix.",
+                    },
+                    "size": {"type": "string", "pattern": f"^({_SIZE}|100%FREE)$", "description": "Size (e.g. 200G) or 100%FREE for the space left."},
+                    "mount_options": {
+                        "type": "array",
+                        "default": [],
+                        "description": "ext4 mount options, one per item (e.g. noatime, nodev, nosuid, noexec).",
+                        "items": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.=:+-]*$", "maxLength": 64},
+                        "uniqueItems": True,
+                    },
+                    "owner": {
+                        "type": "string",
+                        "pattern": "^[a-z_][a-z0-9_-]{0,31}$",
+                        "description": "A [[users]] name: the mount point becomes owned by this user (group users, mode 0750) via systemd-tmpfiles.",
+                    },
+                },
+            },
         },
         "packages": {
             "type": "array",
@@ -83,8 +138,17 @@ SCHEMA: Dict[str, Any] = {
     },
 }
 
-ESP_SIZE = "512M"
+ESP_MIN_MIB = 256
 BIOS_BOOT_SIZE = "1M"
+FREE = "100%FREE"
+LUKS_NAME = "crypted"  # /dev/mapper/crypted; boot.initrd.luks.devices.crypted (set by disko)
+VG_NAME = "pool"
+# Logical volume names prov uses itself or LVM reserves.
+RESERVED_LVS = frozenset({"root", "swap", "snapshot", "pvmove"})
+# Mount points a volume may not take (the root, the ESP, the Nix store's parent).
+RESERVED_MOUNTS = ("/", "/boot", "/nix")
+# Keyboard drivers for typing the LUKS passphrase in the initrd (usbhid is in INITRD_MODULES).
+LUKS_INITRD_MODULES = ("hid_generic",)
 BY_ID = "/dev/disk/by-id/"
 INITRD_MODULES = ("nvme", "ahci", "xhci_pci", "usb_storage", "sd_mod", "usbhid")
 SYSTEMS = {"amd64": "x86_64-linux", "arm64": "aarch64-linux"}
@@ -125,7 +189,64 @@ def _shell(path: str) -> Optional[str]:
     raise ValueError(path)
 
 
+def _mib(size: str) -> int:
+    """MiB in a schema size such as ``512M`` or ``1G``."""
+    return int(size[:-1]) * (1024 if size.endswith("G") else 1)
+
+
 # --- contract: check ----------------------------------------------------------------------
+
+
+def _check_storage(spec: Dict[str, Any]) -> List[Finding]:
+    """Layout rules: ESP size, hibernation, ext4-luks firmware, root_size and volumes."""
+    out: List[Finding] = []
+    nixos = spec[NAME]
+    luks = nixos["layout"] == "ext4-luks"
+    if spec["firmware"] == "uefi" and _mib(nixos["esp_size"]) < ESP_MIN_MIB:
+        out.append(Finding(ERROR, f"esp_size {nixos['esp_size']} is too small; use at least {ESP_MIN_MIB}M", f"{NAME}.esp_size"))
+    if nixos["hibernate"] and "swap_size" not in nixos:
+        out.append(Finding(ERROR, "hibernate needs swap_size (at least the RAM size) to resume from", f"{NAME}.hibernate"))
+    if luks and spec["firmware"] != "uefi":
+        out.append(
+            Finding(
+                ERROR,
+                "layout 'ext4-luks' needs firmware 'uefi': it keeps /boot on an unencrypted ESP; "
+                "GRUB unlocking an encrypted /boot (cryptodisk) is not supported",
+                "firmware",
+            )
+        )
+    if not luks:
+        if nixos["root_size"] != FREE:
+            out.append(Finding(ERROR, "root_size applies to layout 'ext4-luks' only; the ext4 root takes the rest of the disk", f"{NAME}.root_size"))
+        if nixos["volumes"]:
+            out.append(Finding(ERROR, "volumes need layout 'ext4-luks' (logical volumes); layout 'ext4' has a single root partition", f"{NAME}.volumes"))
+        return out
+    free = (["root"] if nixos["root_size"] == FREE else []) + [v["name"] for v in nixos["volumes"] if v["size"] == FREE]
+    if len(free) != 1:
+        which = "none does" if not free else "several do: " + ", ".join(short_repr(n) for n in free)
+        out.append(Finding(ERROR, f"exactly one of root_size and the volumes' size must be {FREE} (the space left); {which}", f"{NAME}.volumes"))
+    users = {u["name"] for u in spec["users"]}
+    names: Dict[str, int] = {}
+    mounts: Dict[str, int] = {}
+    for i, vol in enumerate(nixos["volumes"]):
+        where = f"{NAME}.volumes[{i}]"
+        name, mount = vol["name"], vol["mountpoint"]
+        if name in RESERVED_LVS:
+            out.append(Finding(ERROR, f"volume name {short_repr(name)} is reserved (root, swap, snapshot, pvmove)", f"{where}.name"))
+        elif name in names:
+            out.append(Finding(ERROR, f"volume name {short_repr(name)} is already used by volumes[{names[name]}]", f"{where}.name"))
+        names.setdefault(name, i)
+        parts = mount.split("/")[1:]
+        if mount != "/" and (mount.endswith("/") or any(p in ("", ".", "..") for p in parts)):
+            out.append(Finding(ERROR, f"mountpoint {short_repr(mount)} is not normalised (no //, trailing /, . or ..)", f"{where}.mountpoint"))
+        elif mount in RESERVED_MOUNTS or mount.startswith("/boot/"):
+            out.append(Finding(ERROR, f"mountpoint {short_repr(mount)} is reserved (/, /boot and below, /nix)", f"{where}.mountpoint"))
+        elif mount in mounts:
+            out.append(Finding(ERROR, f"mountpoint {short_repr(mount)} is already used by volumes[{mounts[mount]}]", f"{where}.mountpoint"))
+        mounts.setdefault(mount, i)
+        if "owner" in vol and vol["owner"] not in users:
+            out.append(Finding(ERROR, f"owner {short_repr(vol['owner'])} is not a [[users]] name", f"{where}.owner"))
+    return out
 
 
 def check(spec: Dict[str, Any], ctx: Any) -> List[Finding]:
@@ -133,8 +254,9 @@ def check(spec: Dict[str, Any], ctx: Any) -> List[Finding]:
     out: List[Finding] = []
     nixos = spec[NAME]
     disks = spec["storage"]["disks"]
-    if nixos["layout"] == "ext4" and len(disks) != 1:
-        out.append(Finding(ERROR, f"layout 'ext4' installs to exactly one disk, got {len(disks)}", "storage.disks"))
+    if len(disks) != 1:
+        out.append(Finding(ERROR, f"layout {nixos['layout']!r} installs to exactly one disk, got {len(disks)}", "storage.disks"))
+    out += _check_storage(spec)
     for d, disk in enumerate(disks):
         if not disk.startswith(BY_ID) or "/../" in disk or "/./" in disk or disk.endswith(("/..", "/.")):
             out.append(
@@ -316,6 +438,7 @@ def _users(spec: Dict[str, Any]) -> List[str]:
 
 def configuration_nix(spec: Dict[str, Any]) -> str:
     nixos = spec[NAME]
+    luks = nixos["layout"] == "ext4-luks"
     lines = [
         HEADER,
         "# The target system. Static validation only: prov has not installed it on hardware.",
@@ -336,8 +459,17 @@ def configuration_nix(spec: Dict[str, Any]) -> str:
         '  imports = [ (modulesPath + "/installer/scan/not-detected.nix") ] ++ hardware;',
         "",
         "  # Fallback for hardware without a hardware-configuration.nix: broad initrd storage/USB drivers.",
-        f"  boot.initrd.availableKernelModules = {nix_list(list(INITRD_MODULES))};",
     ]
+    if luks:
+        lines += [
+            "  # ext4-luks: keyboard drivers so the disk passphrase can be typed in the initrd.",
+            f"  boot.initrd.availableKernelModules = {nix_list(list(INITRD_MODULES + LUKS_INITRD_MODULES))};",
+            "  # disko.nix declares boot.initrd.luks.devices.crypted (from its luks partition) and the",
+            "  # LVM volume group; the console keymap is loaded early, before the passphrase prompt.",
+            "  console.earlySetup = true;",
+        ]
+    else:
+        lines.append(f"  boot.initrd.availableKernelModules = {nix_list(list(INITRD_MODULES))};")
     if "cpu_vendor" in nixos:
         lines.append(f"  hardware.cpu.{nixos['cpu_vendor']}.updateMicrocode = true;")
     lines.append("")
@@ -345,7 +477,7 @@ def configuration_nix(spec: Dict[str, Any]) -> str:
         lines += [
             "  # UEFI: systemd-boot on the ESP (disko.nix mounts it at /boot).",
             "  boot.loader.systemd-boot.enable = true;",
-            "  boot.loader.systemd-boot.configurationLimit = 10; # keeps the 512M ESP from filling up",
+            f"  boot.loader.systemd-boot.configurationLimit = 10; # keeps the {nixos['esp_size']} ESP from filling up",
             "  boot.loader.efi.canTouchEfiVariables = true;",
         ]
     else:
@@ -368,6 +500,10 @@ def configuration_nix(spec: Dict[str, Any]) -> str:
     lines += _network(spec)
     lines.append("")
     lines += _users(spec)
+    owned = sorted((v["mountpoint"], v["owner"]) for v in nixos["volumes"] if "owner" in v)
+    if owned:
+        lines += ["  # Owned volumes: the mount point belongs to its owner (group users, mode 0750)."]
+        lines += ["  systemd.tmpfiles.rules = ["] + [f"    {nix_str(f'd {m} 0750 {o} users -')}" for m, o in owned] + ["  ];"]
     lines += [
         "",
         "  services.openssh = {",
@@ -396,12 +532,62 @@ def configuration_nix(spec: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _swap_content(nixos: Dict[str, Any]) -> str:
+    if nixos["hibernate"]:
+        return 'content = { type = "swap"; resumeDevice = true; }; # boot.resumeDevice: resume from hibernation'
+    return 'content = { type = "swap"; };'
+
+
+def _filesystem(mountpoint: str, options: List[str], indent: str) -> List[str]:
+    lines = [
+        f"{indent}content = {{",
+        f'{indent}  type = "filesystem";',
+        f'{indent}  format = "ext4";',
+        f"{indent}  mountpoint = {nix_str(mountpoint)};",
+    ]
+    if options:
+        lines.append(f"{indent}  mountOptions = {nix_list(options)};")
+    return lines + [f"{indent}}};"]
+
+
+def _lvm_vg(nixos: Dict[str, Any]) -> List[str]:
+    """The LVM volume group inside the LUKS container: swap, root and the volumes.
+
+    disko v1.13.0 (lib/types/lvm_vg.nix) creates the LVs sorted by their ``priority``, whose
+    default is 1000, plus 251 when the size contains "100%": the one 100%FREE LV (check()
+    enforces exactly one) is created after every fixed-size LV, whatever its name.
+    """
+    lines = [
+        f"  disko.devices.lvm_vg.{VG_NAME} = {{",
+        '    type = "lvm_vg";',
+        "    lvs = {",
+    ]
+    if "swap_size" in nixos:
+        lines += [
+            "      swap = {",
+            f"        size = {nix_str(nixos['swap_size'])};",
+            f"        {_swap_content(nixos)}",
+            "      };",
+        ]
+    lines += ["      root = {", f"        size = {nix_str(nixos['root_size'])};"]
+    lines += _filesystem("/", [], "        ") + ["      };"]
+    for vol in nixos["volumes"]:
+        lines += [f"      {nix_attr(vol['name'])} = {{", f"        size = {nix_str(vol['size'])};"]
+        lines += _filesystem(vol["mountpoint"], vol["mount_options"], "        ") + ["      };"]
+    return lines + ["    };", "  };"]
+
+
 def disko_nix(spec: Dict[str, Any]) -> str:
     nixos = spec[NAME]
+    luks = nixos["layout"] == "ext4-luks"
     disk = spec["storage"]["disks"][0]
-    lines = [
-        HEADER,
-        "# Partitioning (disko). WARNING: disko-install wipes this disk.",
+    lines = [HEADER, "# Partitioning (disko). WARNING: disko-install wipes this disk."]
+    if luks:
+        lines += [
+            f"# Layout ext4-luks: ESP + LUKS2 partition -> LVM volume group {VG_NAME}. No key or password file is",
+            "# set, so disko asks for the new passphrase on the terminal when it formats the disk.",
+        ]
+    lines += [
         "{",
         "  disko.devices.disk.main = {",
         '    type = "disk";',
@@ -414,7 +600,7 @@ def disko_nix(spec: Dict[str, Any]) -> str:
         lines += [
             "        ESP = {",
             '          type = "EF00";',
-            f"          size = {nix_str(ESP_SIZE)};",
+            f"          size = {nix_str(nixos['esp_size'])};",
             "          content = {",
             '            type = "filesystem";',
             '            format = "vfat";',
@@ -430,11 +616,28 @@ def disko_nix(spec: Dict[str, Any]) -> str:
             f"          size = {nix_str(BIOS_BOOT_SIZE)};",
             "        };",
         ]
+    if luks:
+        lines += [
+            "        luks = {",
+            '          size = "100%";',
+            "          content = {",
+            '            type = "luks";',
+            f"            name = {nix_str(LUKS_NAME)};",
+            "            settings.allowDiscards = true;",
+            f'            content = {{ type = "lvm_pv"; vg = {nix_str(VG_NAME)}; }};',
+            "          };",
+            "        };",
+            "      };",
+            "    };",
+            "  };",
+        ]
+        lines += _lvm_vg(nixos)
+        return "\n".join(lines + ["}", ""])
     if "swap_size" in nixos:
         lines += [
             "        swap = {",
             f"          size = {nix_str(nixos['swap_size'])};",
-            '          content = { type = "swap"; };',
+            f"          {_swap_content(nixos)}",
             "        };",
         ]
     lines += [
@@ -460,6 +663,9 @@ def installer_nix(spec: Dict[str, Any]) -> str:
     disk = spec["storage"]["disks"][0]
     target = f"self.nixosConfigurations.{nix_attr(host)}"
     efi = "--write-efi-boot-entries " if spec["firmware"] == "uefi" else ""
+    passphrase = []
+    if spec[NAME]["layout"] == "ext4-luks":
+        passphrase = ['      echo "install-$host: disko will now ask for the new disk passphrase twice"']
     return "\n".join(
         [
             HEADER,
@@ -600,6 +806,9 @@ def installer_nix(spec: Dict[str, Any]) -> str:
             '        echo "install-$host: confirmation did not match; aborted, nothing was changed" >&2',
             "        exit 1",
             "      fi",
+        ]
+        + passphrase
+        + [
             f'      exec disko-install {efi}--flake ${{lib.escapeShellArg "${{installFlake}}#${{hostName}}"}} --disk main "$disk"',
             "    '';",
             "  };",
@@ -672,6 +881,18 @@ _REQUIRED = [
 ]
 
 _STRING = r'"((?:[^"\\]|\\.)*)"'
+
+# A rendered ext4-luks disko.nix: the LUKS container on the spec disk holding the volume group.
+_LUKS_REQUIRED = [
+    ('type = "luks";', "the luks partition"),
+    (f"name = {nix_str(LUKS_NAME)};", f"the LUKS name {LUKS_NAME}"),
+    (f'content = {{ type = "lvm_pv"; vg = {nix_str(VG_NAME)}; }};', f"the LVM physical volume of volume group {VG_NAME}"),
+    (f"disko.devices.lvm_vg.{VG_NAME} = {{", f"disko.devices.lvm_vg.{VG_NAME}"),
+    ('type = "lvm_vg";', "the lvm_vg type"),
+]
+# Secrets that must never be rendered: disko/NixOS key and password file options, a plain
+# password attribute (hashedPassword stays allowed).
+_SECRET = re.compile(r"\b(?:passwordFile|keyFile|additionalKeyFiles|initialPassword|password)\b\s*=")
 
 
 def _string_value(text: str, key: str) -> Optional[str]:
@@ -754,6 +975,15 @@ def validate(rendered_dir: Path) -> List[Finding]:
             findings.append(Finding(ERROR, f"installs to {short_repr(disk)} but disko.nix partitions {short_repr(device)}", "installer.nix"))
     if inst is not None and re.search(r"systemd\.(user\.)?services|boot\.postBootCommands|services\.getty\.autologinUser", inst):
         findings.append(Finding(ERROR, "the installer must not run anything at boot", "installer.nix"))
+    if disko is not None and re.search(r'type = "(luks|lvm_pv|lvm_vg)";', disko):
+        for needle, what in _LUKS_REQUIRED:
+            if needle not in disko:
+                findings.append(Finding(ERROR, f"layout ext4-luks: {what} is missing", "disko.nix"))
+    for name in FILES:
+        text = texts[name]
+        m = _SECRET.search(text) if text is not None else None
+        if m:
+            findings.append(Finding(ERROR, f"{esc(m.group(0))}: no key file, password file or password may be rendered", name))
 
     lock_path = rendered_dir / "flake.lock"
     if lock_path.exists() or lock_path.is_symlink():
@@ -781,6 +1011,8 @@ def plan(spec: Dict[str, Any], ctx: Any) -> List[str]:
     Every spec value is shell-quoted, in comments too, so a copied line never splits.
     """
     q = shlex.quote
+    nixos = spec[NAME]
+    luks = nixos["layout"] == "ext4-luks"
     host = spec["hostname"]
     disk = spec["storage"]["disks"][0]
     disks = " ".join(q(d) for d in spec["storage"]["disks"])
@@ -830,6 +1062,13 @@ def plan(spec: Dict[str, Any], ctx: Any) -> List[str]:
         "",
         f"# 5. WARNING: the install WIPES {disks} on the target machine.",
         f"#    Boot the target from the USB stick in {mode} mode, then run on its console:",
+    ]
+    if luks:
+        lines += [
+            "#    ext4-luks: after the serial, disko asks TWICE for a NEW disk passphrase. Store it in a",
+            "#    password manager first: it cannot be recovered, and it is typed at every boot.",
+        ]
+    lines += [
         f"sudo {q(f'install-{host}')}",
         f"#    It stops unless {q(disk)} is a whole disk, has nothing mounted or used as swap,",
         "#    is not the USB stick it booted from, and the command runs on a terminal. It shows",
@@ -844,14 +1083,25 @@ def plan(spec: Dict[str, Any], ctx: Any) -> List[str]:
         lines += ["HOST_IP=CHANGE-ME", f'ssh {q(login)}@"$HOST_IP"']
     else:
         lines.append("#    log in on the console (no user has an ssh key).")
+    mounts = ["/", "/boot"] if spec["firmware"] == "uefi" else ["/"]
+    mounts += [v["mountpoint"] for v in nixos["volumes"]]
     lines += [
         "#    and on the installed host:",
         "nixos-version",
         "systemctl --failed",
-        "findmnt / /boot" if spec["firmware"] == "uefi" else "findmnt /",
+        "findmnt " + " ".join(q(m) for m in mounts),
         "swapon --show",
         "ip -br addr",
     ]
+    if luks:
+        lines += [f"sudo cryptsetup status {LUKS_NAME}", "sudo lvs"]
+    if nixos["hibernate"]:
+        lines += [
+            "#    hibernate: the swap device must hold the RAM contents, so swap_size should be at least",
+            f"#    the RAM size ({q(nixos.get('swap_size', ''))} here). The kernel's hibernation mode:",
+            "cat /sys/power/disk",
+            "#    Then test it once with   systemctl hibernate   and check the session comes back.",
+        ]
     return lines
 
 
@@ -902,6 +1152,19 @@ state_version = "26.05"
 layout = "ext4"
 swap_size = "8G"
 packages = ["git", "vim"]
+# Optional (defaults shown or described):
+# esp_size = "512M"            # EFI system partition (UEFI), at least 256M
+# hibernate = false            # resume from swap; needs swap_size of at least the RAM size
+# Encrypted disk (UEFI only): layout = "ext4-luks" puts LVM inside LUKS; the passphrase is
+# typed at install time and at every boot. Then, exactly one of root_size and the volumes'
+# size is "100%FREE":
+# root_size = "64G"            # default "100%FREE"
+# [[nixos-disko.volumes]]
+# name = "home"
+# mountpoint = "/home"
+# size = "100%FREE"
+# mount_options = ["noatime"]  # optional
+# owner = "ops"                # optional: a [[users]] name; owns the mount point (0750)
 """
 
 
