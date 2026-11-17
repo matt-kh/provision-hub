@@ -22,7 +22,10 @@ writes or installs anything.
 > (`demo-nixos-ext4` and `demo-nixos-gnome-luks`, every guard included), taken from the
 > evaluated ISO configuration, passes shellcheck 0.11.0 from the pinned nixpkgs, and its
 > refusal paths are tested with stubbed `lsblk`/`findmnt`/`vgs`/`cryptsetup`, never against
-> real devices. No machine
+> real devices. The NetworkManager and GNOME settings of `demo-nixos-gnome-luks` are
+> evaluated only (the option values are recorded under
+> [Desktop host](#desktop-host-wi-fi-and-gnome)); no connection, Wi-Fi join or GNOME
+> session has been tried. No machine
 > has been installed from these files yet. Test in a throwaway VM or on a spare
 > disk first.
 
@@ -35,7 +38,7 @@ api_version = "prov/v1alpha1"
 kind = "os-install"
 backend = "nixos-disko"
 hostname = "demo"
-# ... domain, arch, firmware, timezone, locale, keyboard, [[users]], [network] ...
+# ... domain, arch, firmware, timezone, locale, keyboard, [[users]], [network] (networkd) ...
 
 [storage]
 disks = ["/dev/disk/by-id/nvme-EXAMPLE_SSD_SERIAL_0000000000"]   # exactly one; it is wiped
@@ -49,6 +52,8 @@ esp_size = "512M"            # optional, the default; UEFI only, at least 256M
 hibernate = false            # optional: resume from swap (needs swap_size)
 packages = ["git", "vim"]    # nixpkgs attribute names
 cpu_vendor = "intel"         # optional: intel | amd, enables microcode updates
+networking = "networkd"      # networkd (needs [network]) | networkmanager (no [network])
+desktop = "none"             # none | gnome (needs networkmanager, release nixos-25.11+)
 ```
 
 The encrypted layout adds the root size and extra volumes (see
@@ -89,6 +94,8 @@ size = "100%FREE"            # exactly one of root_size and the volumes' size
 | `volumes` | list (`[]`) | `ext4-luks` only (error on `ext4`): extra ext4 LVs, below |
 | `packages` | list of attribute paths (`[]`) | `pkgs.<attr>` in `environment.systemPackages`; e.g. `python3Packages.requests` |
 | `cpu_vendor` | `intel` \| `amd`, optional | `hardware.cpu.<vendor>.updateMicrocode = true` |
+| `networking` | `networkd` \| `networkmanager` (`networkd`) | `networkd`: systemd-networkd from `[network]`, which is then required. `networkmanager`: `networking.networkmanager.enable = true` only; `[network]` is an error. See [Desktop host](#desktop-host-wi-fi-and-gnome) |
+| `desktop` | `none` \| `gnome` (`none`) | `gnome`: `services.displayManager.gdm.enable` and `services.desktopManager.gnome.enable` (GNOME on Wayland); needs `networking = "networkmanager"` and `release` nixos-25.11 or newer |
 
 disko is pinned to the release tag `v1.13.0` (`DISKO_REF` in the backend), with
 `disko.inputs.nixpkgs.follows = "nixpkgs"`. `flake.lock` pins the exact commits.
@@ -101,11 +108,12 @@ How the core keys map:
 | `arch` | `nixpkgs.hostPlatform`: `x86_64-linux` / `aarch64-linux` |
 | `firmware` | UEFI: systemd-boot (`canTouchEfiVariables = true`, the install writes an EFI boot entry). BIOS: GRUB, installed to the disk through disko's EF02 partition. Both keep at most 10 generations in the boot menu (`configurationLimit = 10`), so the 512M ESP does not fill up |
 | `timezone`, `locale` | `time.timeZone`, `i18n.defaultLocale` |
-| `keyboard` | an XKB layout (as for ubuntu-autoinstall): `services.xserver.xkb.layout`, with `console.useXkbConfig = true` so the console keymap follows it; X itself stays disabled |
+| `keyboard` | an XKB layout (as for ubuntu-autoinstall): `services.xserver.xkb.layout`, with `console.useXkbConfig = true` so the console keymap follows it; X itself stays disabled (with `desktop = "gnome"` too: GNOME runs on Wayland, and the same layout is written to `/etc/X11/xorg.conf.d/00-keyboard.conf`, the system default GDM and GNOME read) |
 | `users` | `users.users.<name>`: `isNormalUser`, `description` (gecos), `extraGroups` (groups, plus `wheel` when `sudo`), `openssh.authorizedKeys.keys`, `hashedPassword` |
 | `users[].sudo` | wheel plus a passwordless `security.sudo.extraRules` entry |
+| `users[]` in `wheel` | with `networking = "networkmanager"` also the `networkmanager` group (appended once, after the given groups and `wheel`) |
 | `users[].shell` | `/bin/bash` (default) → NixOS default; `/bin/zsh`, `/bin/fish` (also under `/usr/bin/`, `/run/current-system/sw/bin/`) → `programs.<shell>.enable` and `shell = pkgs.<shell>`; anything else is an error |
-| `network` | systemd-networkd (see the note on `macaddress` below): one `systemd.network.networks."10-<name>"` per interface (DHCP, addresses, gateways, MTU), `systemd.network.links."10-<name>"` renames a NIC by `macaddress`; `networking.nameservers` / `networking.search`; `systemd.network.wait-online.anyInterface = true` so boot waits for one configured interface, not all (an unplugged second NIC would otherwise stall `network-online.target` until its timeout) |
+| `network` | `networking = "networkd"` only: systemd-networkd (see the note on `macaddress` below): one `systemd.network.networks."10-<name>"` per interface (DHCP, addresses, gateways, MTU), `systemd.network.links."10-<name>"` renames a NIC by `macaddress`; `networking.nameservers` / `networking.search`; `systemd.network.wait-online.anyInterface = true` so boot waits for one configured interface, not all (an unplugged second NIC would otherwise stall `network-online.target` until its timeout) |
 | `storage.disks` | `disko.devices.disk.main.device` |
 
 `volumes` entries (no other keys are allowed):
@@ -121,7 +129,9 @@ How the core keys map:
 Always set: openssh enabled with password and keyboard-interactive authentication and root
 login off; `nix.settings.experimental-features = [ "nix-command" "flakes" ]`.
 
-Checks: both layouts need exactly one disk; `ext4-luks` needs UEFI; `hibernate` needs
+Checks: `networking = "networkd"` needs `[network]`, `networkmanager` refuses it;
+`desktop = "gnome"` needs `networkmanager` and `release` nixos-25.11 or newer; both layouts
+need exactly one disk; `ext4-luks` needs UEFI; `hibernate` needs
 `swap_size`; `esp_size` is at least 256M (and stays at its default on BIOS); `root_size` is
 at least 8G; the `volumes` rules above; a disk path outside `/dev/disk/by-id/` is a
 warning (kernel names like `/dev/sda` can change between boots); arm64 needs UEFI; some user
@@ -255,6 +265,57 @@ image, a copy of RAM including keys and secrets, lands on the disk in clear. Use
 ESP (`umask=0077`), `/home` on `/dev/pool/home` (`defaults`), `/srv/data` on
 `/dev/pool/data` with `noatime,nodev,nosuid,noexec`.
 
+## Desktop host: Wi-Fi and GNOME
+
+A laptop or desktop that joins networks interactively sets `networking = "networkmanager"`
+and leaves `[network]` out (the example `demo-nixos-gnome-luks` does). `configuration.nix`
+then enables NetworkManager and nothing else: no systemd-networkd, no `.link` files, no
+`useNetworkd`. Connections, Wi-Fi included, are made on the machine after the first boot
+with `nmtui` or `nmcli`, or in GNOME Settings. **No network credential is ever in
+`spec.toml` or a rendered file**: there is no key for one, and `validate` refuses a rendered
+`psk`, `pskRaw`, `wireless.networks`, `wireless.secretsFile` or NetworkManager
+`ensureProfiles` (code only; strings and comments are ignored). It also requires exactly one
+of systemd-networkd and NetworkManager in `configuration.nix`. Users in `wheel` get the
+`networkmanager` group, so they change connections without a polkit prompt.
+
+`desktop = "gnome"` adds GNOME on Wayland with the GDM login screen, using the option names
+of NixOS 25.11 and later (`services.displayManager.gdm`, `services.desktopManager.gnome`);
+older releases are refused, and `validate` rejects the old `services.xserver.desktopManager` /
+`services.xserver.displayManager` names and a GNOME without GDM or NetworkManager. prov sets
+no audio, printing or X11 option: the GNOME module's own defaults apply (evaluated on
+nixos-26.05: `services.pipewire.enable = true`, `services.xserver.enable = false`).
+
+Password sudo on a desktop: GDM logs in with a password, so give the user a
+`password_hash` (`mkpasswd -m sha-512`). For sudo that asks for that password instead of
+the passwordless rule `sudo = true` renders, put the user in `wheel` directly:
+
+```toml
+[[users]]
+name = "alice"
+groups = ["wheel"]           # NixOS: wheel may sudo with its password
+sudo = false                 # no NOPASSWD rule
+password_hash = "$6$..."     # crypt hash, never the password
+```
+
+Before the install, **disable Secure Boot** in the firmware setup: neither the installer
+stick nor systemd-boot is signed. The GNOME ISO carries the whole desktop closure, several
+GB more than a server install: the build takes longer and needs more store space, and the
+stick should hold 16 GB or more. From WSL2, which has no USB block devices, copy the ISO to
+Windows (`cp -L "$ISO" /mnt/c/Users/<you>/Downloads/`) and write it with Rufus in DD image
+mode or balenaEtcher.
+
+After the install, join a network on the console with `nmtui` (or in GNOME Settings after
+logging in), check it with `nmcli device status`, and `systemctl is-active display-manager`
+should print `active`.
+
+Evaluated (locked and `nix eval`-ed in the `nixos/nix` container against nixpkgs
+`nixos-26.05`, never built or booted) for the example: `networking.networkmanager.enable =
+true`, `networking.useNetworkd = false`, `networking.useDHCP = false` (no `dhcpcd` or
+`systemd-networkd` service defined, `NetworkManager` is), `services.displayManager.gdm.enable
+= true`, `services.desktopManager.gnome.enable = true`, `services.xserver.enable = false`,
+`users.users.alice.extraGroups = [ "wheel" "networkmanager" ]`, no evaluation warnings; the
+LUKS device is unchanged.
+
 ## Rendered files
 
 ```text
@@ -326,7 +387,7 @@ files (the output of `nixos-generate-config` already is).
    garbage-collection root, kept outside the hosts repository: a default `result` link in
    `rendered/` would make `validate`/`diff` fail and be deleted by the next `render`,
    after which `nix-collect-garbage` could delete the ISO. Remove the link when you no
-   longer need the ISO. The ISO is large (several GB): it holds the target closure and the
+   longer need the ISO. The ISO is large (several GB, more with `desktop = "gnome"`): it holds the target closure and the
    build inputs for an offline install.
 4. **Write the USB stick. This wipes the stick.** Find the stick with
    `ls -l /dev/disk/by-id/ | grep usb`, then set the two variables and write:
@@ -340,8 +401,10 @@ files (the output of `nixos-generate-config` already is).
    Unmount the stick's partitions first (desktops often automount them). The line refuses
    a by-id path of a partition (`…-part1`) and anything that is not a block device.
 
-   A GUI writer (GNOME Disks, balenaEtcher, Rufus in DD mode) is safer than dd.
-5. **Install. This wipes the spec disk.** Boot the target from the stick (UEFI or legacy
+   A GUI writer (GNOME Disks, balenaEtcher, Rufus in DD mode) is safer than dd. From WSL2
+   see [Building the ISO from WSL2](#building-the-iso-from-wsl2).
+5. **Install. This wipes the spec disk.** On UEFI, disable Secure Boot first (nothing on
+   the stick is signed). Boot the target from the stick (UEFI or legacy
    BIOS mode, matching `firmware`), then run `sudo install-<hostname>` on the console. It
    stops, changing nothing, unless all of these hold: stdin is a terminal; the spec disk
    exists; it is a whole disk (`lsblk -dno TYPE` is `disk`); nothing on it (partitions,
@@ -363,11 +426,13 @@ partition label (see [Partition labels on other disks](#partition-labels-on-othe
    `disko-install --flake <flake>#<hostname> --disk main <disk>` (plus
    `--write-efi-boot-entries` on UEFI), which partitions, formats and installs.
 6. **Post-install checks.** Remove the stick, reboot (with `ext4-luks`, type the passphrase
-   at the initrd prompt), log in with ssh, and check `nixos-version`, `systemctl --failed`,
+   at the initrd prompt), with `networkmanager` join a network on the console (`nmtui`,
+   then `nmcli device status`), log in with ssh, and check `nixos-version`, `systemctl --failed`,
    `findmnt /`, `findmnt /boot` (one `findmnt` per mount point, every volume included),
 `swapon --show`, `ip -br addr`; with
    `ext4-luks` also `sudo cryptsetup status crypted` and `sudo lvs`; with `hibernate`,
-   `cat /sys/power/disk` and one `systemctl hibernate` test.
+   `cat /sys/power/disk` and one `systemctl hibernate` test; with `gnome`,
+   `systemctl is-active display-manager`.
 
 ## Building the ISO from WSL2
 

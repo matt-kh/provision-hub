@@ -36,6 +36,19 @@ may change incompatibly; every such change has a Migration paragraph. See
   `examples/os-install/demo-nixos-gnome-luks/` (locked and `nix eval`-ed only, never built
   or installed). Existing specs render unchanged apart from the install
   script's partition-label guard (see Security).
+- nixos-disko: `networking` (`networkd`, the default, rendered from `[network]`, or
+  `networkmanager`: NetworkManager only, connections and Wi-Fi made on the machine with
+  nmtui, nmcli or GNOME Settings, `[network]` refused, wheel members also get the
+  `networkmanager` group) and `desktop` (`none`, the default, or `gnome`: GNOME on Wayland
+  with GDM through the NixOS 25.11+ options `services.displayManager.gdm` and
+  `services.desktopManager.gnome`; needs `networkmanager` and `release` nixos-25.11 or
+  newer). `validate` requires exactly one network stack, GDM and NetworkManager with GNOME,
+  refuses the pre-25.11 `services.xserver.{desktop,display}Manager` names and any rendered
+  network credential (`psk`, `wireless.networks`, `ensureProfiles`). `plan` adds the
+  Secure Boot note (UEFI), a WSL2 note for writing the stick from Windows, the GNOME ISO
+  size note and the `nmtui` / `nmcli device status` / `systemctl is-active display-manager`
+  checks. The example `demo-nixos-gnome-luks` now uses both (no `[network]`); it was locked
+  and `nix eval`-ed only, never built or installed. Existing specs render unchanged.
 - Backend contract: optional `PRESERVE`, relative paths of human-created regular files in
   `rendered/` that `render` keeps and `diff`/`validate` do not report as stale (used for
   nixos-disko's `flake.lock`).
@@ -74,6 +87,11 @@ may change incompatibly; every such change has a Migration paragraph. See
 - Rendered output of the Ubuntu examples is byte-identical; they moved to
   `examples/os-install/demo-{lvm,mdraid,zfs}/`.
 
+- os-install: `[network]` is optional (it was required). The kind still checks a present
+  table (at least one interface, addresses, gateways, nameservers); backends that need it
+  say so in `check`: `ubuntu-autoinstall` (netplan is rendered from it) and nixos-disko with
+  `networking = "networkd"`.
+
 ### Known limitations
 
 - Output escaping covers non-printable characters only. Printable but invisible or
@@ -95,3 +113,9 @@ to `os-install/<host>/rendered/`). In each file replace `schema_version = 1` and
 `[ubuntu]` table and no `api_version`) fails with "predates prov/v1alpha1; see CHANGELOG
 migration"; a half-migrated file that has `api_version` but still `distro` or
 `schema_version` is told to remove that key.
+
+`[network]` became optional in `os-install`. Existing specs are unaffected: every spec that
+validated before still validates and renders the same files. Third-party `os-install`
+backends must handle a missing `spec["network"]` in `render`, `plan` and `check`
+(`"network" in spec`); a backend that needs it should report an error in `check`, which runs
+before `render` and `plan`, as `ubuntu-autoinstall` does.

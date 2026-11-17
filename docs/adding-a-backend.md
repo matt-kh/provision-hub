@@ -81,8 +81,9 @@ timezone        str (Etc/UTC)                locale    str (en_US.UTF-8)
 keyboard        str (us)
 users[] ([])    name, gecos?, groups [], shell (/bin/bash), sudo (false),
                 ssh_authorized_keys [], password_hash? (crypt hash, never plain text)
-network         interfaces[]: name, macaddress?, dhcp4 (false), dhcp6 (false),
-                              addresses [] (CIDR), gateway4?, gateway6?, mtu?
+network?        optional; when present: interfaces[] (at least one): name, macaddress?,
+                              dhcp4 (false), dhcp6 (false), addresses [] (CIDR),
+                              gateway4?, gateway6?, mtu?
                 dns: nameservers [], search []
 storage         disks [] (whole-disk device paths; first = boot disk; all may be wiped)
 <NAME>          your table
@@ -90,7 +91,12 @@ storage         disks [] (whole-disk device paths; first = boot disk; all may be
 
 Already guaranteed by the kind: addresses are valid CIDR, gateways and nameservers are valid
 IPs of the right family, interface and user names are unique, every interface has an address
-or DHCP. Login rules (e.g. Ubuntu requires a user with an ssh key) belong in your `check`. If
+or DHCP. Login rules (e.g. Ubuntu requires a user with an ssh key) belong in your `check`.
+`network` is optional: test `"network" in spec` before reading it in `render`, `plan` and
+`check`. A backend that cannot work without it reports an error in `check` (which runs
+before `render` and `plan`), e.g. ubuntu-autoinstall's "ubuntu-autoinstall needs [network]
+with at least one interface (netplan is rendered from it)"; one that cannot use it (a
+machine that joins networks interactively) may reject it the same way. If
 a core key cannot be honoured by your backend (Talos has no local users), say so in `check`
 with an error or warning rather than silently ignoring it.
 
