@@ -879,3 +879,259 @@ def test_boot_loader_generation_limit():
     assert "boot.loader.systemd-boot.configurationLimit = 10;" in nixos.render(host(), Context("demo"))["configuration.nix"]
     bios = nixos.render(host(lambda r: r.update(firmware="bios")), Context("demo"))["configuration.nix"]
     assert "boot.loader.grub.configurationLimit = 10;" in bios and 'size = "512M";' in nixos.render(host(), Context("demo"))["disko.nix"]
+
+
+# --- ext4-luks, volumes, hibernate, esp_size -----------------------------------------------
+
+
+def _luks_raw(raw):
+    raw["nixos-disko"].update(layout="ext4-luks", root_size="64G", hibernate=True)
+    raw["nixos-disko"]["volumes"] = [
+        {"name": "data", "mountpoint": "/srv/data", "size": "200G", "mount_options": ["noatime", "nodev"], "owner": "ops"},
+        {"name": "home", "mountpoint": "/home", "size": "100%FREE"},
+    ]
+
+
+def luks_findings(edit=None):
+    return spec_findings(lambda r: (_luks_raw(r), edit and edit(r)))
+
+
+def luks_host(edit=None):
+    return host(lambda r: (_luks_raw(r), edit and edit(r)))
+
+
+def vol(r, i):
+    return r["nixos-disko"]["volumes"][i]
+
+
+def test_luks_spec_is_valid_without_findings():
+    assert luks_findings() == []
+
+
+def test_new_keys_default_to_the_old_output():
+    explicit = host(lambda r: r["nixos-disko"].update(esp_size="512M", hibernate=False, root_size="100%FREE", volumes=[]))
+    assert explicit == host()
+    assert nixos.render(explicit, Context("demo")) == nixos.render(host(), Context("demo"))
+    assert host()["nixos-disko"]["esp_size"] == "512M" and host()["nixos-disko"]["volumes"] == []
+
+
+@pytest.mark.parametrize(
+    "edit,where,needle",
+    [
+        (lambda r: r.update(firmware="bios"), "firmware", "GRUB unlocking an encrypted /boot (cryptodisk) is not supported"),
+        (lambda r: r["nixos-disko"].pop("swap_size"), "nixos-disko.hibernate", "hibernate needs swap_size"),
+        (lambda r: r["nixos-disko"].update(esp_size="128M"), "nixos-disko.esp_size", "esp_size 128M is too small; use at least 256M"),
+        (lambda r: vol(r, 1).update(size="10G"), "nixos-disko.volumes", "must be 100%FREE (the space left); none does"),
+        (lambda r: r["nixos-disko"].update(root_size="100%FREE"), "nixos-disko.volumes", "several do: 'root', 'home'"),
+        (lambda r: vol(r, 0).update(name="root"), "nixos-disko.volumes[0].name", "is reserved"),
+        (lambda r: vol(r, 0).update(name="swap"), "nixos-disko.volumes[0].name", "is reserved"),
+        (lambda r: vol(r, 0).update(name="home"), "nixos-disko.volumes[1].name", "'home' is already used by volumes[0]"),
+        (lambda r: vol(r, 0).update(mountpoint="/home"), "nixos-disko.volumes[1].mountpoint", "'/home' is already used by volumes[0]"),
+        (lambda r: vol(r, 0).update(mountpoint="/"), "nixos-disko.volumes[0].mountpoint", "is reserved"),
+        (lambda r: vol(r, 0).update(mountpoint="/boot"), "nixos-disko.volumes[0].mountpoint", "is reserved"),
+        (lambda r: vol(r, 0).update(mountpoint="/boot/efi"), "nixos-disko.volumes[0].mountpoint", "is reserved"),
+        (lambda r: vol(r, 0).update(mountpoint="/nix"), "nixos-disko.volumes[0].mountpoint", "is reserved"),
+        (lambda r: vol(r, 0).update(mountpoint="/srv//data"), "nixos-disko.volumes[0].mountpoint", "is not normalised"),
+        (lambda r: vol(r, 0).update(mountpoint="/srv/data/"), "nixos-disko.volumes[0].mountpoint", "is not normalised"),
+        (lambda r: vol(r, 0).update(mountpoint="/srv/../boot"), "nixos-disko.volumes[0].mountpoint", "is not normalised"),
+        (lambda r: vol(r, 0).update(mountpoint="/srv/./data"), "nixos-disko.volumes[0].mountpoint", "is not normalised"),
+        (lambda r: vol(r, 0).update(owner="mallory"), "nixos-disko.volumes[0].owner", "owner 'mallory' is not a [[users]] name"),
+    ],
+)
+def test_luks_check_rules(edit, where, needle):
+    findings = [f for f in luks_findings(edit) if f.level == ERROR]
+    assert any(f.where == where and needle in f.message for f in findings), findings
+
+
+def test_volumes_and_root_size_need_ext4_luks():
+    findings = spec_findings(lambda r: r["nixos-disko"].update(volumes=[{"name": "data", "mountpoint": "/srv", "size": "1G"}]))
+    assert any("volumes need layout 'ext4-luks'" in m for m in messages(findings))
+    findings = spec_findings(lambda r: r["nixos-disko"].update(root_size="20G"))
+    assert any("root_size applies to layout 'ext4-luks' only" in m for m in messages(findings))
+
+
+def test_ext4_hibernate_needs_swap_and_esp_size_is_checked_on_uefi_only():
+    assert "hibernate needs swap_size (at least the RAM size) to resume from" in messages(
+        spec_findings(lambda r: (r["nixos-disko"].pop("swap_size"), r["nixos-disko"].update(hibernate=True)))
+    )
+    assert messages(spec_findings(lambda r: (r.update(firmware="bios"), r["nixos-disko"].update(esp_size="100M")))) == []
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        lambda r: vol(r, 0).update(mount_options=["noatime,exec"]),
+        lambda r: vol(r, 0).update(mount_options=["x y"]),
+        lambda r: vol(r, 0).update(mount_options=['a"b']),
+        lambda r: vol(r, 0).update(mount_options=["${x}"]),
+        lambda r: vol(r, 0).update(name="Data"),
+        lambda r: vol(r, 0).update(name="da_ta"),
+        lambda r: vol(r, 0).update(mountpoint="srv/data"),
+        lambda r: vol(r, 0).update(mountpoint="/srv/my data"),
+        lambda r: vol(r, 0).update(size="100%"),
+        lambda r: vol(r, 0).update(size="0G"),
+        lambda r: vol(r, 0).update(extra=1),
+        lambda r: vol(r, 0).pop("mountpoint"),
+        lambda r: r["nixos-disko"].update(esp_size="512MB"),
+        lambda r: r["nixos-disko"].update(root_size="50%FREE"),
+        lambda r: r["nixos-disko"].update(layout="luks"),
+    ],
+)
+def test_luks_schema_rejections(edit):
+    raw = starter_raw()
+    _luks_raw(raw)
+    edit(raw)
+    spec, findings = check_host(raw)
+    assert spec is None and messages(findings)
+
+
+def test_luks_disko_layout():
+    disko = nixos.render(luks_host(), Context("demo"))["disko.nix"]
+    for needle in (
+        f'device = "{DISK}";',
+        'type = "EF00";',
+        'size = "512M";',
+        'mountOptions = [ "umask=0077" ];',
+        "luks = {",
+        'type = "luks";',
+        'name = "crypted";',
+        "settings.allowDiscards = true;",
+        'content = { type = "lvm_pv"; vg = "pool"; };',
+        "disko.devices.lvm_vg.pool = {",
+        'type = "lvm_vg";',
+        'content = { type = "swap"; resumeDevice = true; };',
+        'size = "64G";',
+        'mountpoint = "/";',
+        'mountpoint = "/srv/data";',
+        'mountOptions = [ "noatime" "nodev" ];',
+        'size = "100%FREE";',
+        'mountpoint = "/home";',
+    ):
+        assert needle in disko, needle
+    assert disko.count('format = "ext4";') == 3
+    assert not nixos._SECRET.search(disko) and "askPassword" not in disko
+    # the ESP size follows esp_size; the luks partition takes the rest of the disk
+    sized = nixos.render(luks_host(lambda r: r["nixos-disko"].update(esp_size="1G")), Context("demo"))["disko.nix"]
+    assert 'size = "1G";' in sized and sized.count('size = "100%";') == 1
+
+
+def test_resume_device_only_with_hibernate():
+    disko = nixos.render(luks_host(lambda r: r["nixos-disko"].update(hibernate=False)), Context("demo"))["disko.nix"]
+    assert "resumeDevice" not in disko and 'content = { type = "swap"; };' in disko
+    no_swap = nixos.render(luks_host(lambda r: (r["nixos-disko"].pop("swap_size"), r["nixos-disko"].update(hibernate=False))), Context("demo"))
+    assert "swap" not in no_swap["disko.nix"]
+    ext4 = nixos.render(host(lambda r: r["nixos-disko"].update(hibernate=True)), Context("demo"))["disko.nix"]
+    assert 'content = { type = "swap"; resumeDevice = true; };' in ext4 and "luks" not in ext4
+    assert "resumeDevice" not in nixos.render(host(), Context("demo"))["disko.nix"]
+
+
+def test_luks_configuration():
+    conf = nixos.render(luks_host(), Context("demo"))["configuration.nix"]
+    assert 'boot.initrd.availableKernelModules = [ "nvme" "ahci" "xhci_pci" "usb_storage" "sd_mod" "usbhid" "hid_generic" ];' in conf
+    assert "console.earlySetup = true;" in conf
+    assert "boot.initrd.luks.devices.crypted =" not in conf and "boot.resumeDevice =" not in conf  # disko sets both
+    plain = nixos.render(host(), Context("demo"))["configuration.nix"]
+    assert "hid_generic" not in plain and "earlySetup" not in plain and "tmpfiles" not in plain
+
+
+def test_tmpfiles_rules_for_owned_volumes_are_sorted():
+    def edit(r):
+        r["users"].append({"name": "bob", "ssh_authorized_keys": []})
+        r["nixos-disko"]["volumes"].insert(0, {"name": "zz", "mountpoint": "/srv/zz", "size": "1G", "owner": "bob"})
+
+    conf = nixos.render(luks_host(edit), Context("demo"))["configuration.nix"]
+    block = conf[conf.index("systemd.tmpfiles.rules = [") :].split("];", 1)[0].splitlines()[1:]
+    assert [line.strip() for line in block if line.strip()] == ['"d /srv/data 0750 ops users -"', '"d /srv/zz 0750 bob users -"']
+
+
+def test_luks_installer_announces_the_passphrase_prompt():
+    inst = nixos.render(luks_host(), Context("demo"))["installer.nix"]
+    echo = inst.index('echo "install-$host: disko will now ask for the new disk passphrase twice"')
+    assert inst.index('if [ "$answer" != "$expect" ]; then') < echo < inst.index("exec disko-install")
+    assert "passphrase" not in nixos.render(host(), Context("demo"))["installer.nix"]
+
+
+@pytest.fixture
+def luks_rendered(tmp_path):
+    for name, text in nixos.render(luks_host(), Context("demo")).items():
+        (tmp_path / name).write_text(text)
+    return tmp_path
+
+
+def test_clean_luks_render_validates(luks_rendered):
+    assert messages(nixos.validate(luks_rendered)) == []
+
+
+@pytest.mark.parametrize(
+    "name,edit,needle",
+    [
+        ("disko.nix", lambda t: t.replace('type = "luks";', 'type = "filesystem";'), "the luks partition is missing"),
+        ("disko.nix", lambda t: t.replace('name = "crypted";', 'name = "other";'), "the LUKS name crypted is missing"),
+        ("disko.nix", lambda t: t.replace("disko.devices.lvm_vg.pool = {", "disko.devices.lvm_vg.other = {"), "disko.devices.lvm_vg.pool is missing"),
+        ("disko.nix", lambda t: t.replace('vg = "pool";', 'vg = "other";'), "physical volume of volume group pool is missing"),
+        ("disko.nix", lambda t: t.replace(DISK, "/dev/disk/by-id/other"), "but disko.nix partitions"),
+        ("disko.nix", lambda t: t.replace("settings.allowDiscards = true;", 'passwordFile = "/tmp/secret.key";'), "passwordFile ="),
+        ("disko.nix", lambda t: t.replace("settings.allowDiscards = true;", 'settings.keyFile = "/tmp/secret.key";'), "keyFile ="),
+        ("configuration.nix", lambda t: t.replace("isNormalUser = true;", 'isNormalUser = true; password = "x";'), "password ="),
+        ("installer.nix", lambda t: t.replace("in\n{\n", 'in\n{\n  users.users.nixos.initialPassword = "x";\n'), "initialPassword ="),
+    ],
+)
+def test_broken_luks_files_are_caught(luks_rendered, name, edit, needle):
+    path = luks_rendered / name
+    text = path.read_text()
+    assert edit(text) != text
+    path.write_text(edit(text))
+    msgs = messages(nixos.validate(luks_rendered))
+    assert any(needle in m for m in msgs), msgs
+
+
+def test_luks_plan_lines():
+    lines = nixos.plan(luks_host(), Context("demo"))
+    install = lines.index("sudo install-demo")
+    warn = [i for i, line in enumerate(lines) if "asks TWICE for a NEW disk passphrase" in line]
+    assert warn and warn[0] < install and "cannot be recovered" in lines[warn[0] + 1] and "password manager" in lines[warn[0] + 1]
+    post = lines[install:]
+    for line in ("findmnt / /boot /srv/data /home", "swapon --show", "sudo cryptsetup status crypted", "sudo lvs", "cat /sys/power/disk"):
+        assert line in post, line
+    assert any("systemctl hibernate" in line for line in post) and "swap_size should be at least the RAM size" in " ".join(line.lstrip("# ") for line in post)
+    plain = nixos.plan(host(), Context("demo"))
+    assert not any("passphrase" in line or "cryptsetup" in line or "/sys/power" in line for line in plain)
+    no_hib = nixos.plan(luks_host(lambda r: r["nixos-disko"].update(hibernate=False)), Context("demo"))
+    assert "sudo lvs" in no_hib and "cat /sys/power/disk" not in no_hib
+
+
+def test_luks_plan_quotes_hostile_values(tmp_path):
+    spec = luks_host()
+    spec["nixos-disko"]["volumes"][0]["mountpoint"] = "/srv/x;reboot"
+    spec["nixos-disko"]["swap_size"] = "8G;reboot"
+    lines = plan_lines(nixos, spec, Context("demo"), "os-install/demo", tmp_path)
+    for line in lines:
+        if line and not line.startswith("#"):
+            assert "reboot" not in shlex.split(line), line
+    assert "findmnt / /boot '/srv/x;reboot' /home" in lines and any("'8G;reboot'" in line for line in lines)
+
+
+def test_luks_hostile_mountpoint_is_escaped_in_nix():
+    spec = luks_host()
+    spec["nixos-disko"]["volumes"][0]["mountpoint"] = '/srv/"${builtins.abort 1}"'
+    files = nixos.render(spec, Context("demo"))
+    assert 'mountpoint = "/srv/\\"\\${builtins.abort 1}\\"";' in files["disko.nix"]
+    assert '"d /srv/\\"\\${builtins.abort 1}\\" 0750 ops users -"' in files["configuration.nix"]
+
+
+def test_luks_example_cli_round_trip(capsys):
+    from conftest import EXAMPLES
+
+    root = str(EXAMPLES)
+    code, out, err = run(capsys, "--root", root, "validate", "os-install/demo-nixos-gnome-luks")
+    assert code == 0 and "ok: os-install/demo-nixos-gnome-luks" in out, err
+    assert run(capsys, "--root", root, "diff", "os-install/demo-nixos-gnome-luks")[0] == 0
+    code, out, _ = run(capsys, "--root", root, "plan", "os-install/demo-nixos-gnome-luks")
+    assert code == 0 and "sudo install-demo-nixos-gnome-luks" in out and "sudo cryptsetup status crypted" in out
+
+
+def test_starter_hints_for_the_new_keys_are_comments():
+    text = nixos.starter("demo")
+    for key in ("esp_size", "hibernate", "ext4-luks", "root_size", "[[nixos-disko.volumes]]", "mount_options", "owner"):
+        assert any(line.startswith("#") and key in line for line in text.splitlines()), key
+    assert "volumes" not in starter_raw()["nixos-disko"]
