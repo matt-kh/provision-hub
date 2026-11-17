@@ -6,6 +6,24 @@ may change incompatibly; every such change has a Migration paragraph. See
 
 ## Unreleased
 
+### Added
+
+- Backend `nixos-disko` for `os-install`: renders a pinned NixOS flake (`flake.nix`,
+  `configuration.nix`, `disko.nix`, `installer.nix`) with the target system and an offline
+  USB installer ISO whose `install-<hostname>` command stops unless it runs on a terminal
+  and the spec disk is a whole disk with nothing mounted or used as swap that the boot
+  medium does not sit on, then asks for the disk serial's last 4 characters (or the
+  hostname) before disko-install wipes the disk; building the ISO requires a git-tracked
+  `rendered/flake.lock`. `keyboard` maps to the XKB layout (console follows it). Table
+  `[nixos-disko]`: `release`, `state_version`, `layout` (`ext4`), `swap_size`, `packages`,
+  `cpu_vendor`. `validate` runs `nix-instantiate --parse`
+  when nix is installed; `plan` prints lock, ISO build, USB write and install steps. Static
+  validation only: the example was locked and `nix eval`-ed, never installed. Example
+  `examples/os-install/demo-nixos-ext4/`; docs in `docs/backends/nixos-disko.md`.
+- Backend contract: optional `PRESERVE`, relative paths of human-created regular files in
+  `rendered/` that `render` keeps and `diff`/`validate` do not report as stale (used for
+  nixos-disko's `flake.lock`).
+
 ### Changed
 
 - prov is generic over **kinds** and **backends**. Every item is

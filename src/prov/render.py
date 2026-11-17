@@ -2,8 +2,10 @@
 
 ``<root>/<kind>/<name>/rendered/`` is owned by prov: ``render`` rewrites it so that it holds
 exactly the files the backend produced. Stale files, stale symlinks and directories left
-empty are removed. Symlinks are never followed: not on the path from the root to
-``rendered/`` or the reserved ``build/`` (see ``safe_item_dir``) and not inside it.
+empty are removed, except the regular files a backend lists in its optional ``PRESERVE``
+(human-created files such as a lock file); ``diff`` ignores those too. Symlinks are never
+followed: not on the path from the root to ``rendered/`` or the reserved ``build/`` (see
+``safe_item_dir``) and not inside it.
 """
 
 from __future__ import annotations
@@ -13,7 +15,7 @@ import os
 import stat
 import tempfile
 from pathlib import Path, PurePosixPath
-from typing import Dict, List, Tuple
+from typing import Dict, Iterable, List, Tuple
 
 from .schema import ConfigError
 from .text import esc, has_unsafe, show
@@ -155,8 +157,23 @@ def _write(rendered_dir: Path, name: str, text: str) -> None:
     atomic_write(target, text)
 
 
-def write_rendered(rendered_dir: Path, files: Dict[str, str]) -> List[str]:
-    """Make ``rendered_dir`` hold exactly ``files``; return a sorted change summary."""
+def _kept(preserve: Iterable[str], files: Dict[str, str]) -> frozenset:
+    """The preserved names that do not collide with ``files``: a name that is a rendered file
+    or a parent directory of one is not preserved (render's output wins)."""
+    parents = {parent.as_posix() for name in files for parent in PurePosixPath(name).parents}
+    taken = set(files) | parents
+    return frozenset(preserve) - taken
+
+
+def write_rendered(
+    rendered_dir: Path, files: Dict[str, str], preserve: Iterable[str] = ()
+) -> List[str]:
+    """Make ``rendered_dir`` hold exactly ``files``; return a sorted change summary.
+
+    Regular files named in ``preserve`` (relative POSIX paths) are kept when ``files`` does
+    not hold them; symlinks and special files are removed whatever their name.
+    """
+    preserve = _kept(preserve, files)
     check_paths(files)
     if rendered_dir.is_symlink():
         raise ConfigError(f"{show(str(rendered_dir))} is a symlink; prov refuses to write through symlinks")
@@ -173,7 +190,7 @@ def write_rendered(rendered_dir: Path, files: Dict[str, str]) -> List[str]:
                 other.unlink()
             changes.append(f"removed {kind} {show(other.relative_to(rendered_dir).as_posix())}")
     current = existing_files(rendered_dir)
-    for name in sorted(set(current) - set(files)):
+    for name in sorted(set(current) - set(files) - preserve):
         (rendered_dir / name).unlink()
         changes.append(f"removed {show(name)}")
     if rendered_dir.is_dir():
@@ -200,8 +217,12 @@ def _lines(text: str) -> List[str]:
     return lines
 
 
-def diff_rendered(rendered_dir: Path, files: Dict[str, str]) -> str:
+def diff_rendered(
+    rendered_dir: Path, files: Dict[str, str], preserve: Iterable[str] = ()
+) -> str:
     """Unified diff from what is on disk to a fresh render; empty when identical.
+
+    Regular files named in ``preserve`` and absent from ``files`` are not compared.
 
     File names are shown through ``show``; in file contents every unsafe character except
     newline and tab is escaped too (``prov.text.esc``), so the output is for reading, not a
@@ -209,6 +230,8 @@ def diff_rendered(rendered_dir: Path, files: Dict[str, str]) -> str:
     """
     check_paths(files)
     current = existing_files(rendered_dir)
+    for name in _kept(preserve, files):
+        current.pop(name, None)
     chunks = []
     if rendered_dir.is_dir() and not rendered_dir.is_symlink():
         for other in _walk(rendered_dir)[1]:

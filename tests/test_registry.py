@@ -93,6 +93,25 @@ def test_optional_members_must_be_callable(member):
         check_contract(fake_backend(**{member: "nope", "BUILD_TOOLS": ()}), "talos = fake")
 
 
+@pytest.mark.parametrize(
+    "value,needle",
+    [
+        ("flake.lock", "PRESERVE must be a list"),
+        ([1], "PRESERVE must be a list"),
+        (["/etc/passwd"], "PRESERVE: plugin returned an unsafe output path"),
+        (["../spec.toml"], "PRESERVE: plugin returned an unsafe output path"),
+        (["a\nb"], "PRESERVE: plugin returned an unsafe output path"),
+        (["./flake.lock"], "PRESERVE: './flake.lock' is not a normalised relative path"),
+        (["a//b"], "PRESERVE: 'a//b' is not a normalised relative path"),
+        (["a/"], "PRESERVE: 'a/' is not a normalised relative path"),
+    ],
+)
+def test_preserve_must_be_safe_relative_paths(value, needle):
+    with pytest.raises(ConfigError, match=re.escape(needle)):
+        check_contract(fake_backend(PRESERVE=value), "talos = fake")
+    check_contract(fake_backend(PRESERVE=("flake.lock", "sub/x.lock")), "talos = fake")
+
+
 def test_refs_must_be_a_dict():
     with pytest.raises(ConfigError, match="REFS must be a dict"):
         check_contract(fake_backend(REFS=["image"]), "talos = fake")
@@ -100,15 +119,15 @@ def test_refs_must_be_a_dict():
 
 def test_discover_orders_by_kind_then_name(extra_backends):
     extra_backends(fake_entry_point(fake_backend("aaa")), fake_entry_point(fake_backend("zzz")))
-    assert list(discover()) == ["aaa", "ubuntu-autoinstall", "zzz"]
+    assert list(discover()) == ["aaa", "nixos-disko", "ubuntu-autoinstall", "zzz"]
 
 
 def test_lookup_and_for_kind():
     backends = discover()
-    assert list(for_kind(backends, "os-install")) == ["ubuntu-autoinstall"]
+    assert list(for_kind(backends, "os-install")) == ["nixos-disko", "ubuntu-autoinstall"]
     assert for_kind(backends, "image") == {}
     assert lookup(backends, "os-install", "ubuntu-autoinstall") is builtin()["ubuntu-autoinstall"]
-    with pytest.raises(ConfigError, match="unknown backend 'plan9' for kind 'os-install' \\(registered: ubuntu-autoinstall\\)"):
+    with pytest.raises(ConfigError, match="unknown backend 'plan9' for kind 'os-install' \\(registered: nixos-disko, ubuntu-autoinstall\\)"):
         lookup(backends, "os-install", "plan9")
     with pytest.raises(ConfigError, match="unknown backend"):
         lookup(backends, "os-install", ["not", "a", "name"])

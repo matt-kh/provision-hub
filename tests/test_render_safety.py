@@ -234,6 +234,57 @@ def test_stale_files_and_empty_dirs_are_pruned(tmp_path):
     assert sorted(os.listdir(rendered)) == ["keep"]
 
 
+def test_preserved_files_are_kept_and_not_diffed(tmp_path, outside):
+    rendered = tmp_path / "rendered"
+    rendered.mkdir()
+    (rendered / "flake.lock").write_text("{}\n")
+    (rendered / "stale").write_text("x\n")
+    changes = write_rendered(rendered, {"flake.nix": "{ }\n"}, preserve=("flake.lock",))
+    assert "removed stale" in changes and not any("flake.lock" in c for c in changes)
+    assert (rendered / "flake.lock").read_text() == "{}\n"
+    assert diff_rendered(rendered, {"flake.nix": "{ }\n"}, preserve=("flake.lock",)) == ""
+    assert "flake.lock" in diff_rendered(rendered, {"flake.nix": "{ }\n"})  # without PRESERVE it is stale
+    # a symlink is never preserved, whatever its name
+    (rendered / "flake.lock").unlink()
+    (rendered / "flake.lock").symlink_to(outside / "precious.txt")
+    assert "would be removed" in diff_rendered(rendered, {"flake.nix": "{ }\n"}, preserve=("flake.lock",))
+    changes = write_rendered(rendered, {"flake.nix": "{ }\n"}, preserve=("flake.lock",))
+    assert "removed symlink flake.lock" in changes
+    assert not os.path.lexists(rendered / "flake.lock") and (outside / "precious.txt").read_text() == "keep me\n"
+
+
+def test_preserved_file_in_a_subdirectory_survives_the_empty_dir_sweep(tmp_path):
+    rendered = tmp_path / "rendered"
+    (rendered / "locks").mkdir(parents=True)
+    (rendered / "locks/x.lock").write_text("keep\n")
+    (rendered / "empty").mkdir()
+    changes = write_rendered(rendered, {"a": "b\n"}, preserve=("locks/x.lock",))
+    assert (rendered / "locks/x.lock").read_text() == "keep\n" and not (rendered / "empty").exists()
+    assert not any("x.lock" in c for c in changes)
+    assert diff_rendered(rendered, {"a": "b\n"}, preserve=("locks/x.lock",)) == ""
+
+
+def test_preserved_name_that_is_a_rendered_parent_does_not_block_the_write(tmp_path):
+    rendered = tmp_path / "rendered"
+    rendered.mkdir()
+    (rendered / "conf").write_text("human file\n")  # preserved name, but render needs conf/ as a directory
+    changes = write_rendered(rendered, {"conf/main.nix": "{ }\n"}, preserve=("conf",))
+    assert (rendered / "conf/main.nix").read_text() == "{ }\n" and "removed conf" in changes
+    assert diff_rendered(rendered, {"conf/main.nix": "{ }\n"}, preserve=("conf",)) == ""
+    (rendered / "same.lock").write_text("old\n")  # preserved name that render also returns
+    write_rendered(rendered, {"conf/main.nix": "{ }\n", "same.lock": "new\n"}, preserve=("same.lock",))
+    assert (rendered / "same.lock").read_text() == "new\n"
+
+
+def test_fifo_named_like_a_preserved_file_is_removed(tmp_path):
+    rendered = tmp_path / "rendered"
+    rendered.mkdir()
+    os.mkfifo(rendered / "flake.lock")
+    assert "special file flake.lock would be removed" in diff_rendered(rendered, {"a": "b\n"}, preserve=("flake.lock",))
+    changes = write_rendered(rendered, {"a": "b\n"}, preserve=("flake.lock",))
+    assert "removed special file flake.lock" in changes and not os.path.lexists(rendered / "flake.lock")
+
+
 @pytest.fixture
 def alarm():
     """Fail instead of hanging forever if a read blocks (e.g. on a FIFO)."""

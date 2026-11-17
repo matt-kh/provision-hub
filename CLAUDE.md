@@ -17,6 +17,7 @@ uv run prov --root <dir> init os-install/demo --backend ubuntu-autoinstall
 uv run prov --root <dir> render os-install/demo && uv run prov --root <dir> validate os-install/demo
 uv run prov --root <dir> plan os-install/demo && uv run prov --root <dir> list
 uv run prov --root examples validate os-install/demo-lvm
+uv run prov --root examples plan os-install/demo-nixos-ext4   # nixos-disko USB steps
 pre-commit run --all-files               # same hooks as the CI lint job
 ```
 
@@ -27,8 +28,11 @@ stay minimal (pyyaml; tomli on 3.10 only) — justify any new one in the PR.
 
 - `src/prov/kinds/` — core kinds (`os_install.py`) and shared `$defs` (`common.py`). Kinds are
   not pluggable; a new kind is a core change documented in `docs/kinds.md`.
-- `src/prov/backends/` — built-in backends (`ubuntu_autoinstall.py`), registered through the
-  `prov.backends` entry-point group in `pyproject.toml` (entry-point name = `NAME`).
+- `src/prov/backends/` — built-in backends (`ubuntu_autoinstall.py`, `nixos_disko.py`),
+  registered through the `prov.backends` entry-point group in `pyproject.toml` (entry-point
+  name = `NAME`) and listed in `prov.registry.builtin()`. Per-backend docs:
+  `docs/backends/<name>.md`. A backend's optional `PRESERVE` names human-created files
+  `render` keeps in `rendered/` (nixos-disko: `flake.lock`).
 - `src/prov/registry.py` — discovery, contract checks, `Context`, `call_plugin` (every call
   into a backend goes through it). `src/prov/spec.py` — refs and envelope checks.
 - `src/prov/text.py` — the output-escaping predicate and helpers (`unsafe`, `esc`, `show`,
@@ -54,7 +58,8 @@ stay minimal (pyyaml; tomli on 3.10 only) — justify any new one in the PR.
   anything breaking becomes `prov/v2` with a reader for v1. After any schema change
   regenerate `schema/<kind>.<version>.schema.json` (below); a test fails if it drifts.
 - **Static validation only so far.** No layout has been installed in a VM; ZFS is the least
-  proven. Say so when changing layouts, and never claim an artefact "works" without an install.
+  proven; nixos-disko has been locked and `nix eval`-ed only (not built, not installed). Say
+  so when changing layouts, and never claim an artefact "works" without an install.
 - **No writes through symlinks** (`<kind>/`, `<name>/`, `rendered/`, `build/`); plan output
   shell-quotes every spec value, comments included (`tests/test_render_safety.py`,
   `tests/test_plan.py`).

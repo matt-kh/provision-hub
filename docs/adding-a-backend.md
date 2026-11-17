@@ -24,6 +24,7 @@ party) exposes:
 | `plan` | yes | `plan(spec: dict, ctx: Context) -> list[str]` | Apply steps for a human, as printed lines. |
 | `check` | no | `check(spec: dict, ctx: Context) -> list[Finding]` | Cross-field rules JSON Schema cannot express. |
 | `starter` | no | `starter(name: str) -> str` | `spec.toml` text for `prov init <kind>/<name> --backend <NAME>`; without it `init` refuses. |
+| `PRESERVE` | no | `tuple[str, ...]` | Relative paths of files a human may create in `rendered/` that `render` must keep and `diff`/`validate` must not report as stale (e.g. `("flake.lock",)`), written normalised (no `./`, `//` or trailing `/`). Only regular files are kept; symlinks and special files are removed whatever their name. A listed name that `render` also returns, or that is a parent directory of a file it returns, is not preserved (render's output wins), so list only names that are never a file or a parent directory of a file `render` produces. |
 | `REFS` | no | `dict` | Reserved for cross-spec references (a later release). |
 | `artifacts` | no | `artifacts(spec: dict) -> ...` | Reserved for `prov build` (a later release). |
 | `build` + `BUILD_TOOLS` | no | `build(spec, ctx)`, `BUILD_TOOLS: tuple[str, ...]` | Reserved for `prov build`, which will write only under the item's `build/`. A backend that defines `build` must list the local tools it runs in `BUILD_TOOLS`. |
@@ -38,7 +39,8 @@ make `prov validate` exit 1. Printed form: `error: storage.disks: needs one disk
 The registry (`prov.registry.discover`) rejects a backend that lacks a required member, whose
 optional members are not callable, whose `KIND` is unknown, whose `NAME` is not an id,
 differs from its entry-point name, is already registered or collides with a core property,
-that defines `build` without `BUILD_TOOLS`, or whose `SCHEMA` uses an unsupported keyword, an
+that defines `build` without `BUILD_TOOLS`, whose `PRESERVE` is not a list of safe, normalised relative
+paths, or whose `SCHEMA` uses an unsupported keyword, an
 invalid keyword value or an invalid `pattern`. Every call into a backend goes through
 `prov.registry.call_plugin`: an exception escaping it, or a result of the wrong type (`render`
 not a `dict[str, str]`, `validate`/`check` not a `list[Finding]`, `plan` not a `list[str]`,
@@ -198,7 +200,7 @@ Requirements:
 
 - **render** returns every file the backend needs; paths are relative, without `..` or
   control characters. Core writes them to `<root>/<kind>/<name>/rendered/` and removes files
-  it did not return. Output must be byte-for-byte deterministic (use `prov.util.dump_yaml`
+  it did not return, except the regular files named in `PRESERVE`. Output must be byte-for-byte deterministic (use `prov.util.dump_yaml`
   or sorted JSON), text only, end with a newline and carry no trailing whitespace. Never
   embed secrets that are not in `spec`.
 - **validate** parses what is on disk (it may have been edited by hand): required files,

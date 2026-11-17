@@ -2,7 +2,7 @@
 
 A backend is a module (or any object) exposing the contract in ``docs/adding-a-backend.md``:
 ``NAME``, ``KIND``, ``SCHEMA``, ``render(spec, ctx)``, ``validate(rendered_dir)``,
-``plan(spec, ctx)``, and optionally ``check(spec, ctx)``, ``starter(name)``, ``REFS``,
+``plan(spec, ctx)``, and optionally ``check(spec, ctx)``, ``starter(name)``, ``PRESERVE``, ``REFS``,
 ``artifacts(spec)`` and ``build(spec, ctx)`` with ``BUILD_TOOLS`` (build and references are
 reserved: checked here, not called yet).
 
@@ -16,11 +16,13 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from importlib.metadata import entry_points
+from pathlib import PurePosixPath
 from types import MappingProxyType, ModuleType
 from typing import Any, Callable, Dict, Mapping, Tuple
 
 from . import kinds
 from .kinds.common import DEFS
+from .render import check_paths
 from .schema import ID_PATTERN, ConfigError
 from .text import esc, short_repr
 from .validate import Finding, check_schema_fragment
@@ -57,6 +59,17 @@ def check_contract(plugin: Backend, origin: str) -> None:
     owner = kinds.core_keys().get(plugin.NAME)
     if owner is not None:
         raise ConfigError(f"backend plugin {origin}: NAME {plugin.NAME!r} collides with a core property of {owner}")
+    if hasattr(plugin, "PRESERVE"):
+        keep = plugin.PRESERVE
+        if not (isinstance(keep, (tuple, list)) and all(isinstance(p, str) for p in keep)):
+            raise ConfigError(f"backend plugin {origin}: PRESERVE must be a list of relative paths")
+        try:
+            check_paths(dict.fromkeys(keep, ""))
+        except ConfigError as exc:
+            raise ConfigError(f"backend plugin {origin}: PRESERVE: {exc}") from None
+        for path in keep:
+            if PurePosixPath(path).as_posix() != path:  # "./x", "a//b", "a/": never what render writes
+                raise ConfigError(f"backend plugin {origin}: PRESERVE: {short_repr(path)} is not a normalised relative path")
     if hasattr(plugin, "REFS") and not isinstance(plugin.REFS, dict):
         raise ConfigError(f"backend plugin {origin}: REFS must be a dict")
     if hasattr(plugin, "build"):
@@ -89,6 +102,11 @@ def discover() -> Dict[str, Backend]:
     return dict(sorted(found.items(), key=lambda item: (item[1].KIND, item[0])))
 
 
+def preserved(plugin: Backend) -> Tuple[str, ...]:
+    """Files in ``rendered/`` that render keeps and diff ignores (the backend's ``PRESERVE``)."""
+    return tuple(getattr(plugin, "PRESERVE", ()))
+
+
 def for_kind(backends: Mapping[str, Backend], kind: str) -> Dict[str, Backend]:
     """The backends of one kind, keyed by NAME."""
     return {name: b for name, b in backends.items() if b.KIND == kind}
@@ -107,9 +125,9 @@ def lookup(backends: Mapping[str, Backend], kind: str, name: Any) -> Backend:
 
 def builtin() -> Dict[str, ModuleType]:
     """The backends shipped with prov; the published JSON Schemas are generated from these."""
-    from .backends import ubuntu_autoinstall
+    from .backends import nixos_disko, ubuntu_autoinstall
 
-    return {ubuntu_autoinstall.NAME: ubuntu_autoinstall}
+    return {nixos_disko.NAME: nixos_disko, ubuntu_autoinstall.NAME: ubuntu_autoinstall}
 
 
 def _utf8(text: str) -> bool:

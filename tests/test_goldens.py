@@ -9,7 +9,7 @@ from __future__ import annotations
 import pytest
 from conftest import UPDATE_GOLDENS, example_items
 
-from prov.registry import Context, discover
+from prov.registry import Context, discover, preserved
 from prov.render import diff_rendered, write_rendered
 from prov.schema import SPEC_FILE
 from prov.spec import load_spec
@@ -37,8 +37,8 @@ def test_golden(root, kind, name):
     ctx = Context(name)
     files = plugin.render(data, ctx)
     if UPDATE_GOLDENS:
-        write_rendered(idir / "rendered", files)
-    diff = diff_rendered(idir / "rendered", files)
+        write_rendered(idir / "rendered", files, preserved(plugin))
+    diff = diff_rendered(idir / "rendered", files, preserved(plugin))
     assert not diff, f"golden out of date (PROV_UPDATE_GOLDENS=1 to accept):\n{diff}"
     assert plugin.render(data, ctx) == files, "render is not deterministic"
     errors = [f for f in plugin.validate(idir / "rendered") if f.level == ERROR]

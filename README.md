@@ -21,6 +21,7 @@ and OS images (`image`, planned). See [docs/kinds.md](docs/kinds.md).
 | Kind | Backend | Artefacts | Notes |
 |---|---|---|---|
 | `os-install` | `ubuntu-autoinstall` (22.04, 24.04) | NoCloud seed: autoinstall `user-data`, `meta-data`, `kernel-cmdline` | storage layouts `lvm`, `zfs`, `mdraid` |
+| `os-install` | `nixos-disko` (nixpkgs `nixos-YY.MM`) | pinned flake: `flake.nix`, `configuration.nix`, `disko.nix`, `installer.nix` (offline USB installer ISO) | layout `ext4`; see [docs/backends/nixos-disko.md](docs/backends/nixos-disko.md) |
 
 New backends follow [docs/adding-a-backend.md](docs/adding-a-backend.md); new kinds are a
 core change ([docs/kinds.md](docs/kinds.md)).
@@ -30,7 +31,7 @@ core change ([docs/kinds.md](docs/kinds.md)).
 ```sh
 uv sync
 uv run prov kinds                                             # os-install ...
-uv run prov backends --kind os-install                        # ubuntu-autoinstall ...
+uv run prov backends --kind os-install                        # nixos-disko, ubuntu-autoinstall ...
 uv run prov init os-install/demo --backend ubuntu-autoinstall # writes os-install/demo/spec.toml (synthetic values)
 uv run prov render os-install/demo                            # writes os-install/demo/rendered/
 uv run prov validate os-install/demo                          # checks spec.toml and the rendered files
@@ -58,7 +59,8 @@ error (missing item, unknown kind or backend, bad envelope, invalid `spec.toml`)
 
 ```text
 <root>/<kind>/<name>/spec.toml     # you write this (prov init gives a start)
-<root>/<kind>/<name>/rendered/     # owned by prov render; stale files are removed; commit it
+<root>/<kind>/<name>/rendered/     # owned by prov render; stale files are removed (except files the
+                                   # backend preserves, e.g. nixos-disko's flake.lock); commit it
 <root>/<kind>/<name>/build/        # reserved for a later prov build; gitignored
 ```
 
@@ -73,8 +75,8 @@ based and a user password, if any, is a crypt hash (`password_hash`). `v1alpha*`
 still break, always with a migration note in [CHANGELOG.md](CHANGELOG.md); from 1.0
 `prov/v1` changes are additive only.
 
-**Examples.** [examples/](examples/) is one root with an item per Ubuntu storage layout and
-its committed rendered output:
+**Examples.** [examples/](examples/) is one root with an item per Ubuntu storage layout, a
+NixOS item (`demo-nixos-ext4`) and their committed rendered output:
 
 ```sh
 uv run prov --root examples list
@@ -85,7 +87,7 @@ They use only documentation addresses (192.0.2.0/24, 198.51.100.0/24, 203.0.113.
 2001:db8::/32), reserved domains (example.com, example.org) and fake ssh keys.
 
 **Status of the layouts.** Rendered artefacts are validated statically only: prov's own
-checks plus `cloud-init schema` where installed. No layout has been exercised by a real
+checks plus `cloud-init schema` / `nix-instantiate --parse` where installed. No layout has been exercised by a real
 install in a VM yet, ZFS least of all (it follows curtin's documented ZFS root example and
 subiquity's guided ZFS datasets, on a single disk). Test in a throwaway VM before relying on
 one.
@@ -105,7 +107,9 @@ output is for reading, not a patch) — while `plan` refuses such lines instead,
 prints is exactly what you paste.
 
 **External validators** are optional: `prov validate` runs `cloud-init schema` when
-cloud-init is installed and otherwise reports `skipped: cloud-init not installed`.
+cloud-init is installed (ubuntu-autoinstall) and `nix-instantiate --parse` when nix is
+installed (nixos-disko; parse only, never evaluates or fetches), and otherwise reports
+`skipped: <tool> not installed`.
 
 ## Development
 
