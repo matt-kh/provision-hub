@@ -641,6 +641,14 @@ STUBS = {
     "findmnt": 'if [ -n "${STUB_FINDMNT_FAIL:-}" ]; then exit 1; fi; printf "%s\\n" "$STUB_MEDIUM"\n',
     "mountpoint": '[ "${STUB_ISO_MOUNTED:-1}" = 1 ]\n',
     "lsblk": r'''case "$*" in *"${STUB_FAIL:-@@}"*) echo "lsblk: failed" >&2; exit 32 ;; esac
+# the partition-label scan lists every device: NAME PARTLABEL lines from STUB_PARTS
+if [ "$*" = "-nrpo NAME,PARTLABEL" ]; then printf "%b" "${STUB_PARTS:-}"; exit 0; fi
+# the ancestor walk of a labelled partition <disk>p<N>: the partition, then its disk
+# (STUB_PART_ANCESTORS overrides the lines; STUB_PART_FAIL=1 makes this walk fail)
+case "$*" in "-nrpso NAME,TYPE "*) if [ "${@: -1}" != "$STUB_MEDIUM" ]; then
+  if [ -n "${STUB_PART_FAIL:-}" ]; then echo "lsblk: failed" >&2; exit 32; fi
+  if [ -n "${STUB_PART_ANCESTORS:-}" ]; then printf "%b" "$STUB_PART_ANCESTORS"; exit 0; fi
+  p="${@: -1}"; printf "%s part\n%s disk\n" "$p" "${p%p[0-9]*}"; exit 0; fi ;; esac
 # the device argument must be the resolved target disk, or the medium for the ancestor walk
 want="$STUB_DEV"; case "$*" in "-nrpso NAME,TYPE "*) want="$STUB_MEDIUM" ;; esac
 if [ "${@: -1}" != "$want" ]; then echo "lsblk stub: called on ${@: -1}, expected $want" >&2; exit 99; fi
@@ -653,16 +661,22 @@ case "$*" in
 esac
 ''',
     "disko-install": 'printf "%s\\n" "$@" > "$STUB_LOG"\n',
+    "vgs": 'if [ -n "${STUB_VGS_FAIL:-}" ]; then echo "vgs: failed" >&2; exit 5; fi; printf "%b" "${STUB_VGS:-}"\n',
+    # cryptsetup status <name>: 0 when the mapping is active, 4 otherwise
+    "cryptsetup": 'if [ "$1 $2" = "status crypted" ] && [ "${STUB_CRYPT_OPEN:-}" = 1 ]; then exit 0; fi; exit "${STUB_CRYPT_RC:-4}"\n',
 }
 
 
-def _script(firmware, disk, tmp_path):
+def _script(firmware, disk, tmp_path, layout="ext4"):
     """The install-<host> script as writeShellApplication would run it.
 
     Nix interpolations are substituted as Nix would; the three file-type tests that cannot
     be stubbed ([ -b ] on the disk and the medium, [ -t 0 ]) become [ -e ] / always-true.
     """
-    inst = nixos.render(host(lambda r: r.update(firmware=firmware)), Context("demo"))["installer.nix"]
+    if layout == "ext4-luks":
+        inst = nixos.render(luks_host(lambda r: r.update(firmware=firmware)), Context("demo"))["installer.nix"]
+    else:
+        inst = nixos.render(host(lambda r: r.update(firmware=firmware)), Context("demo"))["installer.nix"]
     body = inst.split("    text = ''\n", 1)[1].split("\n    '';\n", 1)[0]
     lines = [line[6:] if line.startswith("      ") else line for line in body.split("\n")]
     text = "\n".join(lines)
@@ -679,6 +693,8 @@ def _script(firmware, disk, tmp_path):
     sub('[ ! -b "$disk" ]', '[ ! -e "$disk" ]')
     sub('[ -b "$medium" ]', '[ -e "$medium" ]')
     sub("[ ! -t 0 ]", '[ -n "${STUB_NOTTY:-}" ]')
+    if layout == "ext4-luks":
+        sub("[ -e /dev/mapper/crypted ]", '[ -e "$STUB_MAPPER" ]')
     path = tmp_path / "install-demo"
     path.write_text("#!/usr/bin/env bash\nset -o errexit -o nounset -o pipefail\n" + text + "\n")
     return path
@@ -707,10 +723,11 @@ def script_env(tmp_path):
         "STUB_SERIAL": "EXAMPLE-SERIAL-9876",
         "STUB_LOG": str(tmp_path / "disko-install.args"),
         "STUB_DEV": str(disk),
+        "STUB_MAPPER": str(tmp_path / "no-such-mapper"),
     }
 
-    def run_script(firmware="uefi", answer="9876\n", **overrides):
-        script = _script(firmware, str(disk), tmp_path)
+    def run_script(firmware="uefi", answer="9876\n", layout="ext4", **overrides):
+        script = _script(firmware, str(disk), tmp_path, layout)
         proc = subprocess.run(
             [bash, str(script)], input=answer, capture_output=True, text=True, timeout=30, env={**env, **overrides}
         )
@@ -879,3 +896,595 @@ def test_boot_loader_generation_limit():
     assert "boot.loader.systemd-boot.configurationLimit = 10;" in nixos.render(host(), Context("demo"))["configuration.nix"]
     bios = nixos.render(host(lambda r: r.update(firmware="bios")), Context("demo"))["configuration.nix"]
     assert "boot.loader.grub.configurationLimit = 10;" in bios and 'size = "512M";' in nixos.render(host(), Context("demo"))["disko.nix"]
+
+
+# --- ext4-luks, volumes, hibernate, esp_size -----------------------------------------------
+
+
+def _luks_raw(raw):
+    raw["nixos-disko"].update(layout="ext4-luks", root_size="64G", hibernate=True)
+    raw["nixos-disko"]["volumes"] = [
+        {"name": "data", "mountpoint": "/srv/data", "size": "200G", "mount_options": ["noatime", "nodev"], "owner": "ops"},
+        {"name": "home", "mountpoint": "/home", "size": "100%FREE"},
+    ]
+
+
+def luks_findings(edit=None):
+    return spec_findings(lambda r: (_luks_raw(r), edit and edit(r)))
+
+
+def luks_host(edit=None):
+    return host(lambda r: (_luks_raw(r), edit and edit(r)))
+
+
+def vol(r, i):
+    return r["nixos-disko"]["volumes"][i]
+
+
+def test_luks_spec_is_valid_without_findings():
+    assert luks_findings() == []
+
+
+def test_new_keys_default_to_the_old_output():
+    explicit = host(lambda r: r["nixos-disko"].update(esp_size="512M", hibernate=False, root_size="100%FREE", volumes=[]))
+    assert explicit == host()
+    assert nixos.render(explicit, Context("demo")) == nixos.render(host(), Context("demo"))
+    assert host()["nixos-disko"]["esp_size"] == "512M" and host()["nixos-disko"]["volumes"] == []
+
+
+@pytest.mark.parametrize(
+    "edit,where,needle",
+    [
+        (lambda r: r.update(firmware="bios"), "firmware", "GRUB unlocking an encrypted /boot (cryptodisk) is not supported"),
+        (lambda r: r["nixos-disko"].pop("swap_size"), "nixos-disko.hibernate", "hibernate needs swap_size"),
+        (lambda r: r["nixos-disko"].update(esp_size="128M"), "nixos-disko.esp_size", "esp_size 128M is too small; use at least 256M"),
+        (lambda r: vol(r, 1).update(size="10G"), "nixos-disko.volumes", "must be 100%FREE (the space left); none does"),
+        (lambda r: r["nixos-disko"].update(root_size="100%FREE"), "nixos-disko.volumes", "several do: 'root', 'home'"),
+        (lambda r: vol(r, 0).update(name="root"), "nixos-disko.volumes[0].name", "is reserved"),
+        (lambda r: vol(r, 0).update(name="swap"), "nixos-disko.volumes[0].name", "is reserved"),
+        (lambda r: vol(r, 0).update(name="home"), "nixos-disko.volumes[1].name", "'home' is already used by volumes[0]"),
+        (lambda r: vol(r, 0).update(mountpoint="/home"), "nixos-disko.volumes[1].mountpoint", "'/home' is already used by volumes[0]"),
+        (lambda r: vol(r, 0).update(mountpoint="/"), "nixos-disko.volumes[0].mountpoint", "is reserved"),
+        (lambda r: vol(r, 0).update(mountpoint="/boot"), "nixos-disko.volumes[0].mountpoint", "is reserved"),
+        (lambda r: vol(r, 0).update(mountpoint="/boot/efi"), "nixos-disko.volumes[0].mountpoint", "is reserved"),
+        (lambda r: vol(r, 0).update(mountpoint="/nix"), "nixos-disko.volumes[0].mountpoint", "is reserved"),
+        (lambda r: vol(r, 0).update(mountpoint="/srv//data"), "nixos-disko.volumes[0].mountpoint", "is not normalised"),
+        (lambda r: vol(r, 0).update(mountpoint="/srv/data/"), "nixos-disko.volumes[0].mountpoint", "is not normalised"),
+        (lambda r: vol(r, 0).update(mountpoint="/srv/../boot"), "nixos-disko.volumes[0].mountpoint", "is not normalised"),
+        (lambda r: vol(r, 0).update(mountpoint="/srv/./data"), "nixos-disko.volumes[0].mountpoint", "is not normalised"),
+        (lambda r: vol(r, 0).update(owner="mallory"), "nixos-disko.volumes[0].owner", "owner 'mallory' is not a [[users]] name"),
+    ],
+)
+def test_luks_check_rules(edit, where, needle):
+    findings = [f for f in luks_findings(edit) if f.level == ERROR]
+    assert any(f.where == where and needle in f.message for f in findings), findings
+
+
+def test_volumes_and_root_size_need_ext4_luks():
+    findings = spec_findings(lambda r: r["nixos-disko"].update(volumes=[{"name": "data", "mountpoint": "/srv", "size": "1G"}]))
+    assert any("volumes need layout 'ext4-luks'" in m for m in messages(findings))
+    findings = spec_findings(lambda r: r["nixos-disko"].update(root_size="20G"))
+    assert any("root_size applies to layout 'ext4-luks' only" in m for m in messages(findings))
+
+
+def test_ext4_hibernate_needs_swap_and_esp_size_is_checked_on_uefi_only():
+    assert "hibernate needs swap_size (at least the RAM size) to resume from" in messages(
+        spec_findings(lambda r: (r["nixos-disko"].pop("swap_size"), r["nixos-disko"].update(hibernate=True)))
+    )
+    assert messages(spec_findings(lambda r: (r.update(firmware="bios"), r["nixos-disko"].update(esp_size="100M")))) == [
+        "esp_size applies to firmware 'uefi' only; BIOS uses a 1M BIOS boot partition"
+    ]
+    assert messages(spec_findings(lambda r: (r.update(firmware="bios"), r["nixos-disko"].update(esp_size="512M")))) == []
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        lambda r: vol(r, 0).update(mount_options=["noatime,exec"]),
+        lambda r: vol(r, 0).update(mount_options=["x y"]),
+        lambda r: vol(r, 0).update(mount_options=['a"b']),
+        lambda r: vol(r, 0).update(mount_options=["${x}"]),
+        lambda r: vol(r, 0).update(name="Data"),
+        lambda r: vol(r, 0).update(name="da_ta"),
+        lambda r: vol(r, 0).update(mountpoint="srv/data"),
+        lambda r: vol(r, 0).update(mountpoint="/srv/my data"),
+        lambda r: vol(r, 0).update(size="100%"),
+        lambda r: vol(r, 0).update(size="0G"),
+        lambda r: vol(r, 0).update(extra=1),
+        lambda r: vol(r, 0).pop("mountpoint"),
+        lambda r: r["nixos-disko"].update(esp_size="512MB"),
+        lambda r: r["nixos-disko"].update(root_size="50%FREE"),
+        lambda r: r["nixos-disko"].update(layout="luks"),
+    ],
+)
+def test_luks_schema_rejections(edit):
+    raw = starter_raw()
+    _luks_raw(raw)
+    edit(raw)
+    spec, findings = check_host(raw)
+    assert spec is None and messages(findings)
+
+
+def test_luks_disko_layout():
+    disko = nixos.render(luks_host(), Context("demo"))["disko.nix"]
+    for needle in (
+        f'device = "{DISK}";',
+        'type = "EF00";',
+        'size = "512M";',
+        'mountOptions = [ "umask=0077" ];',
+        "luks = {",
+        'type = "luks";',
+        'name = "crypted";',
+        "settings.allowDiscards = true;",
+        'content = { type = "lvm_pv"; vg = "pool"; };',
+        "disko.devices.lvm_vg.pool = {",
+        'type = "lvm_vg";',
+        'content = { type = "swap"; resumeDevice = true; };',
+        'size = "64G";',
+        'mountpoint = "/";',
+        'mountpoint = "/srv/data";',
+        'mountOptions = [ "noatime" "nodev" ];',
+        'size = "100%FREE";',
+        'mountpoint = "/home";',
+    ):
+        assert needle in disko, needle
+    assert disko.count('format = "ext4";') == 3
+    assert not nixos._SECRET.search(disko) and "askPassword" not in disko
+    # the ESP size follows esp_size; the luks partition takes the rest of the disk
+    sized = nixos.render(luks_host(lambda r: r["nixos-disko"].update(esp_size="1G")), Context("demo"))["disko.nix"]
+    assert 'size = "1G";' in sized and sized.count('size = "100%";') == 1
+
+
+def test_resume_device_only_with_hibernate():
+    disko = nixos.render(luks_host(lambda r: r["nixos-disko"].update(hibernate=False)), Context("demo"))["disko.nix"]
+    assert "resumeDevice" not in disko and 'content = { type = "swap"; };' in disko
+    no_swap = nixos.render(luks_host(lambda r: (r["nixos-disko"].pop("swap_size"), r["nixos-disko"].update(hibernate=False))), Context("demo"))
+    assert "swap" not in no_swap["disko.nix"]
+    ext4 = nixos.render(host(lambda r: r["nixos-disko"].update(hibernate=True)), Context("demo"))["disko.nix"]
+    assert 'content = { type = "swap"; resumeDevice = true; };' in ext4 and "luks" not in ext4
+    assert "resumeDevice" not in nixos.render(host(), Context("demo"))["disko.nix"]
+
+
+def test_luks_configuration():
+    conf = nixos.render(luks_host(), Context("demo"))["configuration.nix"]
+    # nixpkgs' default initrd modules already carry hid_generic/usbhid (checked by nix eval)
+    assert 'boot.initrd.availableKernelModules = [ "nvme" "ahci" "xhci_pci" "usb_storage" "sd_mod" "usbhid" ];' in conf
+    assert "hid_generic" not in conf
+    assert "console.earlySetup = true;" in conf
+    assert "boot.initrd.luks.devices.crypted =" not in conf and "boot.resumeDevice =" not in conf  # disko sets both
+    plain = nixos.render(host(), Context("demo"))["configuration.nix"]
+    assert "hid_generic" not in plain and "earlySetup" not in plain and "tmpfiles" not in plain
+
+
+def test_tmpfiles_rules_for_owned_volumes_are_sorted():
+    def edit(r):
+        r["users"].append({"name": "bob", "ssh_authorized_keys": []})
+        r["nixos-disko"]["volumes"].insert(0, {"name": "zz", "mountpoint": "/srv/zz", "size": "1G", "owner": "bob"})
+
+    conf = nixos.render(luks_host(edit), Context("demo"))["configuration.nix"]
+    block = conf[conf.index("systemd.tmpfiles.rules = [") :].split("];", 1)[0].splitlines()[1:]
+    assert [line.strip() for line in block if line.strip()] == ['"d /srv/data 0750 ops users -"', '"d /srv/zz 0750 bob users -"']
+
+
+def test_luks_installer_announces_the_passphrase_prompt():
+    inst = nixos.render(luks_host(), Context("demo"))["installer.nix"]
+    echo = inst.index('echo "install-$host: disko will now ask for the new disk passphrase twice"')
+    assert inst.index('if [ "$answer" != "$expect" ]; then') < echo < inst.index("exec disko-install")
+    assert "passphrase" not in nixos.render(host(), Context("demo"))["installer.nix"]
+
+
+@pytest.fixture
+def luks_rendered(tmp_path):
+    for name, text in nixos.render(luks_host(), Context("demo")).items():
+        (tmp_path / name).write_text(text)
+    return tmp_path
+
+
+def test_clean_luks_render_validates(luks_rendered):
+    assert messages(nixos.validate(luks_rendered)) == []
+
+
+@pytest.mark.parametrize(
+    "name,edit,needle",
+    [
+        ("disko.nix", lambda t: t.replace('type = "luks";', 'type = "filesystem";'), "the luks partition is missing"),
+        ("disko.nix", lambda t: t.replace('name = "crypted";', 'name = "other";'), "the LUKS name crypted is missing"),
+        ("disko.nix", lambda t: t.replace("disko.devices.lvm_vg.pool = {", "disko.devices.lvm_vg.other = {"), "disko.devices.lvm_vg.pool is missing"),
+        ("disko.nix", lambda t: t.replace('vg = "pool";', 'vg = "other";'), "physical volume of volume group pool is missing"),
+        ("disko.nix", lambda t: t.replace(DISK, "/dev/disk/by-id/other"), "but disko.nix partitions"),
+        ("disko.nix", lambda t: t.replace("settings.allowDiscards = true;", 'passwordFile = "/tmp/secret.key";'), "passwordFile ="),
+        ("disko.nix", lambda t: t.replace("settings.allowDiscards = true;", 'settings.keyFile = "/tmp/secret.key";'), "keyFile ="),
+        ("configuration.nix", lambda t: t.replace("isNormalUser = true;", 'isNormalUser = true; password = "x";'), "password ="),
+        ("installer.nix", lambda t: t.replace("in\n{\n", 'in\n{\n  users.users.nixos.initialPassword = "x";\n'), "initialPassword ="),
+    ],
+)
+def test_broken_luks_files_are_caught(luks_rendered, name, edit, needle):
+    path = luks_rendered / name
+    text = path.read_text()
+    assert edit(text) != text
+    path.write_text(edit(text))
+    msgs = messages(nixos.validate(luks_rendered))
+    assert any(needle in m for m in msgs), msgs
+
+
+def test_luks_plan_lines():
+    lines = nixos.plan(luks_host(), Context("demo"))
+    install = lines.index("sudo install-demo")
+    warn = [i for i, line in enumerate(lines) if "asks TWICE for a NEW disk passphrase" in line]
+    assert warn and warn[0] < install and "cannot be recovered" in lines[warn[0] + 1] and "password manager" in lines[warn[0] + 1]
+    post = lines[install:]
+    for line in ("findmnt /", "findmnt /boot", "findmnt /srv/data", "findmnt /home", "swapon --show", "sudo cryptsetup status crypted", "sudo lvs", "cat /sys/power/disk"):
+        assert line in post, line
+    assert any("systemctl hibernate" in line for line in post) and "swap_size should be at least the RAM size" in " ".join(line.lstrip("# ") for line in post)
+    plain = nixos.plan(host(), Context("demo"))
+    assert not any("passphrase" in line or "cryptsetup" in line or "/sys/power" in line for line in plain)
+    no_hib = nixos.plan(luks_host(lambda r: r["nixos-disko"].update(hibernate=False)), Context("demo"))
+    assert "sudo lvs" in no_hib and "cat /sys/power/disk" not in no_hib
+
+
+def test_luks_plan_quotes_hostile_values(tmp_path):
+    spec = luks_host()
+    spec["nixos-disko"]["volumes"][0]["mountpoint"] = "/srv/x;reboot"
+    spec["nixos-disko"]["swap_size"] = "8G;reboot"
+    lines = plan_lines(nixos, spec, Context("demo"), "os-install/demo", tmp_path)
+    for line in lines:
+        if line and not line.startswith("#"):
+            assert "reboot" not in shlex.split(line), line
+    assert "findmnt '/srv/x;reboot'" in lines and any("'8G;reboot'" in line for line in lines)
+
+
+def test_luks_hostile_mountpoint_is_escaped_in_nix():
+    spec = luks_host()
+    spec["nixos-disko"]["volumes"][0]["mountpoint"] = '/srv/"${builtins.abort 1}"'
+    files = nixos.render(spec, Context("demo"))
+    assert 'mountpoint = "/srv/\\"\\${builtins.abort 1}\\"";' in files["disko.nix"]
+    assert '"d /srv/\\"\\${builtins.abort 1}\\" 0750 ops users -"' in files["configuration.nix"]
+
+
+def test_luks_example_cli_round_trip(capsys):
+    from conftest import EXAMPLES
+
+    root = str(EXAMPLES)
+    code, out, err = run(capsys, "--root", root, "validate", "os-install/demo-nixos-gnome-luks")
+    assert code == 0 and "ok: os-install/demo-nixos-gnome-luks" in out, err
+    assert run(capsys, "--root", root, "diff", "os-install/demo-nixos-gnome-luks")[0] == 0
+    code, out, _ = run(capsys, "--root", root, "plan", "os-install/demo-nixos-gnome-luks")
+    assert code == 0 and "sudo install-demo-nixos-gnome-luks" in out and "sudo cryptsetup status crypted" in out
+
+
+def test_starter_hints_for_the_new_keys_are_comments():
+    text = nixos.starter("demo")
+    for key in ("esp_size", "hibernate", "ext4-luks", "root_size", "[[nixos-disko.volumes]]", "mount_options", "owner"):
+        assert any(line.startswith("#") and key in line for line in text.splitlines()), key
+    assert "volumes" not in starter_raw()["nixos-disko"]
+
+
+# --- review round 1: reserved names and mount points, owners, secrets, the luks guard -------
+
+
+@pytest.mark.parametrize("name", ["snapshot", "snapshots", "snapshot-a", "pvmove", "pvmove1"])
+def test_lv_names_starting_with_lvm_reserved_prefixes_are_rejected(name):
+    findings = luks_findings(lambda r: vol(r, 0).update(name=name))
+    assert any(f.where == "nixos-disko.volumes[0].name" and "starting with snapshot or pvmove" in f.message for f in findings), findings
+
+
+@pytest.mark.parametrize("name", ["snap", "data-snapshot", "pv", "move"])
+def test_lv_names_merely_containing_the_prefixes_are_fine(name):
+    assert luks_findings(lambda r: vol(r, 0).update(name=name)) == []
+
+
+@pytest.mark.parametrize(
+    "mount", ["/", "/boot", "/boot/efi", "/nix", "/nix/store", "/proc", "/proc/x", "/sys", "/sys/fs", "/dev", "/dev/shm", "/run", "/run/user"]
+)
+def test_reserved_mount_trees_are_rejected(mount):
+    findings = luks_findings(lambda r: (vol(r, 0).pop("owner"), vol(r, 0).update(mountpoint=mount)))
+    assert any(f.where == "nixos-disko.volumes[0].mountpoint" and "is reserved" in f.message for f in findings), findings
+
+
+@pytest.mark.parametrize("mount", ["/bootstrap", "/nixos-data", "/devel", "/running", "/var/lib/data"])
+def test_mount_points_merely_sharing_a_prefix_are_fine(mount):
+    assert luks_findings(lambda r: (vol(r, 0).pop("owner"), vol(r, 0).update(mountpoint=mount))) == []
+
+
+@pytest.mark.parametrize("mount", ["/home", "/tmp", "/srv", "/opt", "/mnt", "/media", "/var", "/var/lib/x", "/etc", "/etc/x", "/usr", "/usr/local"])
+def test_owner_on_a_shared_system_directory_is_rejected(mount):
+    def edit(r):
+        vol(r, 1).update(mountpoint="/data")  # free /home for the parametrized volume
+        vol(r, 0).update(mountpoint=mount)
+
+    findings = luks_findings(edit)
+    assert any(f.where == "nixos-disko.volumes[0].owner" and "shared system directory" in f.message for f in findings), findings
+
+
+@pytest.mark.parametrize("mount", ["/srv/data", "/home/ops-data", "/data", "/opt/app"])
+def test_owner_below_a_shared_directory_is_fine(mount):
+    assert luks_findings(lambda r: vol(r, 0).update(mountpoint=mount)) == []
+
+
+def test_root_size_minimum():
+    findings = luks_findings(lambda r: r["nixos-disko"].update(root_size="4G"))
+    assert "root_size 4G is too small for a NixOS root; use at least 8G or 100%FREE" in messages(findings)
+    assert luks_findings(lambda r: r["nixos-disko"].update(root_size="8G")) == []
+    assert luks_findings(lambda r: r["nixos-disko"].update(root_size="8192M")) == []
+
+
+def test_luks2_is_pinned_and_discards_documented():
+    disko = nixos.render(luks_host(), Context("demo"))["disko.nix"]
+    assert 'extraFormatArgs = [ "--type" "luks2" ];' in disko
+    assert "settings.allowDiscards = true; # TRIM on SSDs; reveals which blocks are unused" in disko
+
+
+def test_esp_comment_carries_no_spec_value():
+    conf = nixos.render(luks_host(lambda r: r["nixos-disko"].update(esp_size="1G")), Context("demo"))["configuration.nix"]
+    assert "configurationLimit = 10; # keeps the ESP from filling up" in conf and "1G" not in conf
+    assert "# keeps the 512M ESP from filling up" in nixos.render(host(), Context("demo"))["configuration.nix"]
+
+
+def test_secret_names_inside_strings_and_comments_are_not_secrets(tmp_path):
+    spec = luks_host(lambda r: r["users"][0].update(gecos="Ops; password = x { keyFile = y"))
+    for name, text in nixos.render(spec, Context("demo")).items():
+        (tmp_path / name).write_text(text)
+    assert messages(nixos.validate(tmp_path)) == []
+    assert nixos._secret('# password = "x";\n  description = "a; passwordFile = b";\n') is None
+    assert nixos._secret('  passwordCheck == 1;\n') is None
+
+
+@pytest.mark.parametrize(
+    "text,name",
+    [
+        ("  additionalKeyFiles = [ ];\n", "additionalKeyFiles"),
+        ('  settings = { keyFile = "/tmp/k"; };\n', "keyFile"),
+        ('  settings = { allowDiscards = true; keyFile = "/tmp/k"; };\n', "keyFile"),
+        ('  luks.content.passwordFile = "/tmp/k";\n', "passwordFile"),
+        ('  users.users.x.initialPassword = "x";\n', "initialPassword"),
+        ('{ password = "x"; }\n', "password"),
+    ],
+)
+def test_secret_attributes_are_found(text, name):
+    assert nixos._secret(text) == name
+
+
+@pytest.mark.parametrize(
+    "name,edit,needle",
+    [
+        ("disko.nix", lambda t: t.replace('    type = "lvm_vg";', '    type = "other";'), "the lvm_vg type is missing"),
+        ("disko.nix", lambda t: t.replace('type = "EF00";', 'type = "EF02";'), "needs an EF00 ESP and no EF02"),
+        ("disko.nix", lambda t: t.replace('extraFormatArgs = [ "--type" "luks2" ];', "additionalKeyFiles = [ ];"), "additionalKeyFiles ="),
+        ("installer.nix", lambda t: t.replace("vgnames=$(vgs --noheadings -o vg_name) || refuse", "vgnames="), "the existing-VG check (vgs) is missing"),
+        ("installer.nix", lambda t: t.replace('if [ "$vg" = pool ]; then', "if false; then"), "the VG pool comparison is missing"),
+        ("installer.nix", lambda t: t.replace('if [ -e /dev/mapper/crypted ] || [ "$crypt_rc" = 0 ]; then', "if false; then"), "the open-crypted check is missing"),
+        ("installer.nix", lambda t: t.replace('elif [ "$crypt_rc" != 4 ]; then', "elif false; then"), "the fail-closed crypted status check is missing"),
+        ("installer.nix", lambda t: t.replace(" pkgs.lvm2 pkgs.cryptsetup", ""), "lvm2 and cryptsetup in runtimeInputs is missing"),
+    ],
+)
+def test_broken_luks_files_are_caught_round_1(luks_rendered, name, edit, needle):
+    path = luks_rendered / name
+    text = path.read_text()
+    assert edit(text) != text
+    path.write_text(edit(text))
+    msgs = messages(nixos.validate(luks_rendered))
+    assert any(needle in m for m in msgs), msgs
+
+
+def test_luks_guard_comes_before_the_confirmation():
+    inst = nixos.render(luks_host(), Context("demo"))["installer.nix"]
+    assert inst.index('done <<< "$vgnames"') < inst.index("read -r answer")
+    assert inst.index("cryptsetup status crypted") < inst.index("read -r answer")
+    assert "runtimeInputs = [ pkgs.coreutils pkgs.util-linux disko pkgs.lvm2 pkgs.cryptsetup ];" in inst
+    plain = nixos.render(host(), Context("demo"))["installer.nix"]
+    assert "vgs" not in plain and "runtimeInputs = [ pkgs.coreutils pkgs.util-linux disko ];" in plain
+    lines = nixos.plan(luks_host(), Context("demo"))
+    assert any("or /dev/mapper/crypted is open" in line for line in lines)
+
+
+def test_luks_script_proceeds_when_clean(script_env):
+    run_script, disk, _ = script_env
+    proc, args = run_script(layout="ext4-luks", STUB_VGS="  other\\n  data\\n")
+    assert proc.returncode == 0, proc.stderr
+    assert args == ["--write-efi-boot-entries", "--flake", "/nix/store/fake-install-flake#demo", "--disk", "main", disk]
+    assert "disko will now ask for the new disk passphrase twice" in proc.stdout
+
+
+def test_luks_script_refuses_an_existing_pool(script_env):
+    run_script, _, _ = script_env
+    proc, args = run_script(layout="ext4-luks", STUB_VGS="  other\\n  pool\\n")
+    assert proc.returncode == 1 and "volume group named pool already exists" in proc.stderr and args is None
+    assert "Type " not in proc.stdout  # refused before the confirmation prompt
+
+
+def test_luks_script_refuses_when_vgs_fails(script_env):
+    run_script, _, _ = script_env
+    proc, args = run_script(layout="ext4-luks", STUB_VGS_FAIL="1")
+    assert proc.returncode == 1 and "cannot list the LVM volume groups (vgs); refusing" in proc.stderr and args is None
+
+
+def test_luks_script_refuses_an_active_crypted_mapping(script_env):
+    run_script, _, _ = script_env
+    proc, args = run_script(layout="ext4-luks", STUB_CRYPT_OPEN="1")
+    assert proc.returncode == 1 and "/dev/mapper/crypted is already open" in proc.stderr and args is None
+
+
+def test_luks_script_refuses_an_existing_mapper_node(script_env, tmp_path):
+    run_script, _, _ = script_env
+    mapper = tmp_path / "mapper-crypted"
+    mapper.write_text("")
+    proc, args = run_script(layout="ext4-luks", STUB_MAPPER=str(mapper))
+    assert proc.returncode == 1 and "/dev/mapper/crypted is already open" in proc.stderr and args is None
+
+
+# --- review round 2: partition labels, cryptsetup exit codes, homes, plan wording ----------
+
+
+def test_script_refuses_a_disko_partlabel_on_another_disk(script_env, tmp_path):
+    run_script, _, _ = script_env
+    other = tmp_path / "other-disk"
+    proc, args = run_script(STUB_PARTS=f"{other}p1 disk-main-ESP\\n{other}p2 \\n")
+    assert proc.returncode == 1 and args is None
+    assert f"{other}p1 on disk {other} carries the partition label disk-main-ESP" in proc.stderr
+    assert "wipefs -a or sgdisk --zap-all on " + str(other) in proc.stderr and "Type " not in proc.stdout
+
+
+def test_script_accepts_disko_partlabels_on_the_target_disk(script_env, tmp_path):
+    run_script, disk, _ = script_env
+    other = tmp_path / "other-disk"
+    proc, args = run_script(STUB_PARTS=f"{disk}p1 disk-main-ESP\\n{disk}p2 disk-main-root\\n{other}p1 data\\n{other} \\n")
+    assert proc.returncode == 0, proc.stderr
+    assert args[-1] == disk
+
+
+def test_luks_script_refuses_a_foreign_disk_main_luks_label(script_env, tmp_path):
+    run_script, _, _ = script_env
+    proc, args = run_script(layout="ext4-luks", STUB_PARTS=f"{tmp_path / 'old'}p2 disk-main-luks\\n")
+    assert proc.returncode == 1 and "carries the partition label disk-main-luks" in proc.stderr and args is None
+
+
+def test_script_refuses_when_the_label_scan_fails(script_env):
+    run_script, _, _ = script_env
+    proc, args = run_script(STUB_FAIL="NAME,PARTLABEL")
+    assert proc.returncode == 1 and "cannot list the partition labels (lsblk); refusing" in proc.stderr and args is None
+
+
+@pytest.mark.parametrize("rc", ["1", "2", "5"])
+def test_luks_script_refuses_when_cryptsetup_cannot_answer(script_env, rc):
+    run_script, _, _ = script_env
+    proc, args = run_script(layout="ext4-luks", STUB_CRYPT_RC=rc)
+    assert proc.returncode == 1 and f"cannot query the LUKS mapping crypted (cryptsetup status exited {rc}); load device-mapper: modprobe dm_mod, then retry" in proc.stderr and args is None
+
+
+def test_partlabel_guard_is_rendered_for_every_layout():
+    for spec in (host(), host(lambda r: r.update(firmware="bios")), luks_host()):
+        inst = nixos.render(spec, Context("demo"))["installer.nix"]
+        scan = inst.index("parts=$(lsblk -nrpo NAME,PARTLABEL) || refuse")
+        assert scan < inst.index("read -r answer") < inst.index("exec disko-install")
+
+
+@pytest.mark.parametrize(
+    "spec_edit,edit,needle",
+    [
+        (None, lambda t: t.replace("parts=$(lsblk -nrpo NAME,PARTLABEL) || refuse", "parts="), "the partition-label scan is missing"),
+        (None, lambda t: t.replace("          disk-main-*)", "          nothing-*)"), "the disk-main-* label match is missing"),
+        (None, lambda t: t.replace('if [ "$o" != "$dev" ]; then', "if false; then"), "the foreign-disk label refusal is missing"),
+        (
+            None,
+            lambda t: t.replace('      parts=$(lsblk -nrpo NAME,PARTLABEL) || refuse "cannot list the partition labels (lsblk)"\n', "").replace(
+                '--disk main "$disk"\n', '--disk main "$disk"\n      parts=$(lsblk -nrpo NAME,PARTLABEL) || refuse "x"\n'
+            ),
+            "the partition-label scan comes after exec disko-install",
+        ),
+        (
+            _luks_raw,
+            lambda t: t.replace('      elif [ "$crypt_rc" != 4 ]; then\n', "").replace('--disk main "$disk"\n', '--disk main "$disk"\n      elif [ "$crypt_rc" != 4 ]; then\n'),
+            "layout ext4-luks: the fail-closed crypted status check comes after exec disko-install",
+        ),
+    ],
+)
+def test_validate_requires_the_guards_before_disko_install(tmp_path, spec_edit, edit, needle):
+    for name, text in nixos.render(host(spec_edit), Context("demo")).items():
+        (tmp_path / name).write_text(text)
+    path = tmp_path / "installer.nix"
+    text = path.read_text()
+    assert edit(text) != text
+    path.write_text(edit(text))
+    msgs = messages(nixos.validate(tmp_path))
+    assert any(needle in m for m in msgs), msgs
+
+
+@pytest.mark.parametrize("mount", ["/var/run", "/var/run/x", "/var/lock", "/var/lock/subsys"])
+def test_var_run_and_var_lock_are_reserved(mount):
+    findings = luks_findings(lambda r: (vol(r, 0).pop("owner"), vol(r, 0).update(mountpoint=mount)))
+    assert any(f.where == "nixos-disko.volumes[0].mountpoint" and "is reserved" in f.message for f in findings), findings
+
+
+@pytest.mark.parametrize("mount", ["/root", "/root/x", "/bin", "/lib", "/lib64", "/lib64/x", "/sbin"])
+def test_owner_on_system_binary_and_root_dirs_is_rejected(mount):
+    findings = luks_findings(lambda r: vol(r, 0).update(mountpoint=mount))
+    assert any(f.where == "nixos-disko.volumes[0].owner" and "shared system directory" in f.message for f in findings), findings
+
+
+def test_owner_on_a_users_home_is_rejected():
+    def edit(r):
+        vol(r, 1).update(mountpoint="/data")
+        vol(r, 0).update(mountpoint="/home/ops")
+
+    findings = luks_findings(edit)
+    assert any(f.where == "nixos-disko.volumes[0].owner" and "that is the home of user 'ops'" in f.message and "0700" in f.message for f in findings), findings
+    assert luks_findings(lambda r: (vol(r, 1).update(mountpoint="/data"), vol(r, 0).update(mountpoint="/home/someone"))) == []
+
+
+def test_plan_findmnt_one_mount_point_per_line():
+    lines = nixos.plan(host(), Context("demo"))
+    assert "findmnt /" in lines and "findmnt /boot" in lines and not any(line.startswith("findmnt / ") for line in lines)
+    assert "findmnt /boot" not in nixos.plan(host(lambda r: r.update(firmware="bios")), Context("demo"))
+
+
+def test_plan_wording_for_retries_and_cleanup():
+    joined = " ".join(line.lstrip("# ") for line in nixos.plan(luks_host(), Context("demo")))
+    assert "disko exits after the disk was already wiped and partitioned: run sudo install-demo again" in joined
+    assert "must fit the disk" in joined
+    assert "vgchange -an pool   then   cryptsetup close crypted (in that order)" in joined
+    assert "vgrename pool" in joined and "try again" not in joined
+    plain = " ".join(line.lstrip("# ") for line in nixos.plan(host(), Context("demo")))
+    assert "disk-main-*" in plain and "sgdisk --zap-all on THAT disk" in plain
+
+
+def test_rendered_names_that_spell_secret_keywords_are_not_secrets(tmp_path):
+    def edit(r):
+        r["users"].append({"name": "password", "ssh_authorized_keys": []})
+        r["users"].append({"name": "keyfile", "ssh_authorized_keys": []})
+        vol(r, 0).update(name="keyfile", owner="password")
+        r["nixos-disko"]["volumes"].append({"name": "password", "mountpoint": "/srv/p", "size": "1G"})
+
+    files = nixos.render(luks_host(edit), Context("demo"))
+    assert "users.users.password = {" in files["configuration.nix"] and "      password = {" in files["disko.nix"]
+    for name, text in files.items():
+        (tmp_path / name).write_text(text)
+    assert messages(nixos.validate(tmp_path)) == []
+    assert nixos._secret("  users.users.password = {\n") is None and nixos._secret("  keyFile = {\n") is None
+    assert nixos._secret('  users.users.password.password = "x";\n') == "password"
+
+
+# --- review round 3: positive label ownership, inner lsblk failure, derived wording --------
+
+
+def test_script_refuses_a_label_on_a_loop_device_that_is_not_the_target(script_env, tmp_path):
+    run_script, _, _ = script_env
+    loop = tmp_path / "loop7"
+    proc, args = run_script(STUB_PARTS=f"{loop}p1 disk-main-root\\n", STUB_PART_ANCESTORS=f"{loop}p1 part\\n{loop} loop\\n")
+    assert proc.returncode == 1 and f"on disk {loop} carries the partition label disk-main-root" in proc.stderr and args is None
+
+
+def test_script_refuses_a_label_without_a_disk_or_loop_ancestor(script_env):
+    run_script, disk, _ = script_env
+    proc, args = run_script(STUB_PARTS="/dev/mapper/odd disk-main-ESP\\n", STUB_PART_ANCESTORS="/dev/mapper/odd crypt\\n")
+    assert proc.returncode == 1 and args is None
+    assert f"/dev/mapper/odd carries the partition label disk-main-ESP but does not sit on {disk}" in proc.stderr
+
+
+def test_script_accepts_a_label_whose_ancestor_is_the_target(script_env):
+    run_script, disk, _ = script_env
+    proc, args = run_script(STUB_PARTS=f"{disk}p1 disk-main-ESP\\n", STUB_PART_ANCESTORS=f"{disk}p1 part\\n{disk} disk\\n")
+    assert proc.returncode == 0, proc.stderr
+    assert args[-1] == disk
+
+
+def test_script_refuses_when_the_label_disk_lookup_fails(script_env, tmp_path):
+    run_script, _, _ = script_env
+    proc, args = run_script(STUB_PARTS=f"{tmp_path / 'x'}p1 disk-main-ESP\\n", STUB_PART_FAIL="1")
+    assert proc.returncode == 1 and f"cannot read the disk under {tmp_path / 'x'}p1; refusing" in proc.stderr and args is None
+
+
+def test_on_target_requirement_is_validated(rendered):
+    path = rendered / "installer.nix"
+    path.write_text(path.read_text().replace('if [ "$on_target" != 1 ]; then', "if false; then"))
+    assert any("the on-target label requirement is missing" in m for m in messages(nixos.validate(rendered)))
+
+
+def test_reserved_and_shared_wording_follows_the_lists():
+    vols = nixos.SCHEMA["properties"]["volumes"]["items"]["properties"]
+    for tree in nixos.RESERVED_MOUNT_TREES:
+        assert tree in vols["mountpoint"]["description"]
+    for path in nixos.SHARED_DIRS + nixos.SHARED_TREES:
+        assert path in vols["owner"]["description"]
+    assert "/home/<name>" in vols["owner"]["description"]
+    findings = luks_findings(lambda r: (vol(r, 0).pop("owner"), vol(r, 0).update(mountpoint="/var/lock")))
+    assert any(f"is reserved: not {nixos._RESERVED_TEXT}" in f.message for f in findings)

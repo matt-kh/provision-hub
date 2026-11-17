@@ -191,6 +191,7 @@ def test_list_examples(capsys):
         "os-install/demo-lvm\tubuntu-autoinstall",
         "os-install/demo-mdraid\tubuntu-autoinstall",
         "os-install/demo-nixos-ext4\tnixos-disko",
+        "os-install/demo-nixos-gnome-luks\tnixos-disko",
         "os-install/demo-zfs\tubuntu-autoinstall",
     ]
 

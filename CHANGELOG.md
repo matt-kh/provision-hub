@@ -20,9 +20,36 @@ may change incompatibly; every such change has a Migration paragraph. See
   when nix is installed; `plan` prints lock, ISO build, USB write and install steps. Static
   validation only: the example was locked and `nix eval`-ed, never installed. Example
   `examples/os-install/demo-nixos-ext4/`; docs in `docs/backends/nixos-disko.md`.
+- nixos-disko: layout `ext4-luks` (UEFI only): an ESP and one LUKS partition (`crypted`,
+  discards allowed) holding LVM volume group `pool` with an optional swap LV, an ext4 root
+  LV of `root_size` and ext4 `volumes` (`name`, `mountpoint`, `size`, `mount_options`,
+  `owner`; exactly one of them or the root is `100%FREE`, created last by disko's LV
+  priority), LUKS2 pinned with `--type luks2`. No key or password file: disko asks for the
+  passphrase twice at install time (the install script and `plan` warn first). The install
+  script refuses while any volume group `pool` or open `/dev/mapper/crypted` exists:
+  another disk's would be reused by disko, and a leftover on the target disk must be
+  closed first (`vgchange -an pool`, then `cryptsetup close crypted`). New keys `esp_size` (default `512M`, at
+  least 256M), `hibernate` (`resumeDevice` on the swap device; needs `swap_size`),
+  `root_size` and `volumes`; an `owner` makes the mount point the user's through
+  `systemd.tmpfiles.rules`. `validate` checks the LUKS/LVM structure and refuses rendered
+  key files, password files or passwords. Example
+  `examples/os-install/demo-nixos-gnome-luks/` (locked and `nix eval`-ed only, never built
+  or installed). Existing specs render unchanged apart from the install
+  script's partition-label guard (see Security).
 - Backend contract: optional `PRESERVE`, relative paths of human-created regular files in
   `rendered/` that `render` keeps and `diff`/`validate` do not report as stale (used for
   nixos-disko's `flake.lock`).
+
+### Security
+
+- nixos-disko: `install-<hostname>` (every layout) refuses, before the serial prompt, while
+  another disk carries a `disk-main-*` GPT partition label; disko addresses its partitions
+  by these labels and skips formatting a partition that already has a file system, so a
+  leftover label could capture `/boot`, `/` or the LUKS device at install and boot time.
+  This changes the rendered `installer.nix` of existing nixos-disko items (golden
+  `demo-nixos-ext4`): re-render them (`prov render`), since `validate` now requires the
+  guard. `plan` now prints one `findmnt` line per mount point and warns about foreign
+  `disk-main-*` labels before the install step.
 
 ### Changed
 
