@@ -31,6 +31,7 @@ PROPERTIES: Dict[str, Any] = {
     "users": {"type": "array", "description": "Local users; backends without local users ignore or reject them.", "items": {"$ref": "#/$defs/user"}, "default": []},
     "network": {
         "type": "object",
+        "description": "Optional; backends say when they need it.",
         "additionalProperties": False,
         "required": ["interfaces"],
         "properties": {
@@ -60,16 +61,16 @@ PROPERTIES: Dict[str, Any] = {
     },
 }
 
-REQUIRED = ["hostname", "network", "storage"]
+REQUIRED = ["hostname", "storage"]
 
 # Cross-spec references (reserved; none yet).
 REFS: Dict[str, Any] = {}
 
 
-def semantic(spec: Dict[str, Any]) -> List[Finding]:
-    """Checks JSON Schema cannot express (addresses, cross-field rules)."""
+def _network(network: Dict[str, Any]) -> List[Finding]:
+    """Interface and nameserver checks of a present ``[network]`` table."""
     out: List[Finding] = []
-    ifaces = spec["network"]["interfaces"]
+    ifaces = network["interfaces"]
     names = [i["name"] for i in ifaces]
     for dup in sorted({n for n in names if names.count(n) > 1}):
         out.append(Finding(ERROR, f"interface {short_repr(dup)} defined more than once", "network.interfaces"))
@@ -98,12 +99,19 @@ def semantic(spec: Dict[str, Any]) -> List[Finding]:
                 out.append(Finding(WARNING, f"no static IPv{version} address on this interface", f"{where}.{key}"))
         if not iface["addresses"] and not iface["dhcp4"] and not iface["dhcp6"]:
             out.append(Finding(ERROR, "no addresses and DHCP disabled; the interface would stay down", where))
-    for s, server in enumerate(spec["network"]["dns"]["nameservers"]):
+    for s, server in enumerate(network["dns"]["nameservers"]):
         try:
             ipaddress.ip_address(server)
         except ValueError:
             out.append(Finding(ERROR, f"{short_repr(server)} is not an IP address", f"network.dns.nameservers[{s}]"))
+    return out
 
+
+def semantic(spec: Dict[str, Any]) -> List[Finding]:
+    """Checks JSON Schema cannot express (addresses, cross-field rules)."""
+    out: List[Finding] = []
+    if "network" in spec:
+        out += _network(spec["network"])
     users = [u["name"] for u in spec["users"]]
     for dup in sorted({n for n in users if users.count(n) > 1}):
         out.append(Finding(ERROR, f"user {short_repr(dup)} defined more than once", "users"))

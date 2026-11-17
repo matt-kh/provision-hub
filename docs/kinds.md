@@ -92,15 +92,17 @@ Authoritative schema: [schema/os-install.v1alpha1.schema.json](../schema/os-inst
 | `locale` | POSIX locale (`en_US.UTF-8`) | |
 | `keyboard` | layout (`us`) | |
 | `[[users]]` | list of `#/$defs/user` (`[]`) | `name`, `gecos`, `groups`, `shell`, `sudo`, `ssh_authorized_keys`, `password_hash` (crypt hash only) |
-| `[network]` | required | `interfaces` (≥ 1 `#/$defs/interface`), `dns.nameservers`, `dns.search` |
+| `[network]` | optional | `interfaces` (≥ 1 `#/$defs/interface` when the table is present), `dns.nameservers`, `dns.search`; backends say in `check` when they need it (`ubuntu-autoinstall` always, `nixos-disko` with `networking = "networkd"`) |
 | `[storage]` | required | `disks`: whole-disk device paths; the first is the boot disk; all may be wiped |
 
 Semantic checks: addresses in CIDR form, gateways and nameservers are IPs of the right
-family, interface and user names unique, every interface has an address or DHCP.
+family, interface and user names unique, every interface has an address or DHCP (the
+network checks only when `[network]` is present).
 
 Backends: `ubuntu-autoinstall` (Ubuntu Server 22.04/24.04 NoCloud seed; layouts `lvm`,
 `zfs`, `mdraid`), `nixos-disko` (NixOS flake with disko and an offline USB installer; layout
-`ext4`; [backends/nixos-disko.md](backends/nixos-disko.md)). Candidates: Proxmox VE answer
+`ext4`, `ext4-luks`; systemd-networkd or NetworkManager, optional GNOME;
+[backends/nixos-disko.md](backends/nixos-disko.md)). Candidates: Proxmox VE answer
 files, Talos machine configs.
 
 ## Planned kinds (sketches, not implemented)

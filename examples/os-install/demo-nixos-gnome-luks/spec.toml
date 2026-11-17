@@ -1,0 +1,52 @@
+# NixOS desktop on one encrypted disk with disko (ext4 on LVM on LUKS, UEFI, hibernation),
+# GNOME and NetworkManager: no [network]; connections (Wi-Fi) are made on the machine.
+# Synthetic values only; the sizes are illustrative, not those of any real machine.
+api_version = "prov/v1alpha1"
+kind = "os-install"
+backend = "nixos-disko"
+hostname = "demo-nixos-gnome-luks"
+domain = "example.com"
+arch = "amd64"
+firmware = "uefi"
+timezone = "Etc/UTC"
+locale = "en_US.UTF-8"
+keyboard = "us"
+
+[[users]]
+name = "alice"
+gecos = "Alice Example"
+groups = ["wheel"]
+sudo = false
+password_hash = "$6$EXAMPLEsalt$EXAMPLEhashEXAMPLEhashEXAMPLEhashEXAMPLEhashEXAMPLEhashEXAMPLEhash0123456789"
+ssh_authorized_keys = [
+  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE alice@example.com",
+]
+
+[storage]
+# The one disk disko-install wipes and encrypts; an obviously fake by-id serial.
+disks = ["/dev/disk/by-id/nvme-EXAMPLE_SSD_SERIAL_0000000001"]
+
+[nixos-disko]
+release = "nixos-26.05"
+state_version = "26.05"
+layout = "ext4-luks"
+esp_size = "1G"
+swap_size = "8G"     # at least the RAM size, for hibernation
+hibernate = true
+root_size = "64G"
+packages = ["git", "vim"]
+cpu_vendor = "amd"
+networking = "networkmanager"
+desktop = "gnome"
+
+[[nixos-disko.volumes]]
+name = "data"
+mountpoint = "/srv/data"
+size = "200G"
+mount_options = ["noatime", "nodev", "nosuid", "noexec"]
+owner = "alice"
+
+[[nixos-disko.volumes]]
+name = "home"
+mountpoint = "/home"
+size = "100%FREE"

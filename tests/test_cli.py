@@ -85,7 +85,7 @@ def test_validate_reports_invalid_spec_with_exit_1(tmp_path, capsys):
     path.parent.mkdir(parents=True)
     path.write_text('api_version = "prov/v1alpha1"\nkind = "os-install"\nbackend = "ubuntu-autoinstall"\nhostname = "demo"\n')
     code, _, err = run(capsys, "--root", str(tmp_path), "validate", "os-install/demo")
-    assert code == 1 and "missing required key 'network'" in err
+    assert code == 1 and "missing required key 'storage'" in err
 
 
 def test_validate_legacy_host_file_exits_2(tmp_path, capsys):
@@ -191,6 +191,7 @@ def test_list_examples(capsys):
         "os-install/demo-lvm\tubuntu-autoinstall",
         "os-install/demo-mdraid\tubuntu-autoinstall",
         "os-install/demo-nixos-ext4\tnixos-disko",
+        "os-install/demo-nixos-gnome-luks\tnixos-disko",
         "os-install/demo-zfs\tubuntu-autoinstall",
     ]
 

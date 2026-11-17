@@ -2,7 +2,8 @@
 
 Renders ``flake.nix`` (nixpkgs + disko inputs; outputs ``nixosConfigurations.<host>`` and
 ``nixosConfigurations.<host>-installer``), ``configuration.nix`` (the target system),
-``disko.nix`` (GPT, ESP or BIOS boot partition, optional swap, ext4 root) and
+``disko.nix`` (GPT, ESP or BIOS boot partition, then optional swap and an ext4 root, or
+for ``ext4-luks`` LVM inside LUKS with swap, root and extra volumes) and
 ``installer.nix`` (minimal installer ISO carrying the target closure and an
 ``install-<host>`` command that checks the disk, then asks for the last 4 characters of its
 serial, or the hostname when it reports none, before it wipes the disk).
@@ -45,6 +46,22 @@ FILES = ("configuration.nix", "disko.nix", "flake.nix", "installer.nix")
 HW_COPY = "hardware-configuration.installer-copy.nix"
 
 _ATTR = "[A-Za-z_][A-Za-z0-9_-]*"
+_SIZE = "[1-9][0-9]*[MG]"
+# A volume may not be mounted at / or at or below these (ESP, Nix store, kernel/runtime trees).
+RESERVED_MOUNT_TREES = ("/boot", "/nix", "/proc", "/sys", "/dev", "/run", "/var/run", "/var/lock")
+# An owner may not take over a shared system directory: these exactly, and anything at or
+# below the trees (a directory below /srv or /home, such as /srv/data, is fine).
+SHARED_DIRS = ("/home", "/tmp", "/srv", "/opt", "/mnt", "/media")
+SHARED_TREES = ("/var", "/etc", "/usr", "/root", "/bin", "/lib", "/lib64", "/sbin")
+
+
+def _paths(paths: tuple) -> str:
+    return ", ".join(paths)
+
+
+# One wording for the schema descriptions and the findings, built from the lists above.
+_RESERVED_TEXT = f"/, nor {_paths(RESERVED_MOUNT_TREES)} or anything below them"
+_SHARED_TEXT = f"{_paths(SHARED_DIRS)} themselves, or {_paths(SHARED_TREES)} and anything below them"
 
 SCHEMA: Dict[str, Any] = {
     "type": "object",
@@ -63,14 +80,71 @@ SCHEMA: Dict[str, Any] = {
             "description": "system.stateVersion: the release first installed; never change it afterwards.",
         },
         "layout": {
-            "enum": ["ext4"],
+            "enum": ["ext4", "ext4-luks"],
             "default": "ext4",
-            "description": "Disk layout. ext4: GPT on one disk with an ESP (UEFI) or BIOS boot partition, optional swap and an ext4 root.",
+            "description": (
+                "Disk layout. ext4: GPT on one disk with an ESP (UEFI) or BIOS boot partition, optional swap and an ext4 root. "
+                "ext4-luks (UEFI only): an ESP and one LUKS2 partition holding LVM volume group 'pool' with optional swap, "
+                "an ext4 root and the ext4 volumes; the passphrase is typed at install time and at every boot."
+            ),
         },
         "swap_size": {
             "type": "string",
-            "pattern": "^[1-9][0-9]*[MG]$",
-            "description": "Optional swap partition size (e.g. 8G); no swap partition when absent.",
+            "pattern": f"^{_SIZE}$",
+            "description": "Optional swap size (e.g. 8G): a partition (ext4) or a logical volume (ext4-luks); no swap when absent.",
+        },
+        "esp_size": {
+            "type": "string",
+            "pattern": f"^{_SIZE}$",
+            "default": "512M",
+            "description": "Size of the EFI system partition mounted at /boot (UEFI only, at least 256M; leave the default on BIOS).",
+        },
+        "hibernate": {
+            "type": "boolean",
+            "default": False,
+            "description": "Resume from hibernation on the swap device (boot.resumeDevice); needs swap_size, at least the RAM size.",
+        },
+        "root_size": {
+            "type": "string",
+            "pattern": f"^({_SIZE}|100%FREE)$",
+            "default": "100%FREE",
+            "description": "ext4-luks: size of the root logical volume (at least 8G), or 100%FREE for the space left. Exactly one of root and volumes takes 100%FREE.",
+        },
+        "volumes": {
+            "type": "array",
+            "default": [],
+            "description": "ext4-luks: extra ext4 logical volumes in volume group 'pool', each mounted at its mountpoint.",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["name", "mountpoint", "size"],
+                "properties": {
+                    "name": {"type": "string", "pattern": "^[a-z][a-z0-9-]*$", "maxLength": 32, "description": "Logical volume name: unique, not root or swap, not starting with snapshot or pvmove."},
+                    "mountpoint": {
+                        "type": "string",
+                        "pattern": "^/[A-Za-z0-9._/-]*$",
+                        "maxLength": 255,
+                        "description": f"Absolute, normalised, unique mount point; not {_RESERVED_TEXT}.",
+                    },
+                    "size": {"type": "string", "pattern": f"^({_SIZE}|100%FREE)$", "description": "Size (e.g. 200G) or 100%FREE for the space left."},
+                    "mount_options": {
+                        "type": "array",
+                        "default": [],
+                        "description": "ext4 mount options, one per item (e.g. noatime, nodev, nosuid, noexec).",
+                        "items": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.=:+-]*$", "maxLength": 64},
+                        "uniqueItems": True,
+                    },
+                    "owner": {
+                        "type": "string",
+                        "pattern": "^[a-z_][a-z0-9_-]{0,31}$",
+                        "description": (
+                            "A [[users]] name: the mount point becomes owned by this user (group users, mode 0750) via "
+                            f"systemd-tmpfiles. Not on a shared system directory ({_SHARED_TEXT}) and not on a declared "
+                            "user's home /home/<name> (NixOS keeps it at mode 0700)."
+                        ),
+                    },
+                },
+            },
         },
         "packages": {
             "type": "array",
@@ -80,11 +154,35 @@ SCHEMA: Dict[str, Any] = {
             "default": [],
         },
         "cpu_vendor": {"enum": ["intel", "amd"], "description": "Enables the CPU microcode updates of this vendor."},
+        "networking": {
+            "enum": ["networkd", "networkmanager"],
+            "default": "networkd",
+            "description": (
+                "networkd: systemd-networkd rendered from [network] (required). networkmanager: NetworkManager, "
+                "connections (Wi-Fi included) made on the machine with nmtui, nmcli or GNOME Settings; [network] is not allowed."
+            ),
+        },
+        "desktop": {
+            "enum": ["none", "gnome"],
+            "default": "none",
+            "description": "none: no graphical desktop. gnome: GNOME on Wayland with GDM; needs networking = networkmanager and release nixos-25.11 or newer.",
+        },
     },
 }
 
-ESP_SIZE = "512M"
+ESP_MIN_MIB = 256
 BIOS_BOOT_SIZE = "1M"
+FREE = "100%FREE"
+LUKS_NAME = "crypted"  # /dev/mapper/crypted; boot.initrd.luks.devices.crypted (set by disko)
+VG_NAME = "pool"
+# Logical volume names prov uses itself; LVM rejects names starting with these prefixes.
+RESERVED_LVS = frozenset({"root", "swap"})
+RESERVED_LV_PREFIXES = ("snapshot", "pvmove")
+ESP_DEFAULT = "512M"
+# First release with services.displayManager.gdm / services.desktopManager.gnome (moved out
+# of services.xserver in NixOS 25.11).
+GNOME_MIN_RELEASE = "25.11"
+ROOT_MIN_MIB = 8 * 1024
 BY_ID = "/dev/disk/by-id/"
 INITRD_MODULES = ("nvme", "ahci", "xhci_pci", "usb_storage", "sd_mod", "usbhid")
 SYSTEMS = {"amd64": "x86_64-linux", "arm64": "aarch64-linux"}
@@ -125,7 +223,138 @@ def _shell(path: str) -> Optional[str]:
     raise ValueError(path)
 
 
+def _mib(size: str) -> int:
+    """MiB in a schema size such as ``512M`` or ``1G``."""
+    return int(size[:-1]) * (1024 if size.endswith("G") else 1)
+
+
+def _at_or_below(path: str, trees: tuple) -> bool:
+    return any(path == t or path.startswith(t + "/") for t in trees)
+
+
 # --- contract: check ----------------------------------------------------------------------
+
+
+def _check_storage(spec: Dict[str, Any]) -> List[Finding]:
+    """Layout rules: ESP size, hibernation, ext4-luks firmware, root_size and volumes."""
+    out: List[Finding] = []
+    nixos = spec[NAME]
+    luks = nixos["layout"] == "ext4-luks"
+    if spec["firmware"] == "uefi" and _mib(nixos["esp_size"]) < ESP_MIN_MIB:
+        out.append(Finding(ERROR, f"esp_size {nixos['esp_size']} is too small; use at least {ESP_MIN_MIB}M", f"{NAME}.esp_size"))
+    if spec["firmware"] != "uefi" and nixos["esp_size"] != ESP_DEFAULT:
+        out.append(Finding(ERROR, "esp_size applies to firmware 'uefi' only; BIOS uses a 1M BIOS boot partition", f"{NAME}.esp_size"))
+    if nixos["hibernate"] and "swap_size" not in nixos:
+        out.append(Finding(ERROR, "hibernate needs swap_size (at least the RAM size) to resume from", f"{NAME}.hibernate"))
+    if luks and spec["firmware"] != "uefi":
+        out.append(
+            Finding(
+                ERROR,
+                "layout 'ext4-luks' needs firmware 'uefi': it keeps /boot on an unencrypted ESP; "
+                "GRUB unlocking an encrypted /boot (cryptodisk) is not supported",
+                "firmware",
+            )
+        )
+    if not luks:
+        if nixos["root_size"] != FREE:
+            out.append(Finding(ERROR, "root_size applies to layout 'ext4-luks' only; the ext4 root takes the rest of the disk", f"{NAME}.root_size"))
+        if nixos["volumes"]:
+            out.append(Finding(ERROR, "volumes need layout 'ext4-luks' (logical volumes); layout 'ext4' has a single root partition", f"{NAME}.volumes"))
+        return out
+    if nixos["root_size"] != FREE and _mib(nixos["root_size"]) < ROOT_MIN_MIB:
+        out.append(Finding(ERROR, f"root_size {nixos['root_size']} is too small for a NixOS root; use at least 8G or {FREE}", f"{NAME}.root_size"))
+    free = (["root"] if nixos["root_size"] == FREE else []) + [v["name"] for v in nixos["volumes"] if v["size"] == FREE]
+    if len(free) != 1:
+        which = "none does" if not free else "several do: " + ", ".join(short_repr(n) for n in free)
+        out.append(Finding(ERROR, f"exactly one of root_size and the volumes' size must be {FREE} (the space left); {which}", f"{NAME}.volumes"))
+    users = {u["name"] for u in spec["users"]}
+    homes = {f"/home/{u}": u for u in sorted(users)}
+    names: Dict[str, int] = {}
+    mounts: Dict[str, int] = {}
+    for i, vol in enumerate(nixos["volumes"]):
+        where = f"{NAME}.volumes[{i}]"
+        name, mount = vol["name"], vol["mountpoint"]
+        if name in RESERVED_LVS or name.startswith(RESERVED_LV_PREFIXES):
+            out.append(Finding(ERROR, f"volume name {short_repr(name)} is reserved (root, swap, or starting with snapshot or pvmove)", f"{where}.name"))
+        elif name in names:
+            out.append(Finding(ERROR, f"volume name {short_repr(name)} is already used by volumes[{names[name]}]", f"{where}.name"))
+        names.setdefault(name, i)
+        parts = mount.split("/")[1:]
+        if mount != "/" and (mount.endswith("/") or any(p in ("", ".", "..") for p in parts)):
+            out.append(Finding(ERROR, f"mountpoint {short_repr(mount)} is not normalised (no //, trailing /, . or ..)", f"{where}.mountpoint"))
+        elif mount == "/" or _at_or_below(mount, RESERVED_MOUNT_TREES):
+            out.append(
+                Finding(ERROR, f"mountpoint {short_repr(mount)} is reserved: not {_RESERVED_TEXT}", f"{where}.mountpoint")
+            )
+        elif mount in mounts:
+            out.append(Finding(ERROR, f"mountpoint {short_repr(mount)} is already used by volumes[{mounts[mount]}]", f"{where}.mountpoint"))
+        mounts.setdefault(mount, i)
+        if "owner" in vol and vol["owner"] not in users:
+            out.append(Finding(ERROR, f"owner {short_repr(vol['owner'])} is not a [[users]] name", f"{where}.owner"))
+        elif "owner" in vol and mount in homes:
+            out.append(
+                Finding(
+                    ERROR,
+                    f"owner on {short_repr(mount)}: that is the home of user {short_repr(homes[mount])}, which NixOS creates and "
+                    "keeps at mode 0700 (users.users.<name>.homeMode); a 0750 tmpfiles rule would fight it. Drop owner, or "
+                    "mount the volume elsewhere",
+                    f"{where}.owner",
+                )
+            )
+        elif "owner" in vol and (mount in SHARED_DIRS or _at_or_below(mount, SHARED_TREES)):
+            out.append(
+                Finding(
+                    ERROR,
+                    f"owner on {short_repr(mount)}: a shared system directory ({_SHARED_TEXT}) may not belong to one "
+                    "user; mount the volume below it instead (e.g. /srv/data)",
+                    f"{where}.owner",
+                )
+            )
+    return out
+
+
+def _check_networking(spec: Dict[str, Any]) -> List[Finding]:
+    """networking (networkd needs [network], NetworkManager refuses it) and desktop rules."""
+    out: List[Finding] = []
+    nixos = spec[NAME]
+    nm = nixos["networking"] == "networkmanager"
+    if not nm and "network" not in spec:
+        out.append(
+            Finding(
+                ERROR,
+                "networking 'networkd' needs [network] with at least one interface; "
+                'on a machine that joins networks interactively set networking = "networkmanager"',
+                "network",
+            )
+        )
+    if nm and "network" in spec:
+        out.append(
+            Finding(
+                ERROR,
+                "[network] is not used with networking 'networkmanager' (connections are made on the machine with "
+                'nmtui or nmcli); remove it or set networking = "networkd"',
+                "network",
+            )
+        )
+    if nixos["desktop"] == "gnome":
+        if not any("password_hash" in u for u in spec["users"]):
+            out.append(
+                Finding(WARNING, "desktop 'gnome' but no user has password_hash: nobody can log in at the GDM login screen (ssh keys only work over ssh)", "users")
+            )
+        if not nm:
+            out.append(
+                Finding(ERROR, 'desktop \'gnome\' needs networking = "networkmanager" (GNOME manages connections through NetworkManager)', f"{NAME}.desktop")
+            )
+        if nixos["release"][len("nixos-"):] < GNOME_MIN_RELEASE:
+            out.append(
+                Finding(
+                    ERROR,
+                    f"desktop 'gnome' needs release nixos-{GNOME_MIN_RELEASE} or newer (its GDM and GNOME options moved out of "
+                    f"services.xserver there); got {nixos['release']}",
+                    f"{NAME}.release",
+                )
+            )
+    return out
 
 
 def check(spec: Dict[str, Any], ctx: Any) -> List[Finding]:
@@ -133,14 +362,16 @@ def check(spec: Dict[str, Any], ctx: Any) -> List[Finding]:
     out: List[Finding] = []
     nixos = spec[NAME]
     disks = spec["storage"]["disks"]
-    if nixos["layout"] == "ext4" and len(disks) != 1:
-        out.append(Finding(ERROR, f"layout 'ext4' installs to exactly one disk, got {len(disks)}", "storage.disks"))
+    if len(disks) != 1:
+        out.append(Finding(ERROR, f"layout {nixos['layout']!r} installs to exactly one disk, got {len(disks)}", "storage.disks"))
+    out += _check_storage(spec)
     for d, disk in enumerate(disks):
         if not disk.startswith(BY_ID) or "/../" in disk or "/./" in disk or disk.endswith(("/..", "/.")):
             out.append(
                 Finding(WARNING, f"{short_repr(disk)} is not a plain {BY_ID} path; kernel names like /dev/sda can change between boots", f"storage.disks[{d}]")
             )
-    for i, iface in enumerate(spec["network"]["interfaces"]):
+    out += _check_networking(spec)
+    for i, iface in enumerate(spec.get("network", {}).get("interfaces", [])):
         if "macaddress" not in iface and re.fullmatch(r"eth[0-9]+", iface["name"]):
             out.append(
                 Finding(
@@ -233,6 +464,13 @@ def flake_nix(spec: Dict[str, Any]) -> str:
 
 
 def _network(spec: Dict[str, Any]) -> List[str]:
+    if spec[NAME]["networking"] == "networkmanager":
+        where = "nmtui, nmcli or GNOME Settings" if spec[NAME]["desktop"] == "gnome" else "nmtui or nmcli"
+        return [
+            "  # Network: NetworkManager. Connections, Wi-Fi included, are made on the machine with",
+            f"  # {where} after the first boot; this file holds no network credentials.",
+            "  networking.networkmanager.enable = true;",
+        ]
     lines = [
         "  # Network: systemd-networkd, one unit per interface; NICs with a MAC are renamed by .link files.",
         "  networking.useDHCP = false;",
@@ -277,12 +515,16 @@ def _users(spec: Dict[str, Any]) -> List[str]:
     lines: List[str] = []
     shells = set()
     sudoers = []
+    nm = spec[NAME]["networking"] == "networkmanager"
     for user in spec["users"]:
         groups = list(user["groups"])
         if user["sudo"]:
             sudoers.append(user["name"])
             if "wheel" not in groups:
                 groups.append("wheel")
+        # Passwordless sudo is root already: NetworkManager need not ask these users either.
+        if nm and user["sudo"] and "networkmanager" not in groups:
+            groups.append("networkmanager")
         lines += [f"  users.users.{nix_attr(user['name'])} = {{", "    isNormalUser = true;"]
         if "gecos" in user:
             lines.append(f"    description = {nix_str(user['gecos'])};")
@@ -316,6 +558,7 @@ def _users(spec: Dict[str, Any]) -> List[str]:
 
 def configuration_nix(spec: Dict[str, Any]) -> str:
     nixos = spec[NAME]
+    luks = nixos["layout"] == "ext4-luks"
     lines = [
         HEADER,
         "# The target system. Static validation only: prov has not installed it on hardware.",
@@ -336,8 +579,15 @@ def configuration_nix(spec: Dict[str, Any]) -> str:
         '  imports = [ (modulesPath + "/installer/scan/not-detected.nix") ] ++ hardware;',
         "",
         "  # Fallback for hardware without a hardware-configuration.nix: broad initrd storage/USB drivers.",
-        f"  boot.initrd.availableKernelModules = {nix_list(list(INITRD_MODULES))};",
     ]
+    lines.append(f"  boot.initrd.availableKernelModules = {nix_list(list(INITRD_MODULES))};")
+    if luks:
+        lines += [
+            "  # ext4-luks: disko.nix declares boot.initrd.luks.devices.crypted (from its luks partition)",
+            "  # and the LVM volume group; nixpkgs' default initrd modules carry the USB/HID keyboard",
+            "  # drivers. The console keymap is loaded early, before the passphrase prompt.",
+            "  console.earlySetup = true;",
+        ]
     if "cpu_vendor" in nixos:
         lines.append(f"  hardware.cpu.{nixos['cpu_vendor']}.updateMicrocode = true;")
     lines.append("")
@@ -345,7 +595,9 @@ def configuration_nix(spec: Dict[str, Any]) -> str:
         lines += [
             "  # UEFI: systemd-boot on the ESP (disko.nix mounts it at /boot).",
             "  boot.loader.systemd-boot.enable = true;",
-            "  boot.loader.systemd-boot.configurationLimit = 10; # keeps the 512M ESP from filling up",
+            "  boot.loader.systemd-boot.configurationLimit = 10; # keeps the "
+            + ("512M ESP" if nixos["esp_size"] == ESP_DEFAULT else "ESP")
+            + " from filling up",
             "  boot.loader.efi.canTouchEfiVariables = true;",
         ]
     else:
@@ -360,14 +612,32 @@ def configuration_nix(spec: Dict[str, Any]) -> str:
     lines += [
         f"  time.timeZone = {nix_str(spec['timezone'])};",
         f"  i18n.defaultLocale = {nix_str(spec['locale'])};",
-        "  # keyboard is an XKB layout; the console keymap is derived from it (X stays disabled).",
+    ]
+    if nixos["desktop"] == "gnome":
+        lines.append("  # keyboard is an XKB layout; the console keymap is derived from it and the desktop uses the same setting.")
+    else:
+        lines.append("  # keyboard is an XKB layout; the console keymap is derived from it (X stays disabled).")
+    lines += [
         f"  services.xserver.xkb.layout = {nix_str(spec['keyboard'])};",
         "  console.useXkbConfig = true;",
         "",
     ]
     lines += _network(spec)
+    if nixos["networking"] == "networkmanager" and any(u["sudo"] for u in spec["users"]):
+        lines.append("  # Users with sudo = true are also in the networkmanager group (they have passwordless sudo).")
     lines.append("")
+    if nixos["desktop"] == "gnome":
+        lines += [
+            "  # Desktop: GNOME on Wayland with the GDM login screen (option names of NixOS 25.11 and later).",
+            "  services.displayManager.gdm.enable = true;",
+            "  services.desktopManager.gnome.enable = true;",
+            "",
+        ]
     lines += _users(spec)
+    owned = sorted((v["mountpoint"], v["owner"]) for v in nixos["volumes"] if "owner" in v)
+    if owned:
+        lines += ["  # Owned volumes: the mount point belongs to its owner (group users, mode 0750)."]
+        lines += ["  systemd.tmpfiles.rules = ["] + [f"    {nix_str(f'd {m} 0750 {o} users -')}" for m, o in owned] + ["  ];"]
     lines += [
         "",
         "  services.openssh = {",
@@ -396,12 +666,62 @@ def configuration_nix(spec: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _swap_content(nixos: Dict[str, Any]) -> str:
+    if nixos["hibernate"]:
+        return 'content = { type = "swap"; resumeDevice = true; }; # boot.resumeDevice: resume from hibernation'
+    return 'content = { type = "swap"; };'
+
+
+def _filesystem(mountpoint: str, options: List[str], indent: str) -> List[str]:
+    lines = [
+        f"{indent}content = {{",
+        f'{indent}  type = "filesystem";',
+        f'{indent}  format = "ext4";',
+        f"{indent}  mountpoint = {nix_str(mountpoint)};",
+    ]
+    if options:
+        lines.append(f"{indent}  mountOptions = {nix_list(options)};")
+    return lines + [f"{indent}}};"]
+
+
+def _lvm_vg(nixos: Dict[str, Any]) -> List[str]:
+    """The LVM volume group inside the LUKS container: swap, root and the volumes.
+
+    disko v1.13.0 (lib/types/lvm_vg.nix) creates the LVs sorted by their ``priority``, whose
+    default is 1000, plus 251 when the size contains "100%": the one 100%FREE LV (check()
+    enforces exactly one) is created after every fixed-size LV, whatever its name.
+    """
+    lines = [
+        f"  disko.devices.lvm_vg.{VG_NAME} = {{",
+        '    type = "lvm_vg";',
+        "    lvs = {",
+    ]
+    if "swap_size" in nixos:
+        lines += [
+            "      swap = {",
+            f"        size = {nix_str(nixos['swap_size'])};",
+            f"        {_swap_content(nixos)}",
+            "      };",
+        ]
+    lines += ["      root = {", f"        size = {nix_str(nixos['root_size'])};"]
+    lines += _filesystem("/", [], "        ") + ["      };"]
+    for vol in nixos["volumes"]:
+        lines += [f"      {nix_attr(vol['name'])} = {{", f"        size = {nix_str(vol['size'])};"]
+        lines += _filesystem(vol["mountpoint"], vol["mount_options"], "        ") + ["      };"]
+    return lines + ["    };", "  };"]
+
+
 def disko_nix(spec: Dict[str, Any]) -> str:
     nixos = spec[NAME]
+    luks = nixos["layout"] == "ext4-luks"
     disk = spec["storage"]["disks"][0]
-    lines = [
-        HEADER,
-        "# Partitioning (disko). WARNING: disko-install wipes this disk.",
+    lines = [HEADER, "# Partitioning (disko). WARNING: disko-install wipes this disk."]
+    if luks:
+        lines += [
+            f"# Layout ext4-luks: ESP + LUKS2 partition -> LVM volume group {VG_NAME}. No key or password file is",
+            "# set, so disko asks for the new passphrase on the terminal when it formats the disk.",
+        ]
+    lines += [
         "{",
         "  disko.devices.disk.main = {",
         '    type = "disk";',
@@ -414,7 +734,7 @@ def disko_nix(spec: Dict[str, Any]) -> str:
         lines += [
             "        ESP = {",
             '          type = "EF00";',
-            f"          size = {nix_str(ESP_SIZE)};",
+            f"          size = {nix_str(nixos['esp_size'])};",
             "          content = {",
             '            type = "filesystem";',
             '            format = "vfat";',
@@ -430,11 +750,29 @@ def disko_nix(spec: Dict[str, Any]) -> str:
             f"          size = {nix_str(BIOS_BOOT_SIZE)};",
             "        };",
         ]
+    if luks:
+        lines += [
+            "        luks = {",
+            '          size = "100%";',
+            "          content = {",
+            '            type = "luks";',
+            f"            name = {nix_str(LUKS_NAME)};",
+            '            extraFormatArgs = [ "--type" "luks2" ];',
+            "            settings.allowDiscards = true; # TRIM on SSDs; reveals which blocks are unused",
+            f'            content = {{ type = "lvm_pv"; vg = {nix_str(VG_NAME)}; }};',
+            "          };",
+            "        };",
+            "      };",
+            "    };",
+            "  };",
+        ]
+        lines += _lvm_vg(nixos)
+        return "\n".join(lines + ["}", ""])
     if "swap_size" in nixos:
         lines += [
             "        swap = {",
             f"          size = {nix_str(nixos['swap_size'])};",
-            '          content = { type = "swap"; };',
+            f"          {_swap_content(nixos)}",
             "        };",
         ]
     lines += [
@@ -455,11 +793,81 @@ def disko_nix(spec: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+# ext4-luks: disko's create steps are idempotent (vgcreate only without a VG of that name,
+# luks open only when the mapping is not active, mkfs only without a file system), so a VG
+# "pool" or an open "crypted" mapping on ANOTHER disk would be reused silently and the
+# install would land there. Refuse before the confirmation; every probe fails closed.
+_LUKS_GUARD = [
+    f"      # ext4-luks: refuse when a VG {VG_NAME} or LUKS mapping {LUKS_NAME} already exists (on any disk):",
+    "      # disko would reuse them instead of creating them on the target disk.",
+    '      vgnames=$(vgs --noheadings -o vg_name) || refuse "cannot list the LVM volume groups (vgs)"',
+    "      while read -r vg; do",
+    f'        if [ "$vg" = {VG_NAME} ]; then',
+    f'          refuse "an LVM volume group named {VG_NAME} already exists. On another disk: unplug it or rename it '
+    f"(vgrename {VG_NAME} <other-name>). Left over from an earlier attempt on this disk: vgchange -an {VG_NAME}, "
+    f'then cryptsetup close {LUKS_NAME}"',
+    "        fi",
+    '      done <<< "$vgnames"',
+    "      # cryptsetup status: 0 active, 4 inactive (-ENODEV); anything else is an unanswered question.",
+    "      crypt_rc=0",
+    f"      cryptsetup status {LUKS_NAME} >/dev/null 2>&1 || crypt_rc=$?",
+    f'      if [ -e /dev/mapper/{LUKS_NAME} ] || [ "$crypt_rc" = 0 ]; then',
+    f'        refuse "/dev/mapper/{LUKS_NAME} is already open. Left over from an earlier attempt: vgchange -an {VG_NAME}, '
+    f'then cryptsetup close {LUKS_NAME}. From another disk: unplug it"',
+    '      elif [ "$crypt_rc" != 4 ]; then',
+    f'        refuse "cannot query the LUKS mapping {LUKS_NAME} (cryptsetup status exited $crypt_rc); '
+    'load device-mapper: modprobe dm_mod, then retry"',
+    "      fi",
+]
+
+# Every layout: disko addresses its partitions by partition label (disk-main-ESP, -root,
+# -swap, -luks, -boot) and skips mkfs/luksFormat on a partition that already has one, so a
+# disk-main-* label left on ANOTHER disk could capture /boot or / at install and at boot
+# (udev points /dev/disk/by-partlabel/<label> at one of the two). Refuse unless every such
+# label positively sits on the target disk: every disk or loop ancestor must be the target,
+# and at least one must be found; each probe fails closed.
+_PARTLABEL_GUARD = [
+    "      # Partition labels disko uses (disk-main-*) must not exist on any other disk.",
+    '      parts=$(lsblk -nrpo NAME,PARTLABEL) || refuse "cannot list the partition labels (lsblk)"',
+    "      while read -r pname plabel; do",
+    '        case "$plabel" in',
+    "          disk-main-*)",
+    '            owners=$(lsblk -nrpso NAME,TYPE "$pname") || refuse "cannot read the disk under $pname"',
+    "            on_target=0",
+    "            while read -r oname okind; do",
+    '              if [ "$okind" = "disk" ] || [ "$okind" = "loop" ]; then',
+    '                o=$(readlink -f "$oname") || refuse "cannot resolve $oname"',
+    '                if [ "$o" != "$dev" ]; then',
+    '                  refuse "$pname on disk $o carries the partition label $plabel that disko uses for this install; '
+    "it could capture a mount at install or boot time. Unplug that disk, or wipe its partition table yourself "
+    '(wipefs -a or sgdisk --zap-all on $o, NOT on the target disk)"',
+    "                fi",
+    "                on_target=1",
+    "              fi",
+    '            done <<< "$owners"',
+    '            if [ "$on_target" != 1 ]; then',
+    '              refuse "$pname carries the partition label $plabel but does not sit on $dev; disko could pick it up. '
+    'Unplug or wipe the device it is on"',
+    "            fi",
+    "            ;;",
+    "        esac",
+    '      done <<< "$parts"',
+]
+
+
 def installer_nix(spec: Dict[str, Any]) -> str:
     host = spec["hostname"]
     disk = spec["storage"]["disks"][0]
     target = f"self.nixosConfigurations.{nix_attr(host)}"
     efi = "--write-efi-boot-entries " if spec["firmware"] == "uefi" else ""
+    luks = spec[NAME]["layout"] == "ext4-luks"
+    passphrase: List[str] = []
+    guard: List[str] = []
+    inputs = "pkgs.coreutils pkgs.util-linux disko"
+    if luks:
+        inputs += " pkgs.lvm2 pkgs.cryptsetup"
+        passphrase = ['      echo "install-$host: disko will now ask for the new disk passphrase twice"']
+        guard = _LUKS_GUARD
     return "\n".join(
         [
             HEADER,
@@ -526,7 +934,7 @@ def installer_nix(spec: Dict[str, Any]) -> str:
             "",
             "  install = pkgs.writeShellApplication {",
             '    name = "install-${hostName}";',
-            "    runtimeInputs = [ pkgs.coreutils pkgs.util-linux disko ];",
+            f"    runtimeInputs = [ {inputs} ];",
             "    text = ''",
             "      disk=${lib.escapeShellArg disk}",
             "      host=${lib.escapeShellArg hostName}",
@@ -580,6 +988,10 @@ def installer_nix(spec: Dict[str, Any]) -> str:
             "      else",
             '        echo "install-$host: no block device at /iso; the boot medium was not compared" >&2',
             "      fi",
+        ]
+        + _PARTLABEL_GUARD
+        + guard
+        + [
             '      serial=$(lsblk -dno SERIAL "$dev") || refuse "cannot read the serial of $dev"',
             '      serial=$(printf %s "$serial" | tr -d "[:space:]")',
             '      if [ "$(printf %s "$serial" | wc -c)" -ge 4 ]; then',
@@ -600,6 +1012,9 @@ def installer_nix(spec: Dict[str, Any]) -> str:
             '        echo "install-$host: confirmation did not match; aborted, nothing was changed" >&2',
             "        exit 1",
             "      fi",
+        ]
+        + passphrase
+        + [
             f'      exec disko-install {efi}--flake ${{lib.escapeShellArg "${{installFlake}}#${{hostName}}"}} --disk main "$disk"',
             "    '';",
             "  };",
@@ -673,6 +1088,128 @@ _REQUIRED = [
 
 _STRING = r'"((?:[^"\\]|\\.)*)"'
 
+# A rendered ext4-luks disko.nix: the LUKS container on the spec disk holding the volume group.
+_LUKS_REQUIRED = [
+    ('type = "luks";', "the luks partition"),
+    (f"name = {nix_str(LUKS_NAME)};", f"the LUKS name {LUKS_NAME}"),
+    (f'content = {{ type = "lvm_pv"; vg = {nix_str(VG_NAME)}; }};', f"the LVM physical volume of volume group {VG_NAME}"),
+    (f"disko.devices.lvm_vg.{VG_NAME} = {{", f"disko.devices.lvm_vg.{VG_NAME}"),
+    ('type = "lvm_vg";', "the lvm_vg type"),
+]
+# The install script's refusal of a VG / LUKS mapping another disk already provides.
+_LUKS_GUARD_REQUIRED = [
+    ('vgnames=$(vgs --noheadings -o vg_name) || refuse', "the existing-VG check (vgs)"),
+    (f'if [ "$vg" = {VG_NAME} ]; then', f"the VG {VG_NAME} comparison"),
+    (f"cryptsetup status {LUKS_NAME} >/dev/null 2>&1 || crypt_rc=$?", f"the {LUKS_NAME} status probe"),
+    (f'if [ -e /dev/mapper/{LUKS_NAME} ] || [ "$crypt_rc" = 0 ]; then', f"the open-{LUKS_NAME} check"),
+    ('elif [ "$crypt_rc" != 4 ]; then', f"the fail-closed {LUKS_NAME} status check"),
+]
+# Every layout: the foreign disk-main-* partition label refusal.
+_PARTLABEL_GUARD_REQUIRED = [
+    ('parts=$(lsblk -nrpo NAME,PARTLABEL) || refuse', "the partition-label scan"),
+    ("          disk-main-*)", "the disk-main-* label match"),
+    ('owners=$(lsblk -nrpso NAME,TYPE "$pname") || refuse', "the label's disk lookup"),
+    ('if [ "$o" != "$dev" ]; then', "the foreign-disk label refusal"),
+    ('if [ "$on_target" != 1 ]; then', "the on-target label requirement"),
+]
+# Secrets that must never be rendered: disko/NixOS key and password file options and plain
+# password attributes (hashedPassword stays allowed), as an attribute: at the start of a
+# line or after { or ;, with an optional dotted prefix (settings.keyFile =), as the final
+# attribute assigned a value. A name prov renders as an attribute set (users.users.password
+# = {, an LV named password = {) is not a value. String literals and comments are blanked
+# first, so a gecos or comment that says "password = x" is not one.
+_SECRET = re.compile(
+    r"(?:^|[{;])[ \t]*(?:[A-Za-z_][A-Za-z0-9_'-]*\.)*(passwordFile|keyFile|additionalKeyFiles|initialPassword|password)[ \t]*=(?!=)(?![ \t]*\{)",
+    re.M,
+)
+
+
+def _guard_findings(inst: str, required: List[Any], prefix: str) -> List[Finding]:
+    """Each guard line must be present and come before the disko-install call."""
+    out: List[Finding] = []
+    call = inst.find("exec disko-install")
+    for needle, what in required:
+        pos = inst.find(needle)
+        if pos < 0:
+            out.append(Finding(ERROR, f"{prefix}{what} is missing", "installer.nix"))
+        elif call >= 0 and pos > call:
+            out.append(Finding(ERROR, f"{prefix}{what} comes after exec disko-install", "installer.nix"))
+    return out
+
+
+# Network credentials that must never be rendered (NetworkManager connections are made on the
+# machine): wpa_supplicant networks (networking.wireless.networks.<ssid>.psk / pskRaw) and its
+# secretsFile, and NetworkManager's declarative ensureProfiles. Matched on attribute paths, so
+# a user, volume or package that happens to be named psk is not one (see _net_secret).
+_NIX_ATTR = r'(?:[A-Za-z_][A-Za-z0-9_\'-]*|"")'  # string literals are blanked to "" first
+_NIX_TOKEN = re.compile(
+    rf"(?P<open>\{{)|(?P<close>\}})"
+    rf"|(?:(?<=[{{;\n])|^)[ \t]*(?P<path>{_NIX_ATTR}(?:\.{_NIX_ATTR})*)[ \t]*=(?!=)(?P<brace>[ \t]*\{{)?",
+    re.M,
+)
+# systemd-networkd as an attribute (line start or after { or ;): boot.initrd.systemd.network
+# (the initrd's own networkd) does not count.
+_NETWORKD = re.compile(r"(?:^|[{;])[ \t]*(?:networking\.useNetworkd[ \t]*=[ \t]*true\b|systemd\.network\.)", re.M)
+_NETWORKMANAGER = re.compile(r"\bnetworking\.networkmanager\.enable[ \t]*=[ \t]*true\b")
+_GNOME = re.compile(r"\bservices\.desktopManager\.gnome\.enable[ \t]*=[ \t]*true\b")
+_GDM = re.compile(r"\bservices\.displayManager\.gdm\.enable[ \t]*=[ \t]*true\b")
+# Names NixOS 25.11 renamed (services.xserver.{desktop,display}Manager.{gnome,gdm} and friends).
+_OLD_DESKTOP = re.compile(r"\bservices\.xserver\.(desktopManager\.gnome|displayManager\.gdm)\b")
+
+
+def _code(text: str) -> str:
+    """Nix ``text`` with double-quoted string literals blanked and comments removed."""
+    code = re.sub(_STRING, '""', text)
+    return re.sub(r"#[^\n]*", "", code)
+
+
+def _secret(text: str) -> Optional[str]:
+    """The first secret attribute name assigned in Nix ``text``, or None."""
+    m = _SECRET.search(_code(text))
+    return m.group(1) if m else None
+
+
+def _net_secret_path(path: List[str]) -> Optional[str]:
+    """The credential option a full attribute path sets, or None."""
+    for a, b in zip(path, path[1:]):
+        if a == "wireless" and b in ("networks", "secretsFile"):
+            return f"wireless.{b}"
+    if "ensureProfiles" in path:
+        return "ensureProfiles"
+    if path[-1] in ("psk", "pskRaw") and "wireless" in path:
+        return path[-1]
+    return None
+
+
+def _net_secret(text: str) -> Optional[str]:
+    """The first network-credential option assigned in Nix ``text`` (code only), or None.
+
+    Tracks nested attribute sets (``networking.wireless = { networks = ...; }``,
+    ``networkmanager = { ensureProfiles = ...; }``) by brace depth: each ``{`` opened right
+    after ``path =`` contributes ``path`` to the paths assigned inside it; other braces
+    (function arguments, list items) contribute nothing. A best-effort scanner, not a Nix
+    parser: ``rec``/``let`` sets inside attribute values and ``with`` scopes are not followed,
+    nor are sets passed to a function (``lib.mkIf c { ... }``, ``lib.mkMerge [ ... ]``,
+    ``lib.mkDefault { ... }``): their ``{`` does not follow ``path =`` directly, so the path
+    assigned before the call is not carried into them.
+    """
+    stack: List[List[str]] = []
+    for m in _NIX_TOKEN.finditer(_code(text)):
+        if m.group("open"):
+            stack.append([])
+        elif m.group("close"):
+            if stack:
+                stack.pop()
+        else:
+            path = m.group("path").split(".")
+            full = [p for frame in stack for p in frame] + path
+            hit = _net_secret_path(full)
+            if hit:
+                return hit
+            if m.group("brace"):
+                stack.append(path)
+    return None
+
 
 def _string_value(text: str, key: str) -> Optional[str]:
     """The (unescaped) string assigned to ``key`` at the start of a line, or None."""
@@ -718,6 +1255,27 @@ def _external(paths: List[Path]) -> List[Finding]:
     return out
 
 
+def _validate_desktop(code: str) -> List[Finding]:
+    """configuration.nix (code only): one network stack; GNOME with GDM and NetworkManager."""
+    out: List[Finding] = []
+    networkd, nm = bool(_NETWORKD.search(code)), bool(_NETWORKMANAGER.search(code))
+    if networkd and nm:
+        out.append(Finding(ERROR, "enables both systemd-networkd and NetworkManager; use exactly one", "configuration.nix"))
+    elif not networkd and not nm:
+        out.append(Finding(ERROR, "enables neither systemd-networkd nor NetworkManager", "configuration.nix"))
+    if _GNOME.search(code):
+        if not _GDM.search(code):
+            out.append(Finding(ERROR, "GNOME is enabled without services.displayManager.gdm.enable", "configuration.nix"))
+        if not nm:
+            out.append(Finding(ERROR, "GNOME is enabled without NetworkManager", "configuration.nix"))
+    old = _OLD_DESKTOP.search(code)
+    if old:
+        out.append(
+            Finding(ERROR, f"services.xserver.{old.group(1)} is the pre-25.11 name; use services.{old.group(1)} (NixOS 25.11 and later)", "configuration.nix")
+        )
+    return out
+
+
 def validate(rendered_dir: Path) -> List[Finding]:
     """Check the rendered flake: files, key attributes, cross-file consistency, optional parse."""
     findings: List[Finding] = []
@@ -746,6 +1304,8 @@ def validate(rendered_dir: Path) -> List[Finding]:
                     findings.append(Finding(ERROR, f"does not take its offline closure from self.nixosConfigurations.{esc(host)}", "installer.nix"))
     if conf is not None and "boot.loader.systemd-boot.enable = true;" not in conf and "boot.loader.grub.enable = true;" not in conf:
         findings.append(Finding(ERROR, "no boot loader (systemd-boot or GRUB) is enabled", "configuration.nix"))
+    if conf is not None:
+        findings += _validate_desktop(_code(conf))
     if disko is not None and inst is not None:
         device, disk = _string_value(disko, "device"), _string_value(inst, "disk")
         if device is None:
@@ -754,6 +1314,26 @@ def validate(rendered_dir: Path) -> List[Finding]:
             findings.append(Finding(ERROR, f"installs to {short_repr(disk)} but disko.nix partitions {short_repr(device)}", "installer.nix"))
     if inst is not None and re.search(r"systemd\.(user\.)?services|boot\.postBootCommands|services\.getty\.autologinUser", inst):
         findings.append(Finding(ERROR, "the installer must not run anything at boot", "installer.nix"))
+    if disko is not None and re.search(r'type = "(luks|lvm_pv|lvm_vg)";', disko):
+        for needle, what in _LUKS_REQUIRED:
+            if needle not in disko:
+                findings.append(Finding(ERROR, f"layout ext4-luks: {what} is missing", "disko.nix"))
+        if 'type = "EF02";' in disko or 'type = "EF00";' not in disko:
+            findings.append(Finding(ERROR, "layout ext4-luks needs an EF00 ESP and no EF02 BIOS boot partition (UEFI only)", "disko.nix"))
+        if inst is not None:
+            if "pkgs.lvm2 pkgs.cryptsetup" not in inst:
+                findings.append(Finding(ERROR, "layout ext4-luks: lvm2 and cryptsetup in runtimeInputs is missing", "installer.nix"))
+            findings += _guard_findings(inst, _LUKS_GUARD_REQUIRED, "layout ext4-luks: ")
+    if inst is not None:
+        findings += _guard_findings(inst, _PARTLABEL_GUARD_REQUIRED, "")
+    for name in FILES:
+        text = texts[name]
+        secret = _secret(text) if text is not None else None
+        if secret:
+            findings.append(Finding(ERROR, f"{secret} =: no key file, password file or password may be rendered", name))
+        net = _net_secret(text) if text is not None else None
+        if net:
+            findings.append(Finding(ERROR, f"{net}: no network credentials may be rendered (connections are made on the machine)", name))
 
     lock_path = rendered_dir / "flake.lock"
     if lock_path.exists() or lock_path.is_symlink():
@@ -781,13 +1361,17 @@ def plan(spec: Dict[str, Any], ctx: Any) -> List[str]:
     Every spec value is shell-quoted, in comments too, so a copied line never splits.
     """
     q = shlex.quote
+    nixos = spec[NAME]
+    luks = nixos["layout"] == "ext4-luks"
     host = spec["hostname"]
     disk = spec["storage"]["disks"][0]
     disks = " ".join(q(d) for d in spec["storage"]["disks"])
     installer = f".#nixosConfigurations.{q(host)}-installer.config.system.build.isoImage"
     mode = "UEFI" if spec["firmware"] == "uefi" else "legacy BIOS"
     login = next((u["name"] for u in spec["users"] if u["ssh_authorized_keys"]), None)
-    address = next((a.split("/")[0] for i in spec["network"]["interfaces"] for a in i["addresses"]), None)
+    address = next((a.split("/")[0] for i in spec.get("network", {}).get("interfaces", []) for a in i["addresses"]), None)
+    nm = nixos["networking"] == "networkmanager"
+    gnome = nixos["desktop"] == "gnome"
     # The ISO's out-link (its GC root) lives outside the hosts repository and outside every
     # prov-owned directory: render would delete a link in rendered/, and validate/diff flag it.
     link = f'"$HOME"/prov-iso/{q(f"{host}-installer")}'
@@ -814,6 +1398,13 @@ def plan(spec: Dict[str, Any], ctx: Any) -> List[str]:
         "# 3. Build the installer ISO (large: it carries the target closure for an offline install).",
         "#    The out-link under ~/prov-iso keeps the ISO from garbage collection; delete the link",
         "#    when you no longer need the ISO.",
+    ]
+    if gnome:
+        lines += [
+            "#    desktop gnome: the ISO carries the whole desktop closure, likely several GB more than a",
+            "#    server install (not measured): a longer build, more store space; use a 16 GB+ stick.",
+        ]
+    lines += [
         'mkdir -p "$HOME"/prov-iso',
         f"nix --extra-experimental-features 'nix-command flakes' build {installer} --out-link {link}",
         f"ls {link}/iso/",
@@ -827,31 +1418,78 @@ def plan(spec: Dict[str, Any], ctx: Any) -> List[str]:
         'case "$USB" in *-part[0-9]*) echo "USB=$USB is a partition; use the whole stick" >&2 ;; '
         '*) if [ -b "$USB" ]; then sudo dd if="$ISO" of="$USB" bs=4M conv=fsync status=progress; '
         'else echo "USB=$USB is not a block device; set USB first" >&2; fi ;; esac',
+        "#    WSL2 has no USB block devices: copy the ISO to Windows instead, e.g.",
+        '#        cp -L "$ISO" /mnt/c/Users/CHANGE-ME/Downloads/',
+        "#    and write it there with Rufus (DD image mode) or balenaEtcher.",
         "",
         f"# 5. WARNING: the install WIPES {disks} on the target machine.",
+    ]
+    if spec["firmware"] == "uefi":
+        lines.append("#    Disable Secure Boot in the firmware setup first: neither the installer stick nor systemd-boot is signed.")
+    lines += [
         f"#    Boot the target from the USB stick in {mode} mode, then run on its console:",
+    ]
+    if luks:
+        lines += [
+            "#    ext4-luks: after the serial, disko asks TWICE for a NEW disk passphrase. Store it in a",
+            "#    password manager first: it cannot be recovered, and it is typed at every boot.",
+            "#    If the two entries differ, disko exits after the disk was already wiped and",
+            f"#    partitioned: run sudo {q(f'install-{host}')} again.",
+            "#    The fixed sizes (swap, root, volumes) must fit the disk. A failure after the LUKS format",
+            f"#    leaves {LUKS_NAME} open; clean up with   vgchange -an {VG_NAME}   then   cryptsetup close {LUKS_NAME}",
+            f"#    (in that order) before retrying. It also refuses while an LVM volume group {VG_NAME} exists",
+            f"#    or /dev/mapper/{LUKS_NAME} is open: on another disk, unplug it or vgrename {VG_NAME} <other>.",
+        ]
+    lines += [
         f"sudo {q(f'install-{host}')}",
         f"#    It stops unless {q(disk)} is a whole disk, has nothing mounted or used as swap,",
         "#    is not the USB stick it booted from, and the command runs on a terminal. It shows",
         "#    the disk, asks for the last 4 characters of its serial (or the hostname when the",
         "#    disk reports none), then runs disko-install offline. Any other answer aborts.",
+        "#    It also refuses while another disk carries a disko-install partition label (disk-main-*),",
+        "#    which could capture /boot or / at install or boot time: unplug that disk, or wipe its",
+        "#    partition table yourself (wipefs -a or sgdisk --zap-all on THAT disk).",
         "",
         "# 6. Post-install checks: remove the stick, reboot into the installed system, then",
     ]
+    if nm:
+        lines += [
+            "#    on the TARGET console join a network with   sudo nmtui"
+            + ("   (Ctrl+Alt+F3 for a text console, or use GNOME Settings)" if gnome else "")
+            + ";",
+            "#    network credentials stay on the machine, never in spec.toml. Still on the target console:",
+            "nmcli device status",
+            "#    then from this machine:",
+        ]
     if login and address:
         lines.append(f"ssh {q(login)}@{q(address)}")
     elif login:
         lines += ["HOST_IP=CHANGE-ME", f'ssh {q(login)}@"$HOST_IP"']
     else:
         lines.append("#    log in on the console (no user has an ssh key).")
+    mounts = ["/", "/boot"] if spec["firmware"] == "uefi" else ["/"]
+    mounts += [v["mountpoint"] for v in nixos["volumes"]]
     lines += [
         "#    and on the installed host:",
         "nixos-version",
         "systemctl --failed",
-        "findmnt / /boot" if spec["firmware"] == "uefi" else "findmnt /",
+    ]
+    lines += [f"findmnt {q(m)}" for m in mounts]
+    lines += [
         "swapon --show",
         "ip -br addr",
     ]
+    if gnome:
+        lines.append("systemctl is-active display-manager")
+    if luks:
+        lines += [f"sudo cryptsetup status {LUKS_NAME}", "sudo lvs"]
+    if nixos["hibernate"]:
+        lines += [
+            "#    hibernate: the swap device must hold the RAM contents, so swap_size should be at least",
+            f"#    the RAM size ({q(nixos.get('swap_size', ''))} here). The kernel's hibernation mode:",
+            "cat /sys/power/disk",
+            "#    Then test it once with   systemctl hibernate   and check the session comes back.",
+        ]
     return lines
 
 
@@ -902,6 +1540,22 @@ state_version = "26.05"
 layout = "ext4"
 swap_size = "8G"
 packages = ["git", "vim"]
+# Optional (defaults shown or described):
+# esp_size = "512M"            # EFI system partition (UEFI), at least 256M
+# hibernate = false            # resume from swap; needs swap_size of at least the RAM size
+# Encrypted disk (UEFI only): layout = "ext4-luks" puts LVM inside LUKS; the passphrase is
+# typed at install time and at every boot. Then, exactly one of root_size and the volumes'
+# size is "100%FREE":
+# root_size = "64G"            # default "100%FREE"
+# [[nixos-disko.volumes]]
+# name = "home"
+# mountpoint = "/home"
+# size = "100%FREE"
+# mount_options = ["noatime"]  # optional
+# owner = "ops"                # optional: a [[users]] name; owns the mount point (0750)
+# networking = "networkd"      # or "networkmanager": connections (Wi-Fi) made on the machine
+#                              # with nmtui/nmcli; then remove [network] above
+# desktop = "none"             # or "gnome" (GNOME + GDM): needs networking = "networkmanager"
 """
 
 

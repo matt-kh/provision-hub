@@ -198,6 +198,7 @@
     },
     "network": {
       "additionalProperties": false,
+      "description": "Optional; backends say when they need it.",
       "properties": {
         "dns": {
           "additionalProperties": false,
@@ -248,11 +249,39 @@
             "amd"
           ]
         },
+        "desktop": {
+          "default": "none",
+          "description": "none: no graphical desktop. gnome: GNOME on Wayland with GDM; needs networking = networkmanager and release nixos-25.11 or newer.",
+          "enum": [
+            "none",
+            "gnome"
+          ]
+        },
+        "esp_size": {
+          "default": "512M",
+          "description": "Size of the EFI system partition mounted at /boot (UEFI only, at least 256M; leave the default on BIOS).",
+          "pattern": "^[1-9][0-9]*[MG]$",
+          "type": "string"
+        },
+        "hibernate": {
+          "default": false,
+          "description": "Resume from hibernation on the swap device (boot.resumeDevice); needs swap_size, at least the RAM size.",
+          "type": "boolean"
+        },
         "layout": {
           "default": "ext4",
-          "description": "Disk layout. ext4: GPT on one disk with an ESP (UEFI) or BIOS boot partition, optional swap and an ext4 root.",
+          "description": "Disk layout. ext4: GPT on one disk with an ESP (UEFI) or BIOS boot partition, optional swap and an ext4 root. ext4-luks (UEFI only): an ESP and one LUKS2 partition holding LVM volume group 'pool' with optional swap, an ext4 root and the ext4 volumes; the passphrase is typed at install time and at every boot.",
           "enum": [
-            "ext4"
+            "ext4",
+            "ext4-luks"
+          ]
+        },
+        "networking": {
+          "default": "networkd",
+          "description": "networkd: systemd-networkd rendered from [network] (required). networkmanager: NetworkManager, connections (Wi-Fi included) made on the machine with nmtui, nmcli or GNOME Settings; [network] is not allowed.",
+          "enum": [
+            "networkd",
+            "networkmanager"
           ]
         },
         "packages": {
@@ -270,15 +299,70 @@
           "pattern": "^nixos-[0-9]{2}\\.[0-9]{2}$",
           "type": "string"
         },
+        "root_size": {
+          "default": "100%FREE",
+          "description": "ext4-luks: size of the root logical volume (at least 8G), or 100%FREE for the space left. Exactly one of root and volumes takes 100%FREE.",
+          "pattern": "^([1-9][0-9]*[MG]|100%FREE)$",
+          "type": "string"
+        },
         "state_version": {
           "description": "system.stateVersion: the release first installed; never change it afterwards.",
           "pattern": "^[0-9]{2}\\.[0-9]{2}$",
           "type": "string"
         },
         "swap_size": {
-          "description": "Optional swap partition size (e.g. 8G); no swap partition when absent.",
+          "description": "Optional swap size (e.g. 8G): a partition (ext4) or a logical volume (ext4-luks); no swap when absent.",
           "pattern": "^[1-9][0-9]*[MG]$",
           "type": "string"
+        },
+        "volumes": {
+          "default": [],
+          "description": "ext4-luks: extra ext4 logical volumes in volume group 'pool', each mounted at its mountpoint.",
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "mount_options": {
+                "default": [],
+                "description": "ext4 mount options, one per item (e.g. noatime, nodev, nosuid, noexec).",
+                "items": {
+                  "maxLength": 64,
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_.=:+-]*$",
+                  "type": "string"
+                },
+                "type": "array",
+                "uniqueItems": true
+              },
+              "mountpoint": {
+                "description": "Absolute, normalised, unique mount point; not /, nor /boot, /nix, /proc, /sys, /dev, /run, /var/run, /var/lock or anything below them.",
+                "maxLength": 255,
+                "pattern": "^/[A-Za-z0-9._/-]*$",
+                "type": "string"
+              },
+              "name": {
+                "description": "Logical volume name: unique, not root or swap, not starting with snapshot or pvmove.",
+                "maxLength": 32,
+                "pattern": "^[a-z][a-z0-9-]*$",
+                "type": "string"
+              },
+              "owner": {
+                "description": "A [[users]] name: the mount point becomes owned by this user (group users, mode 0750) via systemd-tmpfiles. Not on a shared system directory (/home, /tmp, /srv, /opt, /mnt, /media themselves, or /var, /etc, /usr, /root, /bin, /lib, /lib64, /sbin and anything below them) and not on a declared user's home /home/<name> (NixOS keeps it at mode 0700).",
+                "pattern": "^[a-z_][a-z0-9_-]{0,31}$",
+                "type": "string"
+              },
+              "size": {
+                "description": "Size (e.g. 200G) or 100%FREE for the space left.",
+                "pattern": "^([1-9][0-9]*[MG]|100%FREE)$",
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "mountpoint",
+              "size"
+            ],
+            "type": "object"
+          },
+          "type": "array"
         }
       },
       "required": [
@@ -387,7 +471,6 @@
     "kind",
     "backend",
     "hostname",
-    "network",
     "storage"
   ],
   "title": "prov os-install v1alpha1",

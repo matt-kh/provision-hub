@@ -21,7 +21,7 @@ and OS images (`image`, planned). See [docs/kinds.md](docs/kinds.md).
 | Kind | Backend | Artefacts | Notes |
 |---|---|---|---|
 | `os-install` | `ubuntu-autoinstall` (22.04, 24.04) | NoCloud seed: autoinstall `user-data`, `meta-data`, `kernel-cmdline` | storage layouts `lvm`, `zfs`, `mdraid` |
-| `os-install` | `nixos-disko` (nixpkgs `nixos-YY.MM`) | pinned flake: `flake.nix`, `configuration.nix`, `disko.nix`, `installer.nix` (offline USB installer ISO) | layout `ext4`; see [docs/backends/nixos-disko.md](docs/backends/nixos-disko.md) |
+| `os-install` | `nixos-disko` (nixpkgs `nixos-YY.MM`) | pinned flake: `flake.nix`, `configuration.nix`, `disko.nix`, `installer.nix` (offline USB installer ISO) | layouts `ext4`, `ext4-luks` (LVM on LUKS); systemd-networkd or NetworkManager, optional GNOME desktop; see [docs/backends/nixos-disko.md](docs/backends/nixos-disko.md) |
 
 New backends follow [docs/adding-a-backend.md](docs/adding-a-backend.md); new kinds are a
 core change ([docs/kinds.md](docs/kinds.md)).
@@ -76,7 +76,8 @@ still break, always with a migration note in [CHANGELOG.md](CHANGELOG.md); from 
 `prov/v1` changes are additive only.
 
 **Examples.** [examples/](examples/) is one root with an item per Ubuntu storage layout, a
-NixOS item (`demo-nixos-ext4`) and their committed rendered output:
+NixOS item per layout (`demo-nixos-ext4`, `demo-nixos-gnome-luks`) and their committed
+rendered output:
 
 ```sh
 uv run prov --root examples list
