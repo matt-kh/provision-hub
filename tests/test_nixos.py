@@ -644,7 +644,11 @@ STUBS = {
 # the partition-label scan lists every device: NAME PARTLABEL lines from STUB_PARTS
 if [ "$*" = "-nrpo NAME,PARTLABEL" ]; then printf "%b" "${STUB_PARTS:-}"; exit 0; fi
 # the ancestor walk of a labelled partition <disk>p<N>: the partition, then its disk
-case "$*" in "-nrpso NAME,TYPE "*) if [ "${@: -1}" != "$STUB_MEDIUM" ]; then p="${@: -1}"; printf "%s part\n%s disk\n" "$p" "${p%p[0-9]*}"; exit 0; fi ;; esac
+# (STUB_PART_ANCESTORS overrides the lines; STUB_PART_FAIL=1 makes this walk fail)
+case "$*" in "-nrpso NAME,TYPE "*) if [ "${@: -1}" != "$STUB_MEDIUM" ]; then
+  if [ -n "${STUB_PART_FAIL:-}" ]; then echo "lsblk: failed" >&2; exit 32; fi
+  if [ -n "${STUB_PART_ANCESTORS:-}" ]; then printf "%b" "$STUB_PART_ANCESTORS"; exit 0; fi
+  p="${@: -1}"; printf "%s part\n%s disk\n" "$p" "${p%p[0-9]*}"; exit 0; fi ;; esac
 # the device argument must be the resolved target disk, or the medium for the ancestor walk
 want="$STUB_DEV"; case "$*" in "-nrpso NAME,TYPE "*) want="$STUB_MEDIUM" ;; esac
 if [ "${@: -1}" != "$want" ]; then echo "lsblk stub: called on ${@: -1}, expected $want" >&2; exit 99; fi
@@ -1437,3 +1441,50 @@ def test_rendered_names_that_spell_secret_keywords_are_not_secrets(tmp_path):
     assert messages(nixos.validate(tmp_path)) == []
     assert nixos._secret("  users.users.password = {\n") is None and nixos._secret("  keyFile = {\n") is None
     assert nixos._secret('  users.users.password.password = "x";\n') == "password"
+
+
+# --- review round 3: positive label ownership, inner lsblk failure, derived wording --------
+
+
+def test_script_refuses_a_label_on_a_loop_device_that_is_not_the_target(script_env, tmp_path):
+    run_script, _, _ = script_env
+    loop = tmp_path / "loop7"
+    proc, args = run_script(STUB_PARTS=f"{loop}p1 disk-main-root\\n", STUB_PART_ANCESTORS=f"{loop}p1 part\\n{loop} loop\\n")
+    assert proc.returncode == 1 and f"on disk {loop} carries the partition label disk-main-root" in proc.stderr and args is None
+
+
+def test_script_refuses_a_label_without_a_disk_or_loop_ancestor(script_env):
+    run_script, disk, _ = script_env
+    proc, args = run_script(STUB_PARTS="/dev/mapper/odd disk-main-ESP\\n", STUB_PART_ANCESTORS="/dev/mapper/odd crypt\\n")
+    assert proc.returncode == 1 and args is None
+    assert f"/dev/mapper/odd carries the partition label disk-main-ESP but does not sit on {disk}" in proc.stderr
+
+
+def test_script_accepts_a_label_whose_ancestor_is_the_target(script_env):
+    run_script, disk, _ = script_env
+    proc, args = run_script(STUB_PARTS=f"{disk}p1 disk-main-ESP\\n", STUB_PART_ANCESTORS=f"{disk}p1 part\\n{disk} disk\\n")
+    assert proc.returncode == 0, proc.stderr
+    assert args[-1] == disk
+
+
+def test_script_refuses_when_the_label_disk_lookup_fails(script_env, tmp_path):
+    run_script, _, _ = script_env
+    proc, args = run_script(STUB_PARTS=f"{tmp_path / 'x'}p1 disk-main-ESP\\n", STUB_PART_FAIL="1")
+    assert proc.returncode == 1 and f"cannot read the disk under {tmp_path / 'x'}p1; refusing" in proc.stderr and args is None
+
+
+def test_on_target_requirement_is_validated(rendered):
+    path = rendered / "installer.nix"
+    path.write_text(path.read_text().replace('if [ "$on_target" != 1 ]; then', "if false; then"))
+    assert any("the on-target label requirement is missing" in m for m in messages(nixos.validate(rendered)))
+
+
+def test_reserved_and_shared_wording_follows_the_lists():
+    vols = nixos.SCHEMA["properties"]["volumes"]["items"]["properties"]
+    for tree in nixos.RESERVED_MOUNT_TREES:
+        assert tree in vols["mountpoint"]["description"]
+    for path in nixos.SHARED_DIRS + nixos.SHARED_TREES:
+        assert path in vols["owner"]["description"]
+    assert "/home/<name>" in vols["owner"]["description"]
+    findings = luks_findings(lambda r: (vol(r, 0).pop("owner"), vol(r, 0).update(mountpoint="/var/lock")))
+    assert any(f"is reserved: not {nixos._RESERVED_TEXT}" in f.message for f in findings)

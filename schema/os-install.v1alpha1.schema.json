@@ -316,7 +316,7 @@
                 "uniqueItems": true
               },
               "mountpoint": {
-                "description": "Absolute, normalised, unique mount point; not /, nor /boot, /nix, /proc, /sys, /dev, /run or anything below them.",
+                "description": "Absolute, normalised, unique mount point; not /, nor /boot, /nix, /proc, /sys, /dev, /run, /var/run, /var/lock or anything below them.",
                 "maxLength": 255,
                 "pattern": "^/[A-Za-z0-9._/-]*$",
                 "type": "string"
@@ -328,7 +328,7 @@
                 "type": "string"
               },
               "owner": {
-                "description": "A [[users]] name: the mount point becomes owned by this user (group users, mode 0750) via systemd-tmpfiles. Not on /home, /tmp, /srv, /opt, /mnt, /media themselves or at/below /var, /etc, /usr.",
+                "description": "A [[users]] name: the mount point becomes owned by this user (group users, mode 0750) via systemd-tmpfiles. Not on a shared system directory (/home, /tmp, /srv, /opt, /mnt, /media themselves, or /var, /etc, /usr, /root, /bin, /lib, /lib64, /sbin and anything below them) and not on a declared user's home /home/<name> (NixOS keeps it at mode 0700).",
                 "pattern": "^[a-z_][a-z0-9_-]{0,31}$",
                 "type": "string"
               },

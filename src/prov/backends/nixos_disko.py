@@ -47,6 +47,21 @@ HW_COPY = "hardware-configuration.installer-copy.nix"
 
 _ATTR = "[A-Za-z_][A-Za-z0-9_-]*"
 _SIZE = "[1-9][0-9]*[MG]"
+# A volume may not be mounted at / or at or below these (ESP, Nix store, kernel/runtime trees).
+RESERVED_MOUNT_TREES = ("/boot", "/nix", "/proc", "/sys", "/dev", "/run", "/var/run", "/var/lock")
+# An owner may not take over a shared system directory: these exactly, and anything at or
+# below the trees (a directory below /srv or /home, such as /srv/data, is fine).
+SHARED_DIRS = ("/home", "/tmp", "/srv", "/opt", "/mnt", "/media")
+SHARED_TREES = ("/var", "/etc", "/usr", "/root", "/bin", "/lib", "/lib64", "/sbin")
+
+
+def _paths(paths: tuple) -> str:
+    return ", ".join(paths)
+
+
+# One wording for the schema descriptions and the findings, built from the lists above.
+_RESERVED_TEXT = f"/, nor {_paths(RESERVED_MOUNT_TREES)} or anything below them"
+_SHARED_TEXT = f"{_paths(SHARED_DIRS)} themselves, or {_paths(SHARED_TREES)} and anything below them"
 
 SCHEMA: Dict[str, Any] = {
     "type": "object",
@@ -109,7 +124,7 @@ SCHEMA: Dict[str, Any] = {
                         "type": "string",
                         "pattern": "^/[A-Za-z0-9._/-]*$",
                         "maxLength": 255,
-                        "description": "Absolute, normalised, unique mount point; not /, nor /boot, /nix, /proc, /sys, /dev, /run or anything below them.",
+                        "description": f"Absolute, normalised, unique mount point; not {_RESERVED_TEXT}.",
                     },
                     "size": {"type": "string", "pattern": f"^({_SIZE}|100%FREE)$", "description": "Size (e.g. 200G) or 100%FREE for the space left."},
                     "mount_options": {
@@ -122,7 +137,11 @@ SCHEMA: Dict[str, Any] = {
                     "owner": {
                         "type": "string",
                         "pattern": "^[a-z_][a-z0-9_-]{0,31}$",
-                        "description": "A [[users]] name: the mount point becomes owned by this user (group users, mode 0750) via systemd-tmpfiles. Not on /home, /tmp, /srv, /opt, /mnt, /media themselves or at/below /var, /etc, /usr.",
+                        "description": (
+                            "A [[users]] name: the mount point becomes owned by this user (group users, mode 0750) via "
+                            f"systemd-tmpfiles. Not on a shared system directory ({_SHARED_TEXT}) and not on a declared "
+                            "user's home /home/<name> (NixOS keeps it at mode 0700)."
+                        ),
                     },
                 },
             },
@@ -146,12 +165,6 @@ VG_NAME = "pool"
 # Logical volume names prov uses itself; LVM rejects names starting with these prefixes.
 RESERVED_LVS = frozenset({"root", "swap"})
 RESERVED_LV_PREFIXES = ("snapshot", "pvmove")
-# A volume may not be mounted at / or at or below these (ESP, Nix store, kernel/runtime trees).
-RESERVED_MOUNT_TREES = ("/boot", "/nix", "/proc", "/sys", "/dev", "/run", "/var/run", "/var/lock")
-# An owner may not take over a shared system directory: these exactly, and anything at or
-# below the trees (a directory below /srv or /home, such as /srv/data, is fine).
-SHARED_DIRS = ("/home", "/tmp", "/srv", "/opt", "/mnt", "/media")
-SHARED_TREES = ("/var", "/etc", "/usr", "/root", "/bin", "/lib", "/lib64", "/sbin")
 ESP_DEFAULT = "512M"
 ROOT_MIN_MIB = 8 * 1024
 BY_ID = "/dev/disk/by-id/"
@@ -255,7 +268,7 @@ def _check_storage(spec: Dict[str, Any]) -> List[Finding]:
             out.append(Finding(ERROR, f"mountpoint {short_repr(mount)} is not normalised (no //, trailing /, . or ..)", f"{where}.mountpoint"))
         elif mount == "/" or _at_or_below(mount, RESERVED_MOUNT_TREES):
             out.append(
-                Finding(ERROR, f"mountpoint {short_repr(mount)} is reserved (/, and /boot, /nix, /proc, /sys, /dev, /run with everything below)", f"{where}.mountpoint")
+                Finding(ERROR, f"mountpoint {short_repr(mount)} is reserved: not {_RESERVED_TEXT}", f"{where}.mountpoint")
             )
         elif mount in mounts:
             out.append(Finding(ERROR, f"mountpoint {short_repr(mount)} is already used by volumes[{mounts[mount]}]", f"{where}.mountpoint"))
@@ -276,9 +289,8 @@ def _check_storage(spec: Dict[str, Any]) -> List[Finding]:
             out.append(
                 Finding(
                     ERROR,
-                    f"owner on {short_repr(mount)}: a shared system directory (/home, /tmp, /srv, /opt, /mnt, /media, or "
-                    "/var, /etc, /usr, /root, /bin, /lib, /lib64, /sbin and below) may not belong to one user; "
-                    "mount the volume below it instead (e.g. /srv/data)",
+                    f"owner on {short_repr(mount)}: a shared system directory ({_SHARED_TEXT}) may not belong to one "
+                    "user; mount the volume below it instead (e.g. /srv/data)",
                     f"{where}.owner",
                 )
             )
@@ -725,7 +737,8 @@ _LUKS_GUARD = [
 # -swap, -luks, -boot) and skips mkfs/luksFormat on a partition that already has one, so a
 # disk-main-* label left on ANOTHER disk could capture /boot or / at install and at boot
 # (udev points /dev/disk/by-partlabel/<label> at one of the two). Refuse unless every such
-# label sits on the target disk; each probe fails closed.
+# label positively sits on the target disk: every disk or loop ancestor must be the target,
+# and at least one must be found; each probe fails closed.
 _PARTLABEL_GUARD = [
     "      # Partition labels disko uses (disk-main-*) must not exist on any other disk.",
     '      parts=$(lsblk -nrpo NAME,PARTLABEL) || refuse "cannot list the partition labels (lsblk)"',
@@ -733,16 +746,22 @@ _PARTLABEL_GUARD = [
     '        case "$plabel" in',
     "          disk-main-*)",
     '            owners=$(lsblk -nrpso NAME,TYPE "$pname") || refuse "cannot read the disk under $pname"',
+    "            on_target=0",
     "            while read -r oname okind; do",
-    '              if [ "$okind" = "disk" ]; then',
+    '              if [ "$okind" = "disk" ] || [ "$okind" = "loop" ]; then',
     '                o=$(readlink -f "$oname") || refuse "cannot resolve $oname"',
     '                if [ "$o" != "$dev" ]; then',
     '                  refuse "$pname on disk $o carries the partition label $plabel that disko uses for this install; '
     "it could capture a mount at install or boot time. Unplug that disk, or wipe its partition table yourself "
     '(wipefs -a or sgdisk --zap-all on $o, NOT on the target disk)"',
     "                fi",
+    "                on_target=1",
     "              fi",
     '            done <<< "$owners"',
+    '            if [ "$on_target" != 1 ]; then',
+    '              refuse "$pname carries the partition label $plabel but does not sit on $dev; disko could pick it up. '
+    'Unplug or wipe the device it is on"',
+    "            fi",
     "            ;;",
     "        esac",
     '      done <<< "$parts"',
@@ -1004,6 +1023,7 @@ _PARTLABEL_GUARD_REQUIRED = [
     ("          disk-main-*)", "the disk-main-* label match"),
     ('owners=$(lsblk -nrpso NAME,TYPE "$pname") || refuse', "the label's disk lookup"),
     ('if [ "$o" != "$dev" ]; then', "the foreign-disk label refusal"),
+    ('if [ "$on_target" != 1 ]; then', "the on-target label requirement"),
 ]
 # Secrets that must never be rendered: disko/NixOS key and password file options and plain
 # password attributes (hashedPassword stays allowed), as an attribute: at the start of a

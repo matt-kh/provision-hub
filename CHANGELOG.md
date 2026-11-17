@@ -26,14 +26,16 @@ may change incompatibly; every such change has a Migration paragraph. See
   `owner`; exactly one of them or the root is `100%FREE`, created last by disko's LV
   priority), LUKS2 pinned with `--type luks2`. No key or password file: disko asks for the
   passphrase twice at install time (the install script and `plan` warn first). The install
-  script refuses while another disk provides a volume group `pool` or an open
-  `/dev/mapper/crypted`, which disko would otherwise reuse. New keys `esp_size` (default `512M`, at
+  script refuses while any volume group `pool` or open `/dev/mapper/crypted` exists:
+  another disk's would be reused by disko, and a leftover on the target disk must be
+  closed first (`vgchange -an pool`, then `cryptsetup close crypted`). New keys `esp_size` (default `512M`, at
   least 256M), `hibernate` (`resumeDevice` on the swap device; needs `swap_size`),
   `root_size` and `volumes`; an `owner` makes the mount point the user's through
   `systemd.tmpfiles.rules`. `validate` checks the LUKS/LVM structure and refuses rendered
   key files, password files or passwords. Example
   `examples/os-install/demo-nixos-gnome-luks/` (locked and `nix eval`-ed only, never built
-  or installed). Existing specs render unchanged.
+  or installed). Existing specs render unchanged apart from the install
+  script's partition-label guard (see Security).
 - Backend contract: optional `PRESERVE`, relative paths of human-created regular files in
   `rendered/` that `render` keeps and `diff`/`validate` do not report as stale (used for
   nixos-disko's `flake.lock`).

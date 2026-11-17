@@ -84,7 +84,7 @@ size = "100%FREE"            # exactly one of root_size and the volumes' size
 | `layout` | `ext4` \| `ext4-luks` (`ext4`) | `ext4-luks` needs `firmware = "uefi"`; btrfs and ZFS are follow-ups |
 | `swap_size` | `^[1-9][0-9]*[MG]$`, optional | a partition (`ext4`) or LV `swap` (`ext4-luks`); no swap when absent |
 | `esp_size` | `^[1-9][0-9]*[MG]$` (`512M`) | ESP size on UEFI; less than `256M` is an error; any other value than the default on BIOS is an error (BIOS has no ESP) |
-| `hibernate` | bool (`false`) | disko's `resumeDevice = true` on the swap device, so `boot.resumeDevice` (and `resume=`) point at it; needs `swap_size` (error otherwise), which should be at least the RAM size |
+| `hibernate` | bool (`false`) | disko's `resumeDevice = true` on the swap device, so `boot.resumeDevice` (and `resume=`) point at it; needs `swap_size` (error otherwise), which should be at least the RAM size. On `ext4` the swap partition is unencrypted, so the hibernation image (all of RAM, keys and secrets included) is written to disk in clear: use `ext4-luks` to keep it encrypted |
 | `root_size` | size or `100%FREE` (`100%FREE`) | `ext4-luks` only (error on `ext4`): size of LV `root`, at least `8G` |
 | `volumes` | list (`[]`) | `ext4-luks` only (error on `ext4`): extra ext4 LVs, below |
 | `packages` | list of attribute paths (`[]`) | `pkgs.<attr>` in `environment.systemPackages`; e.g. `python3Packages.requests` |
@@ -152,9 +152,10 @@ earlier disko install), udev points the by-partlabel link at one of the two, so 
 time disko could mount (and, finding a file system there, not format) the other disk's
 partition, and at every boot `/boot`, `/` or the LUKS device could resolve to the wrong
 disk. `install-<hostname>` therefore refuses, before the serial prompt, when any partition
-listed by `lsblk -nrpo NAME,PARTLABEL` has a `disk-main-*` label and a `disk` ancestor
-(`lsblk -nrpso NAME,TYPE`, as for the boot medium) other than the target disk; a failing
-`lsblk` refuses as well. Labels on the target disk itself (a reinstall) are fine.
+listed by `lsblk -nrpo NAME,PARTLABEL` has a `disk-main-*` label unless it positively sits
+on the target disk: its `disk` and `loop` ancestors (`lsblk -nrpso NAME,TYPE`, as for the
+boot medium) must all resolve to the target, and at least one must be found (a labelled
+device with no disk or loop under it is refused too). A failing `lsblk` refuses as well. Labels on the target disk itself (a reinstall) are fine.
 Remediation, by a human: unplug that disk, or wipe its partition table
 (`wipefs -a` or `sgdisk --zap-all` on **that** disk, never the target). The labels on a
 disk added after the install are not checked: keep disks from other disko installs out of
@@ -244,7 +245,9 @@ disko turns into `boot.resumeDevice` (evaluated: `/dev/pool/swap`, kernel parame
 `resume=/dev/pool/swap`). The swap LV sits inside LUKS, so the hibernation image is
 encrypted. Swap should be at least the RAM size; `plan` says so and lists
 `cat /sys/power/disk` and a one-off `systemctl hibernate` test after the install. On
-`ext4` the same flag marks the swap partition.
+`ext4` the same flag marks the swap partition, which is not encrypted: the hibernation
+image, a copy of RAM including keys and secrets, lands on the disk in clear. Use
+`ext4-luks` when that matters.
 
 **Mounts.** Evaluated `fileSystems` for the example: `/` on `/dev/pool/root`, `/boot` on the
 ESP (`umask=0077`), `/home` on `/dev/pool/home` (`defaults`), `/srv/data` on
