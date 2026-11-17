@@ -1488,3 +1488,266 @@ def test_reserved_and_shared_wording_follows_the_lists():
     assert "/home/<name>" in vols["owner"]["description"]
     findings = luks_findings(lambda r: (vol(r, 0).pop("owner"), vol(r, 0).update(mountpoint="/var/lock")))
     assert any(f"is reserved: not {nixos._RESERVED_TEXT}" in f.message for f in findings)
+
+
+# --- networking (networkd | networkmanager) and desktop (none | gnome) ----------------------
+
+
+def _nm(raw):
+    raw.pop("network")
+    raw["nixos-disko"]["networking"] = "networkmanager"
+
+
+def _gnome(raw):
+    _nm(raw)
+    raw["nixos-disko"]["desktop"] = "gnome"
+
+
+def nm_host(edit=None):
+    return host(lambda r: (_nm(r), edit and edit(r)))
+
+
+def gnome_host(edit=None):
+    return host(lambda r: (_gnome(r), edit and edit(r)))
+
+
+def test_networkmanager_and_gnome_specs_are_valid_without_findings():
+    assert spec_findings(_nm) == [] and spec_findings(_gnome) == []
+    assert "network" not in gnome_host()
+
+
+def test_networkd_without_network_is_rejected():
+    findings = spec_findings(lambda r: r.pop("network"))
+    assert [f.where for f in findings if f.level == ERROR] == ["network"]
+    assert messages(findings) == [
+        "networking 'networkd' needs [network] with at least one interface; "
+        'on a machine that joins networks interactively set networking = "networkmanager"'
+    ]
+
+
+def test_networkmanager_with_network_is_rejected():
+    full = spec_findings(lambda r: r["nixos-disko"].update(networking="networkmanager"))
+    assert any(m.startswith("[network] is not used with networking 'networkmanager'") and "nmtui or nmcli" in m for m in messages(full))
+    # a [network] holding only dns is not even a valid table: interfaces are required once it is present
+    dns_only = spec_findings(lambda r: (r["nixos-disko"].update(networking="networkmanager"), r.update(network={"dns": {"nameservers": ["192.0.2.53"]}})))
+    assert messages(dns_only) and all(f.level == ERROR for f in dns_only)
+
+
+def test_networkmanager_render_has_no_networkd():
+    conf = nixos.render(nm_host(), Context("demo"))["configuration.nix"]
+    assert "networking.networkmanager.enable = true;" in conf
+    for absent in ("useNetworkd", "systemd.network", "networking.useDHCP", ".link", "nameservers", "matchConfig"):
+        assert absent not in conf, absent
+    assert "this file holds no network credentials" in conf and "nmtui or nmcli" in conf and "GNOME Settings" not in conf
+    networkd = nixos.render(host(), Context("demo"))["configuration.nix"]
+    assert "networking.useNetworkd = true;" in networkd and "networkmanager" not in networkd
+
+
+def _groups(conf, user):
+    m = re.search(rf"users\.users\.{user} = {{\n(?:.*\n)*?    extraGroups = (\[[^\]]*\]);", conf)
+    return m.group(1) if m else None
+
+
+def test_networkmanager_group_for_wheel_members():
+    def users(r):
+        ssh = r["users"][0]["ssh_authorized_keys"]
+        r["users"] = [
+            {"name": "ops", "sudo": True, "ssh_authorized_keys": ssh},
+            {"name": "alice", "groups": ["wheel"], "password_hash": "$6$EXAMPLEsalt$EXAMPLEhash"},
+            {"name": "bob", "groups": ["video"]},
+            {"name": "carol", "groups": ["networkmanager", "wheel"], "sudo": True},
+        ]
+
+    conf = nixos.render(nm_host(users), Context("demo"))["configuration.nix"]
+    assert _groups(conf, "ops") == '[ "wheel" "networkmanager" ]'
+    assert _groups(conf, "alice") == '[ "wheel" "networkmanager" ]'
+    assert _groups(conf, "bob") == '[ "video" ]'
+    assert _groups(conf, "carol") == '[ "networkmanager" "wheel" ]'
+    networkd = nixos.render(host(users), Context("demo"))["configuration.nix"]
+    assert _groups(networkd, "alice") == '[ "wheel" ]' and _groups(networkd, "ops") == '[ "wheel" ]'
+
+
+def test_gnome_needs_networkmanager():
+    findings = spec_findings(lambda r: r["nixos-disko"].update(desktop="gnome"))
+    assert any(
+        f.where == "nixos-disko.desktop" and f.message == 'desktop \'gnome\' needs networking = "networkmanager" (GNOME manages connections through NetworkManager)'
+        for f in findings
+    ), findings
+
+
+@pytest.mark.parametrize("release,ok", [("nixos-24.11", False), ("nixos-25.05", False), ("nixos-25.11", True), ("nixos-26.05", True)])
+def test_gnome_needs_release_25_11(release, ok):
+    findings = spec_findings(lambda r: (_gnome(r), r["nixos-disko"].update(release=release, state_version="24.11")))
+    errors = [f for f in findings if f.level == ERROR]
+    if ok:
+        assert errors == []
+    else:
+        assert [f.where for f in errors] == ["nixos-disko.release"] and release in errors[0].message and "nixos-25.11 or newer" in errors[0].message
+    # without a desktop the old releases stay allowed
+    assert messages(spec_findings(lambda r: (_nm(r), r["nixos-disko"].update(release=release, state_version="24.11")))) == []
+
+
+def test_gnome_renders_current_option_names():
+    conf = nixos.render(gnome_host(), Context("demo"))["configuration.nix"]
+    assert "services.displayManager.gdm.enable = true;" in conf and "services.desktopManager.gnome.enable = true;" in conf
+    assert "Wayland" in conf and "25.11" in conf
+    for absent in ("services.xserver.enable", "services.xserver.desktopManager", "services.xserver.displayManager", "pipewire", "pulseaudio", "sound."):
+        assert absent not in conf, absent
+    assert "nmtui, nmcli or GNOME Settings" in conf
+    assert "services.desktopManager" not in nixos.render(nm_host(), Context("demo"))["configuration.nix"]
+
+
+def test_explicit_networking_and_desktop_defaults_equal_omitted():
+    explicit = host(lambda r: r["nixos-disko"].update(networking="networkd", desktop="none"))
+    assert explicit == host() and nixos.render(explicit, Context("demo")) == nixos.render(host(), Context("demo"))
+    assert host()["nixos-disko"]["networking"] == "networkd" and host()["nixos-disko"]["desktop"] == "none"
+
+
+def test_keyboard_comment_follows_the_desktop():
+    plain = nixos.render(nm_host(), Context("demo"))["configuration.nix"]
+    gnome = nixos.render(gnome_host(), Context("demo"))["configuration.nix"]
+    assert "# keyboard is an XKB layout; the console keymap is derived from it (X stays disabled)." in plain
+    assert "the console keymap is derived from it and the desktop uses the same setting." in gnome
+    assert "X stays disabled" not in gnome
+
+
+@pytest.mark.parametrize("key,value", [("networking", "wpa_supplicant"), ("networking", "NetworkManager"), ("desktop", "kde"), ("desktop", "")])
+def test_bad_networking_and_desktop_values(key, value):
+    findings = spec_findings(lambda r: r["nixos-disko"].update({key: value}))
+    assert any(f"nixos-disko.{key}: {value!r} is not one of" in m for m in messages(findings)), findings
+
+
+def test_no_network_credentials_in_any_file():
+    files = nixos.render(gnome_host(), Context("demo"))
+    for name, text in files.items():
+        assert nixos._net_secret(text) is None, name
+        for needle in ("psk", "wireless.networks", "ensureProfiles"):
+            assert needle not in text, (name, needle)
+
+
+@pytest.fixture
+def gnome_rendered(tmp_path):
+    for name, text in nixos.render(gnome_host(), Context("demo")).items():
+        (tmp_path / name).write_text(text)
+    return tmp_path
+
+
+def test_clean_gnome_render_validates(gnome_rendered):
+    assert messages(nixos.validate(gnome_rendered)) == []
+
+
+NM_LINE = "  networking.networkmanager.enable = true;\n"
+GDM_LINE = "  services.displayManager.gdm.enable = true;\n"
+
+
+@pytest.mark.parametrize(
+    "edit,needle",
+    [
+        (lambda t: t.replace(NM_LINE, NM_LINE + "  networking.useNetworkd = true;\n"), "both systemd-networkd and NetworkManager"),
+        (lambda t: t.replace(NM_LINE, NM_LINE + '  systemd.network.networks."10-x".matchConfig.Name = "x";\n'), "both systemd-networkd and NetworkManager"),
+        (lambda t: t.replace(NM_LINE, ""), "neither systemd-networkd nor NetworkManager"),
+        (lambda t: t.replace(NM_LINE, "  networking.useNetworkd = true;\n"), "GNOME is enabled without NetworkManager"),
+        (lambda t: t.replace(GDM_LINE, ""), "GNOME is enabled without services.displayManager.gdm.enable"),
+        (lambda t: t.replace(GDM_LINE, "  services.xserver.displayManager.gdm.enable = true;\n"), "services.xserver.displayManager is the pre-25.11 name"),
+        (lambda t: t.replace(NM_LINE, NM_LINE + "  services.xserver.desktopManager.gnome.enable = true;\n"), "services.xserver.desktopManager is the pre-25.11 name"),
+        (lambda t: t.replace(NM_LINE, NM_LINE + '  networking.wireless.networks."EXAMPLE".psk = "x";\n'), "no network credentials may be rendered"),
+        (lambda t: t.replace(NM_LINE, NM_LINE + "  networking.networkmanager.ensureProfiles.profiles = { };\n"), "ensureProfiles: no network credentials"),
+        (lambda t: t.replace(NM_LINE, NM_LINE + "  networking.wireless.secretsFile = /run/x;\n"), "wireless.secretsFile: no network credentials"),
+    ],
+)
+def test_broken_desktop_files_are_caught(gnome_rendered, edit, needle):
+    path = gnome_rendered / "configuration.nix"
+    text = path.read_text()
+    assert edit(text) != text
+    path.write_text(edit(text))
+    msgs = messages(nixos.validate(gnome_rendered))
+    assert any(needle in m for m in msgs), msgs
+
+
+def test_network_words_in_strings_and_comments_are_not_credentials(tmp_path):
+    spec = gnome_host(lambda r: r["users"][0].update(gecos="Ops psk wireless.networks ensureProfiles"))
+    for name, text in nixos.render(spec, Context("demo")).items():
+        (tmp_path / name).write_text(text)
+    assert messages(nixos.validate(tmp_path)) == []
+    assert nixos._net_secret("  # psk = x; ensureProfiles\n") is None
+
+
+def test_networkmanager_plan_lines():
+    lines = nixos.plan(nm_host(), Context("demo"))
+    post = lines[lines.index("sudo install-demo"):]
+    assert any("nmtui" in line for line in post) and "nmcli device status" in post
+    assert any("never in spec.toml" in line for line in post)
+    # no static address without [network]: the ssh hint asks for the address
+    assert post.index("nmcli device status") < post.index("HOST_IP=CHANGE-ME")
+    assert post[post.index("HOST_IP=CHANGE-ME") + 1] == 'ssh ops@"$HOST_IP"'
+    assert "systemctl is-active display-manager" not in lines
+    assert not any("GNOME Settings" in line or "desktop closure" in line for line in lines)
+    plain = nixos.plan(host(), Context("demo"))
+    assert "nmcli device status" not in plain and not any("nmtui" in line for line in plain)
+
+
+def test_gnome_plan_lines():
+    lines = nixos.plan(gnome_host(), Context("demo"))
+    iso = next(i for i, line in enumerate(lines) if line.startswith("nix ") and " build " in line)
+    size = [i for i, line in enumerate(lines) if "whole desktop closure" in line]
+    assert size and size[0] < iso and any("16 GB" in line for line in lines)
+    assert any("GNOME Settings" in line for line in lines)
+    assert lines[-1] == "systemctl is-active display-manager"
+
+
+@pytest.mark.parametrize("firmware", ["uefi", "bios"])
+def test_secure_boot_and_wsl2_lines(firmware):
+    lines = nixos.plan(host(lambda r: r.update(firmware=firmware)), Context("demo"))
+    secure = [line for line in lines if "Secure Boot" in line]
+    if firmware == "uefi":
+        assert secure == ["#    Disable Secure Boot in the firmware setup first: neither the installer stick nor systemd-boot is signed."]
+        assert lines.index(secure[0]) < lines.index("sudo install-demo")
+    else:
+        assert secure == []
+    case = next(i for i, line in enumerate(lines) if line.startswith('case "$USB"'))
+    wsl = [i for i, line in enumerate(lines) if "WSL2" in line]
+    assert wsl and wsl[0] > case and '#        cp -L "$ISO" /mnt/c/Users/CHANGE-ME/Downloads/' in lines
+    assert any("Rufus (DD image mode) or balenaEtcher" in line for line in lines)
+
+
+def test_gnome_plan_executes_nothing(tmp_path, capsys, monkeypatch):
+    from conftest import EXAMPLES
+
+    for name in ("run", "Popen", "call", "check_call", "check_output", "getoutput", "getstatusoutput"):
+        monkeypatch.setattr(subprocess, name, _forbidden)
+    for name in ("system", "popen", "execv", "execve", "execvp", "execvpe", "spawnv", "spawnve", "posix_spawn", "fork"):
+        if hasattr(os, name):
+            monkeypatch.setattr(os, name, _forbidden)
+    code, out, _ = run(capsys, "--root", str(EXAMPLES), "plan", "os-install/demo-nixos-gnome-luks")
+    assert code == 0 and "nmcli device status" in out and "systemctl is-active display-manager" in out
+
+
+def test_hostile_values_without_network_are_quoted(tmp_path):
+    spec = gnome_host()
+    spec["hostname"] = "demo;touch${IFS}/tmp/pwned"
+    spec["users"][0]["name"] = "ops$(id)"
+    lines = plan_lines(nixos, spec, Context("demo"), "os-install/demo", tmp_path)
+    for line in lines:
+        if line and not line.startswith("#"):
+            assert not {"touch", "id"} & set(shlex.split(line)), line
+    assert "ssh 'ops$(id)'@\"$HOST_IP\"" in lines
+    files = nixos.render(gnome_host(lambda r: r["users"][0].update(gecos='x"${builtins.abort 1}"')), Context("demo"))
+    assert 'description = "x\\"\\${builtins.abort 1}\\"";' in files["configuration.nix"]
+
+
+def test_gnome_example_cli_round_trip(capsys):
+    from conftest import EXAMPLES
+
+    root = str(EXAMPLES)
+    code, out, err = run(capsys, "--root", root, "validate", "os-install/demo-nixos-gnome-luks")
+    assert code == 0 and "ok: os-install/demo-nixos-gnome-luks" in out, err
+    assert run(capsys, "--root", root, "diff", "os-install/demo-nixos-gnome-luks")[0] == 0
+    raw = tomllib.loads((EXAMPLES / "os-install/demo-nixos-gnome-luks/spec.toml").read_text())
+    assert "network" not in raw and raw["nixos-disko"]["networking"] == "networkmanager" and raw["nixos-disko"]["desktop"] == "gnome"
+
+
+def test_starter_hints_for_networking_and_desktop_are_comments():
+    text = nixos.starter("demo")
+    for key in ('networking = "networkd"', '"networkmanager"', 'desktop = "none"', '"gnome"'):
+        assert any(line.startswith("#") and key in line for line in text.splitlines()), key
+    assert "networking" not in starter_raw()["nixos-disko"] and "desktop" not in starter_raw()["nixos-disko"]

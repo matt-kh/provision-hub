@@ -1,4 +1,5 @@
-# NixOS on one encrypted disk with disko (ext4 on LVM on LUKS, UEFI, hibernation).
+# NixOS desktop on one encrypted disk with disko (ext4 on LVM on LUKS, UEFI, hibernation),
+# GNOME and NetworkManager: no [network]; connections (Wi-Fi) are made on the machine.
 # Synthetic values only; the sizes are illustrative, not those of any real machine.
 api_version = "prov/v1alpha1"
 kind = "os-install"
@@ -21,11 +22,6 @@ ssh_authorized_keys = [
   "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE alice@example.com",
 ]
 
-[[network.interfaces]]
-name = "lan0"
-macaddress = "02:00:00:00:00:02"
-dhcp4 = true
-
 [storage]
 # The one disk disko-install wipes and encrypts; an obviously fake by-id serial.
 disks = ["/dev/disk/by-id/nvme-EXAMPLE_SSD_SERIAL_0000000001"]
@@ -40,6 +36,8 @@ hibernate = true
 root_size = "64G"
 packages = ["git", "vim"]
 cpu_vendor = "amd"
+networking = "networkmanager"
+desktop = "gnome"
 
 [[nixos-disko.volumes]]
 name = "data"

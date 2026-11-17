@@ -39,7 +39,7 @@ def test_builtin_kinds_satisfy_the_contract(name):
 def test_os_install_core_has_no_backend_keys():
     props = kinds.KINDS["os-install"].PROPERTIES
     assert "distro" not in props and "schema_version" not in props and "backend" not in props
-    assert kinds.KINDS["os-install"].REQUIRED == ["hostname", "network", "storage"]
+    assert kinds.KINDS["os-install"].REQUIRED == ["hostname", "storage"]
     assert kinds.KINDS["os-install"].REFS == {}
 
 

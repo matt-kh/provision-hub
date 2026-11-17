@@ -85,7 +85,7 @@ def test_load_spec_raises_config_error(tmp_path):
     with pytest.raises(ConfigError, match="invalid TOML"):
         load_spec(path, "os-install", "x", discover())
     path.write_text('api_version = "prov/v1alpha1"\nkind = "os-install"\nbackend = "ubuntu-autoinstall"\nhostname = "x"\n', encoding="utf-8")
-    with pytest.raises(ConfigError, match="invalid spec:\n  error: <root>: missing required key 'network'"):
+    with pytest.raises(ConfigError, match="invalid spec:\n  error: <root>: missing required key 'storage'"):
         load_spec(path, "os-install", "x", discover())
 
 
@@ -130,6 +130,8 @@ SEMANTIC = {
     "raid1_one_disk": (lambda r: r["ubuntu-autoinstall"]["storage"].update(layout="mdraid"), "at least 2 disks"),
     "raid_level_on_lvm": (lambda r: r["ubuntu-autoinstall"]["storage"].update(raid_level=1), "mdraid' only"),
     "arm64_bios": (lambda r: r.update(arch="arm64", firmware="bios"), "UEFI only"),
+    # network is optional in the kind; ubuntu-autoinstall renders netplan from it and says so
+    "no_network": (lambda r: r.pop("network"), "ubuntu-autoinstall needs [network] with at least one interface"),
 }
 
 
@@ -164,8 +166,11 @@ DIFFERENTIAL = {
     "password_hash": (lambda r: r["users"][0].update(password_hash="$6$EXAMPLEsalt$EXAMPLEhash"), True),
     "disk_by_id": (lambda r: r["storage"].update(disks=["/dev/disk/by-id/nvme-EXAMPLE_SERIAL-part1"]), True),
     "no_dns": (lambda r: r["network"].pop("dns"), True),
+    "no_network": (lambda r: r.pop("network"), True),
     "minimal_users": (lambda r: r.update(users=[{"name": "ops", "ssh_authorized_keys": r["users"][0]["ssh_authorized_keys"]}]), True),
     # reject direction
+    "network_without_interfaces": (lambda r: r.update(network={"dns": {"nameservers": ["192.0.2.53"]}}), False),
+    "network_empty_interfaces": (lambda r: r["network"].update(interfaces=[]), False),
     "raid_level_true": (lambda r: r["ubuntu-autoinstall"]["storage"].update(layout="mdraid", raid_level=True), False),
     "mtu_fraction": (lambda r: r["network"]["interfaces"][0].update(mtu=1500.5), False),
     "dhcp4_int": (lambda r: r["network"]["interfaces"][0].update(dhcp4=1), False),
@@ -196,6 +201,13 @@ def test_differential_against_reference_validator(name):
         assert reference is True and ours is False
     else:
         assert reference is ours
+
+
+def test_kind_semantic_skips_a_missing_network():
+    from prov.kinds import os_install
+
+    raw = _mutate(lambda r: r.pop("network"))
+    assert os_install.semantic(dict(raw, users=[])) == []
 
 
 def test_integral_floats_are_normalised_to_int():

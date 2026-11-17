@@ -33,29 +33,22 @@ in
   networking.domain = "example.com";
   time.timeZone = "Etc/UTC";
   i18n.defaultLocale = "en_US.UTF-8";
-  # keyboard is an XKB layout; the console keymap is derived from it (X stays disabled).
+  # keyboard is an XKB layout; the console keymap is derived from it and the desktop uses the same setting.
   services.xserver.xkb.layout = "us";
   console.useXkbConfig = true;
 
-  # Network: systemd-networkd, one unit per interface; NICs with a MAC are renamed by .link files.
-  networking.useDHCP = false;
-  networking.useNetworkd = true;
-  systemd.network.enable = true;
-  # Boot waits for one configured interface, not all (an unplugged NIC would stall it).
-  systemd.network.wait-online.anyInterface = true;
-  systemd.network.links."10-lan0" = {
-    matchConfig.PermanentMACAddress = "02:00:00:00:00:02";
-    linkConfig.Name = "lan0";
-  };
-  systemd.network.networks."10-lan0" = {
-    matchConfig.Name = "lan0";
-    networkConfig.DHCP = "ipv4";
-  };
+  # Network: NetworkManager. Connections, Wi-Fi included, are made on the machine with
+  # nmtui, nmcli or GNOME Settings after the first boot; this file holds no network credentials.
+  networking.networkmanager.enable = true;
+
+  # Desktop: GNOME on Wayland with the GDM login screen (option names of NixOS 25.11 and later).
+  services.displayManager.gdm.enable = true;
+  services.desktopManager.gnome.enable = true;
 
   users.users.alice = {
     isNormalUser = true;
     description = "Alice Example";
-    extraGroups = [ "wheel" ];
+    extraGroups = [ "wheel" "networkmanager" ];
     hashedPassword = "$6$EXAMPLEsalt$EXAMPLEhashEXAMPLEhashEXAMPLEhashEXAMPLEhashEXAMPLEhashEXAMPLEhash0123456789";
     openssh.authorizedKeys.keys = [
       "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE alice@example.com"
