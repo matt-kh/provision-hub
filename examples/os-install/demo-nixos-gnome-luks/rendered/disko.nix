@@ -24,7 +24,8 @@
           content = {
             type = "luks";
             name = "crypted";
-            settings.allowDiscards = true;
+            extraFormatArgs = [ "--type" "luks2" ];
+            settings.allowDiscards = true; # TRIM on SSDs; reveals which blocks are unused
             content = { type = "lvm_pv"; vg = "pool"; };
           };
         };

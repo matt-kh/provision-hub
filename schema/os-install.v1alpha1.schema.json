@@ -250,7 +250,7 @@
         },
         "esp_size": {
           "default": "512M",
-          "description": "Size of the EFI system partition mounted at /boot (UEFI only; at least 256M).",
+          "description": "Size of the EFI system partition mounted at /boot (UEFI only, at least 256M; leave the default on BIOS).",
           "pattern": "^[1-9][0-9]*[MG]$",
           "type": "string"
         },
@@ -284,7 +284,7 @@
         },
         "root_size": {
           "default": "100%FREE",
-          "description": "ext4-luks: size of the root logical volume, or 100%FREE for the space left. Exactly one of root and volumes takes 100%FREE.",
+          "description": "ext4-luks: size of the root logical volume (at least 8G), or 100%FREE for the space left. Exactly one of root and volumes takes 100%FREE.",
           "pattern": "^([1-9][0-9]*[MG]|100%FREE)$",
           "type": "string"
         },
@@ -316,19 +316,19 @@
                 "uniqueItems": true
               },
               "mountpoint": {
-                "description": "Absolute, normalised mount point; not /, /boot (or below it) or /nix.",
+                "description": "Absolute, normalised, unique mount point; not /, nor /boot, /nix, /proc, /sys, /dev, /run or anything below them.",
                 "maxLength": 255,
                 "pattern": "^/[A-Za-z0-9._/-]*$",
                 "type": "string"
               },
               "name": {
-                "description": "Logical volume name (not root or swap).",
+                "description": "Logical volume name: unique, not root or swap, not starting with snapshot or pvmove.",
                 "maxLength": 32,
                 "pattern": "^[a-z][a-z0-9-]*$",
                 "type": "string"
               },
               "owner": {
-                "description": "A [[users]] name: the mount point becomes owned by this user (group users, mode 0750) via systemd-tmpfiles.",
+                "description": "A [[users]] name: the mount point becomes owned by this user (group users, mode 0750) via systemd-tmpfiles. Not on /home, /tmp, /srv, /opt, /mnt, /media themselves or at/below /var, /etc, /usr.",
                 "pattern": "^[a-z_][a-z0-9_-]{0,31}$",
                 "type": "string"
               },

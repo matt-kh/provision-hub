@@ -62,7 +62,7 @@ let
 
   install = pkgs.writeShellApplication {
     name = "install-${hostName}";
-    runtimeInputs = [ pkgs.coreutils pkgs.util-linux disko ];
+    runtimeInputs = [ pkgs.coreutils pkgs.util-linux disko pkgs.lvm2 pkgs.cryptsetup ];
     text = ''
       disk=${lib.escapeShellArg disk}
       host=${lib.escapeShellArg hostName}
@@ -115,6 +115,17 @@ let
         done <<< "$ancestors"
       else
         echo "install-$host: no block device at /iso; the boot medium was not compared" >&2
+      fi
+      # ext4-luks: refuse when another disk already provides VG pool or LUKS mapping crypted;
+      # disko would reuse them instead of creating them on the target disk.
+      vgnames=$(vgs --noheadings -o vg_name) || refuse "cannot list the LVM volume groups (vgs)"
+      while read -r vg; do
+        if [ "$vg" = pool ]; then
+          refuse "an LVM volume group named pool already exists; disko would reuse it. Deactivate it (vgchange -an pool) or remove it first"
+        fi
+      done <<< "$vgnames"
+      if [ -e /dev/mapper/crypted ] || cryptsetup status crypted >/dev/null 2>&1; then
+        refuse "/dev/mapper/crypted already exists; disko would reuse it. Close it (cryptsetup close crypted) first"
       fi
       serial=$(lsblk -dno SERIAL "$dev") || refuse "cannot read the serial of $dev"
       serial=$(printf %s "$serial" | tr -d "[:space:]")

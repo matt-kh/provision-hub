@@ -82,7 +82,7 @@ SCHEMA: Dict[str, Any] = {
             "type": "string",
             "pattern": f"^{_SIZE}$",
             "default": "512M",
-            "description": "Size of the EFI system partition mounted at /boot (UEFI only; at least 256M).",
+            "description": "Size of the EFI system partition mounted at /boot (UEFI only, at least 256M; leave the default on BIOS).",
         },
         "hibernate": {
             "type": "boolean",
@@ -93,7 +93,7 @@ SCHEMA: Dict[str, Any] = {
             "type": "string",
             "pattern": f"^({_SIZE}|100%FREE)$",
             "default": "100%FREE",
-            "description": "ext4-luks: size of the root logical volume, or 100%FREE for the space left. Exactly one of root and volumes takes 100%FREE.",
+            "description": "ext4-luks: size of the root logical volume (at least 8G), or 100%FREE for the space left. Exactly one of root and volumes takes 100%FREE.",
         },
         "volumes": {
             "type": "array",
@@ -104,12 +104,12 @@ SCHEMA: Dict[str, Any] = {
                 "additionalProperties": False,
                 "required": ["name", "mountpoint", "size"],
                 "properties": {
-                    "name": {"type": "string", "pattern": "^[a-z][a-z0-9-]*$", "maxLength": 32, "description": "Logical volume name (not root or swap)."},
+                    "name": {"type": "string", "pattern": "^[a-z][a-z0-9-]*$", "maxLength": 32, "description": "Logical volume name: unique, not root or swap, not starting with snapshot or pvmove."},
                     "mountpoint": {
                         "type": "string",
                         "pattern": "^/[A-Za-z0-9._/-]*$",
                         "maxLength": 255,
-                        "description": "Absolute, normalised mount point; not /, /boot (or below it) or /nix.",
+                        "description": "Absolute, normalised, unique mount point; not /, nor /boot, /nix, /proc, /sys, /dev, /run or anything below them.",
                     },
                     "size": {"type": "string", "pattern": f"^({_SIZE}|100%FREE)$", "description": "Size (e.g. 200G) or 100%FREE for the space left."},
                     "mount_options": {
@@ -122,7 +122,7 @@ SCHEMA: Dict[str, Any] = {
                     "owner": {
                         "type": "string",
                         "pattern": "^[a-z_][a-z0-9_-]{0,31}$",
-                        "description": "A [[users]] name: the mount point becomes owned by this user (group users, mode 0750) via systemd-tmpfiles.",
+                        "description": "A [[users]] name: the mount point becomes owned by this user (group users, mode 0750) via systemd-tmpfiles. Not on /home, /tmp, /srv, /opt, /mnt, /media themselves or at/below /var, /etc, /usr.",
                     },
                 },
             },
@@ -143,10 +143,17 @@ BIOS_BOOT_SIZE = "1M"
 FREE = "100%FREE"
 LUKS_NAME = "crypted"  # /dev/mapper/crypted; boot.initrd.luks.devices.crypted (set by disko)
 VG_NAME = "pool"
-# Logical volume names prov uses itself or LVM reserves.
-RESERVED_LVS = frozenset({"root", "swap", "snapshot", "pvmove"})
-# Mount points a volume may not take (the root, the ESP, the Nix store's parent).
-RESERVED_MOUNTS = ("/", "/boot", "/nix")
+# Logical volume names prov uses itself; LVM rejects names starting with these prefixes.
+RESERVED_LVS = frozenset({"root", "swap"})
+RESERVED_LV_PREFIXES = ("snapshot", "pvmove")
+# A volume may not be mounted at / or at or below these (ESP, Nix store, kernel/runtime trees).
+RESERVED_MOUNT_TREES = ("/boot", "/nix", "/proc", "/sys", "/dev", "/run")
+# An owner may not take over a shared system directory: these exactly, and anything at or
+# below the trees (a directory below /srv or /home, such as /srv/data, is fine).
+SHARED_DIRS = ("/home", "/tmp", "/srv", "/opt", "/mnt", "/media")
+SHARED_TREES = ("/var", "/etc", "/usr")
+ESP_DEFAULT = "512M"
+ROOT_MIN_MIB = 8 * 1024
 # Keyboard drivers for typing the LUKS passphrase in the initrd (usbhid is in INITRD_MODULES).
 LUKS_INITRD_MODULES = ("hid_generic",)
 BY_ID = "/dev/disk/by-id/"
@@ -194,6 +201,10 @@ def _mib(size: str) -> int:
     return int(size[:-1]) * (1024 if size.endswith("G") else 1)
 
 
+def _at_or_below(path: str, trees: tuple) -> bool:
+    return any(path == t or path.startswith(t + "/") for t in trees)
+
+
 # --- contract: check ----------------------------------------------------------------------
 
 
@@ -204,6 +215,8 @@ def _check_storage(spec: Dict[str, Any]) -> List[Finding]:
     luks = nixos["layout"] == "ext4-luks"
     if spec["firmware"] == "uefi" and _mib(nixos["esp_size"]) < ESP_MIN_MIB:
         out.append(Finding(ERROR, f"esp_size {nixos['esp_size']} is too small; use at least {ESP_MIN_MIB}M", f"{NAME}.esp_size"))
+    if spec["firmware"] != "uefi" and nixos["esp_size"] != ESP_DEFAULT:
+        out.append(Finding(ERROR, "esp_size applies to firmware 'uefi' only; BIOS uses a 1M BIOS boot partition", f"{NAME}.esp_size"))
     if nixos["hibernate"] and "swap_size" not in nixos:
         out.append(Finding(ERROR, "hibernate needs swap_size (at least the RAM size) to resume from", f"{NAME}.hibernate"))
     if luks and spec["firmware"] != "uefi":
@@ -221,6 +234,8 @@ def _check_storage(spec: Dict[str, Any]) -> List[Finding]:
         if nixos["volumes"]:
             out.append(Finding(ERROR, "volumes need layout 'ext4-luks' (logical volumes); layout 'ext4' has a single root partition", f"{NAME}.volumes"))
         return out
+    if nixos["root_size"] != FREE and _mib(nixos["root_size"]) < ROOT_MIN_MIB:
+        out.append(Finding(ERROR, f"root_size {nixos['root_size']} is too small for a NixOS root; use at least 8G or {FREE}", f"{NAME}.root_size"))
     free = (["root"] if nixos["root_size"] == FREE else []) + [v["name"] for v in nixos["volumes"] if v["size"] == FREE]
     if len(free) != 1:
         which = "none does" if not free else "several do: " + ", ".join(short_repr(n) for n in free)
@@ -231,21 +246,32 @@ def _check_storage(spec: Dict[str, Any]) -> List[Finding]:
     for i, vol in enumerate(nixos["volumes"]):
         where = f"{NAME}.volumes[{i}]"
         name, mount = vol["name"], vol["mountpoint"]
-        if name in RESERVED_LVS:
-            out.append(Finding(ERROR, f"volume name {short_repr(name)} is reserved (root, swap, snapshot, pvmove)", f"{where}.name"))
+        if name in RESERVED_LVS or name.startswith(RESERVED_LV_PREFIXES):
+            out.append(Finding(ERROR, f"volume name {short_repr(name)} is reserved (root, swap, or starting with snapshot or pvmove)", f"{where}.name"))
         elif name in names:
             out.append(Finding(ERROR, f"volume name {short_repr(name)} is already used by volumes[{names[name]}]", f"{where}.name"))
         names.setdefault(name, i)
         parts = mount.split("/")[1:]
         if mount != "/" and (mount.endswith("/") or any(p in ("", ".", "..") for p in parts)):
             out.append(Finding(ERROR, f"mountpoint {short_repr(mount)} is not normalised (no //, trailing /, . or ..)", f"{where}.mountpoint"))
-        elif mount in RESERVED_MOUNTS or mount.startswith("/boot/"):
-            out.append(Finding(ERROR, f"mountpoint {short_repr(mount)} is reserved (/, /boot and below, /nix)", f"{where}.mountpoint"))
+        elif mount == "/" or _at_or_below(mount, RESERVED_MOUNT_TREES):
+            out.append(
+                Finding(ERROR, f"mountpoint {short_repr(mount)} is reserved (/, and /boot, /nix, /proc, /sys, /dev, /run with everything below)", f"{where}.mountpoint")
+            )
         elif mount in mounts:
             out.append(Finding(ERROR, f"mountpoint {short_repr(mount)} is already used by volumes[{mounts[mount]}]", f"{where}.mountpoint"))
         mounts.setdefault(mount, i)
         if "owner" in vol and vol["owner"] not in users:
             out.append(Finding(ERROR, f"owner {short_repr(vol['owner'])} is not a [[users]] name", f"{where}.owner"))
+        elif "owner" in vol and (mount in SHARED_DIRS or _at_or_below(mount, SHARED_TREES)):
+            out.append(
+                Finding(
+                    ERROR,
+                    f"owner on {short_repr(mount)}: a shared system directory (/home, /tmp, /srv, /opt, /mnt, /media, "
+                    "or /var, /etc, /usr and below) may not belong to one user; mount the volume below it instead (e.g. /srv/data)",
+                    f"{where}.owner",
+                )
+            )
     return out
 
 
@@ -477,7 +503,9 @@ def configuration_nix(spec: Dict[str, Any]) -> str:
         lines += [
             "  # UEFI: systemd-boot on the ESP (disko.nix mounts it at /boot).",
             "  boot.loader.systemd-boot.enable = true;",
-            f"  boot.loader.systemd-boot.configurationLimit = 10; # keeps the {nixos['esp_size']} ESP from filling up",
+            "  boot.loader.systemd-boot.configurationLimit = 10; # keeps the "
+            + ("512M ESP" if nixos["esp_size"] == ESP_DEFAULT else "ESP")
+            + " from filling up",
             "  boot.loader.efi.canTouchEfiVariables = true;",
         ]
     else:
@@ -623,7 +651,8 @@ def disko_nix(spec: Dict[str, Any]) -> str:
             "          content = {",
             '            type = "luks";',
             f"            name = {nix_str(LUKS_NAME)};",
-            "            settings.allowDiscards = true;",
+            '            extraFormatArgs = [ "--type" "luks2" ];',
+            "            settings.allowDiscards = true; # TRIM on SSDs; reveals which blocks are unused",
             f'            content = {{ type = "lvm_pv"; vg = {nix_str(VG_NAME)}; }};',
             "          };",
             "        };",
@@ -658,14 +687,38 @@ def disko_nix(spec: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+# ext4-luks: disko's create steps are idempotent (vgcreate only without a VG of that name,
+# luks open only when the mapping is not active, mkfs only without a file system), so a VG
+# "pool" or an open "crypted" mapping on ANOTHER disk would be reused silently and the
+# install would land there. Refuse before the confirmation; every probe fails closed.
+_LUKS_GUARD = [
+    f"      # ext4-luks: refuse when another disk already provides VG {VG_NAME} or LUKS mapping {LUKS_NAME};",
+    "      # disko would reuse them instead of creating them on the target disk.",
+    '      vgnames=$(vgs --noheadings -o vg_name) || refuse "cannot list the LVM volume groups (vgs)"',
+    "      while read -r vg; do",
+    f'        if [ "$vg" = {VG_NAME} ]; then',
+    f'          refuse "an LVM volume group named {VG_NAME} already exists; disko would reuse it. Deactivate it (vgchange -an {VG_NAME}) or remove it first"',
+    "        fi",
+    '      done <<< "$vgnames"',
+    f"      if [ -e /dev/mapper/{LUKS_NAME} ] || cryptsetup status {LUKS_NAME} >/dev/null 2>&1; then",
+    f'        refuse "/dev/mapper/{LUKS_NAME} already exists; disko would reuse it. Close it (cryptsetup close {LUKS_NAME}) first"',
+    "      fi",
+]
+
+
 def installer_nix(spec: Dict[str, Any]) -> str:
     host = spec["hostname"]
     disk = spec["storage"]["disks"][0]
     target = f"self.nixosConfigurations.{nix_attr(host)}"
     efi = "--write-efi-boot-entries " if spec["firmware"] == "uefi" else ""
-    passphrase = []
-    if spec[NAME]["layout"] == "ext4-luks":
+    luks = spec[NAME]["layout"] == "ext4-luks"
+    passphrase: List[str] = []
+    guard: List[str] = []
+    inputs = "pkgs.coreutils pkgs.util-linux disko"
+    if luks:
+        inputs += " pkgs.lvm2 pkgs.cryptsetup"
         passphrase = ['      echo "install-$host: disko will now ask for the new disk passphrase twice"']
+        guard = _LUKS_GUARD
     return "\n".join(
         [
             HEADER,
@@ -732,7 +785,7 @@ def installer_nix(spec: Dict[str, Any]) -> str:
             "",
             "  install = pkgs.writeShellApplication {",
             '    name = "install-${hostName}";',
-            "    runtimeInputs = [ pkgs.coreutils pkgs.util-linux disko ];",
+            f"    runtimeInputs = [ {inputs} ];",
             "    text = ''",
             "      disk=${lib.escapeShellArg disk}",
             "      host=${lib.escapeShellArg hostName}",
@@ -786,6 +839,9 @@ def installer_nix(spec: Dict[str, Any]) -> str:
             "      else",
             '        echo "install-$host: no block device at /iso; the boot medium was not compared" >&2',
             "      fi",
+        ]
+        + guard
+        + [
             '      serial=$(lsblk -dno SERIAL "$dev") || refuse "cannot read the serial of $dev"',
             '      serial=$(printf %s "$serial" | tr -d "[:space:]")',
             '      if [ "$(printf %s "$serial" | wc -c)" -ge 4 ]; then',
@@ -890,9 +946,29 @@ _LUKS_REQUIRED = [
     (f"disko.devices.lvm_vg.{VG_NAME} = {{", f"disko.devices.lvm_vg.{VG_NAME}"),
     ('type = "lvm_vg";', "the lvm_vg type"),
 ]
-# Secrets that must never be rendered: disko/NixOS key and password file options, a plain
-# password attribute (hashedPassword stays allowed).
-_SECRET = re.compile(r"\b(?:passwordFile|keyFile|additionalKeyFiles|initialPassword|password)\b\s*=")
+# The install script's refusal of a VG / LUKS mapping another disk already provides.
+_LUKS_GUARD_REQUIRED = [
+    ('vgnames=$(vgs --noheadings -o vg_name) || refuse', "the existing-VG check (vgs)"),
+    (f'if [ "$vg" = {VG_NAME} ]; then', f"the VG {VG_NAME} comparison"),
+    (f"if [ -e /dev/mapper/{LUKS_NAME} ] || cryptsetup status {LUKS_NAME} >/dev/null 2>&1; then", f"the open-{LUKS_NAME} check"),
+    ("pkgs.lvm2 pkgs.cryptsetup", "lvm2 and cryptsetup in runtimeInputs"),
+]
+# Secrets that must never be rendered: disko/NixOS key and password file options and plain
+# password attributes (hashedPassword stays allowed), as an attribute: at the start of a
+# line or after { or ;, with an optional dotted prefix (settings.keyFile =). String literals
+# and comments are blanked first, so a gecos or comment that says "password = x" is not one.
+_SECRET = re.compile(
+    r"(?:^|[{;])[ \t]*(?:[A-Za-z_][A-Za-z0-9_'-]*\.)*(passwordFile|keyFile|additionalKeyFiles|initialPassword|password)[ \t]*=(?!=)",
+    re.M,
+)
+
+
+def _secret(text: str) -> Optional[str]:
+    """The first secret attribute name assigned in Nix ``text``, or None."""
+    code = re.sub(_STRING, '""', text)
+    code = re.sub(r"#[^\n]*", "", code)
+    m = _SECRET.search(code)
+    return m.group(1) if m else None
 
 
 def _string_value(text: str, key: str) -> Optional[str]:
@@ -979,11 +1055,17 @@ def validate(rendered_dir: Path) -> List[Finding]:
         for needle, what in _LUKS_REQUIRED:
             if needle not in disko:
                 findings.append(Finding(ERROR, f"layout ext4-luks: {what} is missing", "disko.nix"))
+        if 'type = "EF02";' in disko or 'type = "EF00";' not in disko:
+            findings.append(Finding(ERROR, "layout ext4-luks needs an EF00 ESP and no EF02 BIOS boot partition (UEFI only)", "disko.nix"))
+        if inst is not None:
+            for needle, what in _LUKS_GUARD_REQUIRED:
+                if needle not in inst:
+                    findings.append(Finding(ERROR, f"layout ext4-luks: {what} is missing", "installer.nix"))
     for name in FILES:
         text = texts[name]
-        m = _SECRET.search(text) if text is not None else None
-        if m:
-            findings.append(Finding(ERROR, f"{esc(m.group(0))}: no key file, password file or password may be rendered", name))
+        secret = _secret(text) if text is not None else None
+        if secret:
+            findings.append(Finding(ERROR, f"{secret} =: no key file, password file or password may be rendered", name))
 
     lock_path = rendered_dir / "flake.lock"
     if lock_path.exists() or lock_path.is_symlink():
@@ -1067,6 +1149,8 @@ def plan(spec: Dict[str, Any], ctx: Any) -> List[str]:
         lines += [
             "#    ext4-luks: after the serial, disko asks TWICE for a NEW disk passphrase. Store it in a",
             "#    password manager first: it cannot be recovered, and it is typed at every boot.",
+            f"#    It also refuses while any disk provides an LVM volume group {VG_NAME} or an open",
+            f"#    /dev/mapper/{LUKS_NAME} (disko would reuse them): deactivate or close those first.",
         ]
     lines += [
         f"sudo {q(f'install-{host}')}",

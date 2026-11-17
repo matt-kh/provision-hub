@@ -24,8 +24,10 @@ may change incompatibly; every such change has a Migration paragraph. See
   discards allowed) holding LVM volume group `pool` with an optional swap LV, an ext4 root
   LV of `root_size` and ext4 `volumes` (`name`, `mountpoint`, `size`, `mount_options`,
   `owner`; exactly one of them or the root is `100%FREE`, created last by disko's LV
-  priority). No key or password file: disko asks for the passphrase twice at install time
-  (the install script and `plan` warn first). New keys `esp_size` (default `512M`, at
+  priority), LUKS2 pinned with `--type luks2`. No key or password file: disko asks for the
+  passphrase twice at install time (the install script and `plan` warn first). The install
+  script refuses while another disk provides a volume group `pool` or an open
+  `/dev/mapper/crypted`, which disko would otherwise reuse. New keys `esp_size` (default `512M`, at
   least 256M), `hibernate` (`resumeDevice` on the swap device; needs `swap_size`),
   `root_size` and `volumes`; an `owner` makes the mount point the user's through
   `systemd.tmpfiles.rules`. `validate` checks the LUKS/LVM structure and refuses rendered
