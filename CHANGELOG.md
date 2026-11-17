@@ -38,13 +38,15 @@ may change incompatibly; every such change has a Migration paragraph. See
   script's partition-label guard (see Security).
 - nixos-disko: `networking` (`networkd`, the default, rendered from `[network]`, or
   `networkmanager`: NetworkManager only, connections and Wi-Fi made on the machine with
-  nmtui, nmcli or GNOME Settings, `[network]` refused, wheel members also get the
-  `networkmanager` group) and `desktop` (`none`, the default, or `gnome`: GNOME on Wayland
+  nmtui, nmcli or GNOME Settings, `[network]` refused, users with `sudo = true` also get
+  the `networkmanager` group) and `desktop` (`none`, the default, or `gnome`: GNOME on Wayland
   with GDM through the NixOS 25.11+ options `services.displayManager.gdm` and
   `services.desktopManager.gnome`; needs `networkmanager` and `release` nixos-25.11 or
   newer). `validate` requires exactly one network stack, GDM and NetworkManager with GNOME,
   refuses the pre-25.11 `services.xserver.{desktop,display}Manager` names and any rendered
-  network credential (`psk`, `wireless.networks`, `ensureProfiles`). `plan` adds the
+  network credential (`networking.wireless.networks` and its `psk`/`pskRaw`,
+  `wireless.secretsFile`, `ensureProfiles`, also in nested attribute sets). `check` warns
+  when GNOME is chosen but no user has a `password_hash`. `plan` adds the
   Secure Boot note (UEFI), a WSL2 note for writing the stick from Windows, the GNOME ISO
   size note and the `nmtui` / `nmcli device status` / `systemctl is-active display-manager`
   checks. The example `demo-nixos-gnome-luks` now uses both (no `[network]`); it was locked
@@ -86,7 +88,6 @@ may change incompatibly; every such change has a Migration paragraph. See
   refused (exit 2); `prov schema` output is ASCII-only JSON.
 - Rendered output of the Ubuntu examples is byte-identical; they moved to
   `examples/os-install/demo-{lvm,mdraid,zfs}/`.
-
 - os-install: `[network]` is optional (it was required). The kind still checks a present
   table (at least one interface, addresses, gateways, nameservers); backends that need it
   say so in `check`: `ubuntu-autoinstall` (netplan is rendered from it) and nixos-disko with

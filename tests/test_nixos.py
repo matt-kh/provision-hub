@@ -1501,6 +1501,7 @@ def _nm(raw):
 def _gnome(raw):
     _nm(raw)
     raw["nixos-disko"]["desktop"] = "gnome"
+    raw["users"][0]["password_hash"] = "$6$EXAMPLEsalt$EXAMPLEhash"  # GDM logs in with a password
 
 
 def nm_host(edit=None):
@@ -1530,7 +1531,7 @@ def test_networkmanager_with_network_is_rejected():
     assert any(m.startswith("[network] is not used with networking 'networkmanager'") and "nmtui or nmcli" in m for m in messages(full))
     # a [network] holding only dns is not even a valid table: interfaces are required once it is present
     dns_only = spec_findings(lambda r: (r["nixos-disko"].update(networking="networkmanager"), r.update(network={"dns": {"nameservers": ["192.0.2.53"]}})))
-    assert messages(dns_only) and all(f.level == ERROR for f in dns_only)
+    assert messages(dns_only) == ["network: missing required key 'interfaces'"]
 
 
 def test_networkmanager_render_has_no_networkd():
@@ -1548,7 +1549,7 @@ def _groups(conf, user):
     return m.group(1) if m else None
 
 
-def test_networkmanager_group_for_wheel_members():
+def test_networkmanager_group_for_passwordless_sudo_users_only():
     def users(r):
         ssh = r["users"][0]["ssh_authorized_keys"]
         r["users"] = [
@@ -1556,13 +1557,20 @@ def test_networkmanager_group_for_wheel_members():
             {"name": "alice", "groups": ["wheel"], "password_hash": "$6$EXAMPLEsalt$EXAMPLEhash"},
             {"name": "bob", "groups": ["video"]},
             {"name": "carol", "groups": ["networkmanager", "wheel"], "sudo": True},
+            {"name": "dave", "groups": ["video"], "sudo": True},
+            {"name": "erin", "groups": ["networkmanager"]},
         ]
 
     conf = nixos.render(nm_host(users), Context("demo"))["configuration.nix"]
     assert _groups(conf, "ops") == '[ "wheel" "networkmanager" ]'
-    assert _groups(conf, "alice") == '[ "wheel" "networkmanager" ]'
+    assert _groups(conf, "alice") == '[ "wheel" ]'  # password sudo: polkit asks her as an admin
     assert _groups(conf, "bob") == '[ "video" ]'
-    assert _groups(conf, "carol") == '[ "networkmanager" "wheel" ]'
+    assert _groups(conf, "carol") == '[ "networkmanager" "wheel" ]'  # no duplicate
+    assert _groups(conf, "dave") == '[ "video" "wheel" "networkmanager" ]'
+    assert _groups(conf, "erin") == '[ "networkmanager" ]'  # opted in explicitly
+    assert "# Users with sudo = true are also in the networkmanager group" in conf
+    nosudo = nixos.render(nm_host(lambda r: r["users"][0].update(sudo=False, groups=["wheel"])), Context("demo"))["configuration.nix"]
+    assert "networkmanager group" not in nosudo and _groups(nosudo, "ops") == '[ "wheel" ]'
     networkd = nixos.render(host(users), Context("demo"))["configuration.nix"]
     assert _groups(networkd, "alice") == '[ "wheel" ]' and _groups(networkd, "ops") == '[ "wheel" ]'
 
@@ -1648,8 +1656,12 @@ GDM_LINE = "  services.displayManager.gdm.enable = true;\n"
         (lambda t: t.replace(NM_LINE, ""), "neither systemd-networkd nor NetworkManager"),
         (lambda t: t.replace(NM_LINE, "  networking.useNetworkd = true;\n"), "GNOME is enabled without NetworkManager"),
         (lambda t: t.replace(GDM_LINE, ""), "GNOME is enabled without services.displayManager.gdm.enable"),
-        (lambda t: t.replace(GDM_LINE, "  services.xserver.displayManager.gdm.enable = true;\n"), "services.xserver.displayManager is the pre-25.11 name"),
-        (lambda t: t.replace(NM_LINE, NM_LINE + "  services.xserver.desktopManager.gnome.enable = true;\n"), "services.xserver.desktopManager is the pre-25.11 name"),
+        (lambda t: t.replace(GDM_LINE, "  services.xserver.displayManager.gdm.enable = true;\n"), "services.xserver.displayManager.gdm is the pre-25.11 name; use services.displayManager.gdm"),
+        (lambda t: t.replace(NM_LINE, NM_LINE + "  services.xserver.desktopManager.gnome.enable = true;\n"), "services.xserver.desktopManager.gnome is the pre-25.11 name; use services.desktopManager.gnome"),
+        (lambda t: t.replace(NM_LINE, NM_LINE + "  networking.wireless = {\n    enable = true;\n    networks = { };\n  };\n"), "wireless.networks: no network credentials"),
+        (lambda t: t.replace(NM_LINE, "  networking.networkmanager = {\n    enable = true;\n    ensureProfiles.profiles = { };\n  };\n" + NM_LINE), "ensureProfiles: no network credentials"),
+        (lambda t: t.replace(NM_LINE, NM_LINE + "  networking = { wireless = { secretsFile = /run/x; }; };\n"), "wireless.secretsFile: no network credentials"),
+        (lambda t: t.replace(NM_LINE, NM_LINE + '  networking.wireless.networks."EXAMPLE" = { pskRaw = "x"; };\n'), "wireless.networks: no network credentials"),
         (lambda t: t.replace(NM_LINE, NM_LINE + '  networking.wireless.networks."EXAMPLE".psk = "x";\n'), "no network credentials may be rendered"),
         (lambda t: t.replace(NM_LINE, NM_LINE + "  networking.networkmanager.ensureProfiles.profiles = { };\n"), "ensureProfiles: no network credentials"),
         (lambda t: t.replace(NM_LINE, NM_LINE + "  networking.wireless.secretsFile = /run/x;\n"), "wireless.secretsFile: no network credentials"),
@@ -1670,12 +1682,69 @@ def test_network_words_in_strings_and_comments_are_not_credentials(tmp_path):
         (tmp_path / name).write_text(text)
     assert messages(nixos.validate(tmp_path)) == []
     assert nixos._net_secret("  # psk = x; ensureProfiles\n") is None
+    assert nixos._net_secret("  x = a.psk == b;\n  y = [ pkgs.ensureProfiles ];\n") is None
+
+
+def test_users_volumes_and_packages_named_like_credentials_validate(tmp_path):
+    def edit(r):
+        _luks_raw(r)
+        _gnome(r)
+        r["users"][0]["name"] = "psk"
+        r["users"].append({"name": "ensureprofiles", "password_hash": "$6$EXAMPLEsalt$EXAMPLEhash"})
+        r["nixos-disko"]["volumes"][0].update(name="psk", owner="psk")
+        r["nixos-disko"]["volumes"].append({"name": "pskraw", "mountpoint": "/srv/secretsfile", "size": "1G"})
+        r["nixos-disko"]["packages"] = ["psk", "ensureProfiles", "wireless", "secretsFile"]
+
+    spec = host(edit)
+    files = nixos.render(spec, Context("demo"))
+    assert "users.users.psk = {" in files["configuration.nix"] and "      psk = {" in files["disko.nix"]
+    for name, text in files.items():
+        (tmp_path / name).write_text(text)
+        assert nixos._net_secret(text) is None, name
+    assert messages(nixos.validate(tmp_path)) == []
+
+
+@pytest.mark.parametrize(
+    "text,hit",
+    [
+        ('  networking.wireless.networks."x".psk = "y";\n', "wireless.networks"),
+        ("  networking.wireless = {\n    networks.x.psk = \"y\";\n  };\n", "wireless.networks"),
+        ("  networking = {\n    wireless = {\n      networks = { };\n    };\n  };\n", "wireless.networks"),
+        ("  networking.networkmanager = {\n    ensureProfiles = { };\n  };\n", "ensureProfiles"),
+        ("  networking.networkmanager.ensureProfiles.environmentFiles = [ ];\n", "ensureProfiles"),
+        ("  wireless = { secretsFile = /run/x; };\n", "wireless.secretsFile"),
+        ("  { config, ... }: { networking.wireless.networks = { }; }\n", "wireless.networks"),
+    ],
+)
+def test_nested_network_credentials_are_found(text, hit):
+    assert nixos._net_secret(text) == hit
+
+
+def test_initrd_networkd_is_not_the_system_network_stack(gnome_rendered):
+    path = gnome_rendered / "configuration.nix"
+    path.write_text(path.read_text().replace(NM_LINE, NM_LINE + '  boot.initrd.systemd.network.enable = true;\n'))
+    assert messages(nixos.validate(gnome_rendered)) == []
+
+
+def test_other_xserver_display_manager_options_are_not_old_names(gnome_rendered):
+    path = gnome_rendered / "configuration.nix"
+    path.write_text(path.read_text().replace(NM_LINE, NM_LINE + '  services.xserver.displayManager.sessionCommands = "";\n'))
+    assert messages(nixos.validate(gnome_rendered)) == []
+
+
+def test_gnome_without_a_password_hash_warns():
+    findings = spec_findings(lambda r: (_gnome(r), r["users"][0].pop("password_hash")))
+    assert messages(findings) == []
+    assert [f.where for f in findings if f.level == WARNING] == ["users"]
+    assert "nobody can log in at the GDM login screen" in messages(findings, WARNING)[0]
+    assert spec_findings(_gnome) == [] and spec_findings(_nm) == []
 
 
 def test_networkmanager_plan_lines():
     lines = nixos.plan(nm_host(), Context("demo"))
     post = lines[lines.index("sudo install-demo"):]
-    assert any("nmtui" in line for line in post) and "nmcli device status" in post
+    assert any("sudo nmtui" in line and "TARGET console" in line for line in post) and "nmcli device status" in post
+    assert "target console" in post[post.index("nmcli device status") - 1]
     assert any("never in spec.toml" in line for line in post)
     # no static address without [network]: the ssh hint asks for the address
     assert post.index("nmcli device status") < post.index("HOST_IP=CHANGE-ME")
@@ -1729,7 +1798,11 @@ def test_hostile_values_without_network_are_quoted(tmp_path):
     lines = plan_lines(nixos, spec, Context("demo"), "os-install/demo", tmp_path)
     for line in lines:
         if line and not line.startswith("#"):
-            assert not {"touch", "id"} & set(shlex.split(line)), line
+            # punctuation_chars splits an unquoted ; ( ) off, so a leaked value yields touch.../id tokens
+            tokens = list(shlex.shlex(line, posix=True, punctuation_chars=True))
+            assert not any(t.startswith("touch") or t == "id" for t in tokens), line
+    joined = "\n".join(lines)
+    assert shlex.quote("demo;touch${IFS}/tmp/pwned") in joined and shlex.quote("install-demo;touch${IFS}/tmp/pwned") in joined
     assert "ssh 'ops$(id)'@\"$HOST_IP\"" in lines
     files = nixos.render(gnome_host(lambda r: r["users"][0].update(gecos='x"${builtins.abort 1}"')), Context("demo"))
     assert 'description = "x\\"\\${builtins.abort 1}\\"";' in files["configuration.nix"]

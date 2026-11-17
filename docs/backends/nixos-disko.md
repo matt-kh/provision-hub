@@ -111,7 +111,7 @@ How the core keys map:
 | `keyboard` | an XKB layout (as for ubuntu-autoinstall): `services.xserver.xkb.layout`, with `console.useXkbConfig = true` so the console keymap follows it; X itself stays disabled (with `desktop = "gnome"` too: GNOME runs on Wayland, and the same layout is written to `/etc/X11/xorg.conf.d/00-keyboard.conf`, the system default GDM and GNOME read) |
 | `users` | `users.users.<name>`: `isNormalUser`, `description` (gecos), `extraGroups` (groups, plus `wheel` when `sudo`), `openssh.authorizedKeys.keys`, `hashedPassword` |
 | `users[].sudo` | wheel plus a passwordless `security.sudo.extraRules` entry |
-| `users[]` in `wheel` | with `networking = "networkmanager"` also the `networkmanager` group (appended once, after the given groups and `wheel`) |
+| `users[].sudo` with NetworkManager | with `networking = "networkmanager"`, a user with `sudo = true` also gets the `networkmanager` group (appended once, after the given groups and `wheel`); see [Desktop host](#desktop-host-wi-fi-and-gnome) |
 | `users[].shell` | `/bin/bash` (default) → NixOS default; `/bin/zsh`, `/bin/fish` (also under `/usr/bin/`, `/run/current-system/sw/bin/`) → `programs.<shell>.enable` and `shell = pkgs.<shell>`; anything else is an error |
 | `network` | `networking = "networkd"` only: systemd-networkd (see the note on `macaddress` below): one `systemd.network.networks."10-<name>"` per interface (DHCP, addresses, gateways, MTU), `systemd.network.links."10-<name>"` renames a NIC by `macaddress`; `networking.nameservers` / `networking.search`; `systemd.network.wait-online.anyInterface = true` so boot waits for one configured interface, not all (an unplugged second NIC would otherwise stall `network-online.target` until its timeout) |
 | `storage.disks` | `disko.devices.disk.main.device` |
@@ -130,7 +130,8 @@ Always set: openssh enabled with password and keyboard-interactive authenticatio
 login off; `nix.settings.experimental-features = [ "nix-command" "flakes" ]`.
 
 Checks: `networking = "networkd"` needs `[network]`, `networkmanager` refuses it;
-`desktop = "gnome"` needs `networkmanager` and `release` nixos-25.11 or newer; both layouts
+`desktop = "gnome"` needs `networkmanager` and `release` nixos-25.11 or newer, and warns
+when no user has a `password_hash` (GDM logs in with a password); both layouts
 need exactly one disk; `ext4-luks` needs UEFI; `hibernate` needs
 `swap_size`; `esp_size` is at least 256M (and stays at its default on BIOS); `root_size` is
 at least 8G; the `volumes` rules above; a disk path outside `/dev/disk/by-id/` is a
@@ -272,11 +273,36 @@ and leaves `[network]` out (the example `demo-nixos-gnome-luks` does). `configur
 then enables NetworkManager and nothing else: no systemd-networkd, no `.link` files, no
 `useNetworkd`. Connections, Wi-Fi included, are made on the machine after the first boot
 with `nmtui` or `nmcli`, or in GNOME Settings. **No network credential is ever in
-`spec.toml` or a rendered file**: there is no key for one, and `validate` refuses a rendered
-`psk`, `pskRaw`, `wireless.networks`, `wireless.secretsFile` or NetworkManager
-`ensureProfiles` (code only; strings and comments are ignored). It also requires exactly one
-of systemd-networkd and NetworkManager in `configuration.nix`. Users in `wheel` get the
-`networkmanager` group, so they change connections without a polkit prompt.
+`spec.toml` or a rendered file**: there is no key for one, and `validate` refuses an
+assignment to `networking.wireless.networks` (and so its `psk` / `pskRaw`),
+`wireless.secretsFile` or NetworkManager `ensureProfiles` in any rendered file. It matches
+attribute paths, nested sets included (`networking.wireless = { networks = ...; }`,
+`networkmanager = { ensureProfiles = ...; }`), after blanking strings and comments, so a
+user, volume or package named `psk` is not one. It is a scanner, not a Nix parser: a `with`
+scope or a `let`/`rec` set inside an attribute value is not followed. `validate` also
+requires exactly one of systemd-networkd (`networking.useNetworkd`, `systemd.network.*`;
+the initrd's `boot.initrd.systemd.network` does not count) and NetworkManager in
+`configuration.nix`.
+
+**Who may change connections.** NetworkManager asks polkit. On nixos-26.05 (evaluated for
+the example, NetworkManager 1.56.0): `security.polkit.adminIdentities` is
+`[ "unix-group:wheel" ]`, so a `wheel` user is a polkit administrator. NetworkManager's own
+policy lets the user of an active local session control devices and scan Wi-Fi without a
+prompt (`network-control`, `wifi.scan`: `yes`), but adding or changing a system-wide
+connection (`settings.modify.system`, what nmtui and GNOME Settings create by default) needs
+administrator authentication (`auth_admin_keep`). So:
+
+- in GNOME Settings a `wheel` user is asked for their own password (GNOME Shell is the
+  polkit agent); a non-`wheel` user cannot add system-wide connections;
+- on the console nmtui has no polkit agent, so run `sudo nmtui` (or `nmcli --ask`, which can
+  act as a polkit agent in the terminal; `nmcli agent polkit` starts one explicitly);
+- users with `sudo = true` (passwordless sudo, root already) are put in the
+  `networkmanager` group;
+- any user can opt in with `groups = ["networkmanager"]`. Know what it grants: NixOS's
+  rule for that group returns polkit `YES` for **every** `org.freedesktop.NetworkManager.*`
+  (and ModemManager) action, with no check that the session is local or active, so it also
+  applies over ssh: the member can change any connection, DNS and the hostname without a
+  password.
 
 `desktop = "gnome"` adds GNOME on Wayland with the GDM login screen, using the option names
 of NixOS 25.11 and later (`services.displayManager.gdm`, `services.desktopManager.gnome`);
@@ -298,14 +324,14 @@ password_hash = "$6$..."     # crypt hash, never the password
 ```
 
 Before the install, **disable Secure Boot** in the firmware setup: neither the installer
-stick nor systemd-boot is signed. The GNOME ISO carries the whole desktop closure, several
-GB more than a server install: the build takes longer and needs more store space, and the
-stick should hold 16 GB or more. From WSL2, which has no USB block devices, copy the ISO to
+stick nor systemd-boot is signed. The GNOME ISO carries the whole desktop closure, likely
+several GB more than a server install (not measured: no ISO has been built): the build
+takes longer and needs more store space; use a stick of 16 GB or more. From WSL2, which has no USB block devices, copy the ISO to
 Windows (`cp -L "$ISO" /mnt/c/Users/<you>/Downloads/`) and write it with Rufus in DD image
 mode or balenaEtcher.
 
-After the install, join a network on the console with `nmtui` (or in GNOME Settings after
-logging in), check it with `nmcli device status`, and `systemctl is-active display-manager`
+After the install, join a network on the target console with `sudo nmtui` (or in GNOME
+Settings after logging in), check it there with `nmcli device status`, and `systemctl is-active display-manager`
 should print `active`.
 
 Evaluated (locked and `nix eval`-ed in the `nixos/nix` container against nixpkgs
@@ -313,8 +339,10 @@ Evaluated (locked and `nix eval`-ed in the `nixos/nix` container against nixpkgs
 true`, `networking.useNetworkd = false`, `networking.useDHCP = false` (no `dhcpcd` or
 `systemd-networkd` service defined, `NetworkManager` is), `services.displayManager.gdm.enable
 = true`, `services.desktopManager.gnome.enable = true`, `services.xserver.enable = false`,
-`users.users.alice.extraGroups = [ "wheel" "networkmanager" ]`, no evaluation warnings; the
-LUKS device is unchanged.
+`users.users.alice.extraGroups = [ "wheel" ]` (password sudo, so no `networkmanager` group),
+`security.polkit.adminIdentities = [ "unix-group:wheel" ]`, `security.sudo.wheelNeedsPassword
+= true`, the `networkmanager` group polkit rule above in `security.polkit.extraConfig`, no
+evaluation warnings; the LUKS device is unchanged.
 
 ## Rendered files
 
@@ -387,7 +415,7 @@ files (the output of `nixos-generate-config` already is).
    garbage-collection root, kept outside the hosts repository: a default `result` link in
    `rendered/` would make `validate`/`diff` fail and be deleted by the next `render`,
    after which `nix-collect-garbage` could delete the ISO. Remove the link when you no
-   longer need the ISO. The ISO is large (several GB, more with `desktop = "gnome"`): it holds the target closure and the
+   longer need the ISO. The ISO is large (several GB, more with `desktop = "gnome"`; not measured): it holds the target closure and the
    build inputs for an offline install.
 4. **Write the USB stick. This wipes the stick.** Find the stick with
    `ls -l /dev/disk/by-id/ | grep usb`, then set the two variables and write:
@@ -426,8 +454,8 @@ partition label (see [Partition labels on other disks](#partition-labels-on-othe
    `disko-install --flake <flake>#<hostname> --disk main <disk>` (plus
    `--write-efi-boot-entries` on UEFI), which partitions, formats and installs.
 6. **Post-install checks.** Remove the stick, reboot (with `ext4-luks`, type the passphrase
-   at the initrd prompt), with `networkmanager` join a network on the console (`nmtui`,
-   then `nmcli device status`), log in with ssh, and check `nixos-version`, `systemctl --failed`,
+   at the initrd prompt), with `networkmanager` join a network on the target console
+   (`sudo nmtui`, then `nmcli device status`), log in with ssh, and check `nixos-version`, `systemctl --failed`,
    `findmnt /`, `findmnt /boot` (one `findmnt` per mount point, every volume included),
 `swapon --show`, `ip -br addr`; with
    `ext4-luks` also `sudo cryptsetup status crypted` and `sudo lvs`; with `hibernate`,

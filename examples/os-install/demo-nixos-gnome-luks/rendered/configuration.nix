@@ -48,7 +48,7 @@ in
   users.users.alice = {
     isNormalUser = true;
     description = "Alice Example";
-    extraGroups = [ "wheel" "networkmanager" ];
+    extraGroups = [ "wheel" ];
     hashedPassword = "$6$EXAMPLEsalt$EXAMPLEhashEXAMPLEhashEXAMPLEhashEXAMPLEhashEXAMPLEhashEXAMPLEhash0123456789";
     openssh.authorizedKeys.keys = [
       "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE alice@example.com"
