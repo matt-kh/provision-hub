@@ -68,6 +68,13 @@ may change incompatibly; every such change has a Migration paragraph. See
 
 ### Changed
 
+- nixos-disko: the installer ISO no longer carries the target system's build closure. The
+  rendered `installer.nix` dropped `toplevel.drvPath` from its offline closure (taken from
+  disko's install test, not its documented offline pattern); with it, `closureInfo` copied
+  every compiler, source and `-dev` output needed to build the system onto the ISO (a GNOME
+  dry run: 50 GiB more unpacked). disko-install re-evaluates the same flake with the same
+  disk and yields the same system and disk-script derivations, so their outputs suffice.
+  Re-render existing nixos-disko items (`installer.nix` changes).
 - prov is generic over **kinds** and **backends**. Every item is
   `<root>/<kind>/<name>/spec.toml`; its ref `<kind>/<name>` is the CLI argument. The first
   kind is `os-install`; the Ubuntu renderer is its backend `ubuntu-autoinstall`.

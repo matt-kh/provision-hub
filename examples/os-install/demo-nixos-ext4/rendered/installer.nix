@@ -4,7 +4,9 @@
 #
 # Offline closure: the pattern of disko's docs/disko-install.md ("Using disko-install in an
 # offline installer") at tag v1.13.0 (commit de5708739256238fb912c62f03988815db89ec9a),
-# plus toplevel.drvPath from its tests/disko-install/default.nix.
+# Only outputs of the target system are copied, never its build closure: disko-install
+# re-evaluates the same flake with the same disk, which yields the same derivations, so
+# nothing of the system is rebuilt on the stick.
 { config, lib, pkgs, modulesPath, self, ... }:
 let
   hostName = "demo-nixos-ext4";
@@ -48,7 +50,6 @@ let
 
   dependencies = [
     target.config.system.build.toplevel
-    target.config.system.build.toplevel.drvPath
     target.config.system.build.diskoScript
     target.config.system.build.diskoScript.drvPath
     target.pkgs.stdenv.drvPath
