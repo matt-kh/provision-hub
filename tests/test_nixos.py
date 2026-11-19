@@ -303,7 +303,8 @@ def test_installer_guard_and_offline_closure():
     assert "aborted, nothing was changed" in inst[guard:] and "exit 1" in inst[guard:]
     assert guard < inst.index("exec disko-install")
     assert 'exec disko-install --write-efi-boot-entries --flake ${lib.escapeShellArg "${installFlake}#${hostName}"} --disk main "$disk"' in inst
-    for dep in ("toplevel", "toplevel.drvPath", "diskoScript", "diskoScript.drvPath", "stdenv.drvPath", "closureInfo { rootPaths = [ ]; }).drvPath"):
+    assert "toplevel.drvPath" not in inst  # the build closure would land on the ISO
+    for dep in ("toplevel", "diskoScript", "diskoScript.drvPath", "stdenv.drvPath", "closureInfo { rootPaths = [ ]; }).drvPath"):
         assert dep in inst, dep
     assert "flakeOutPaths" in inst and 'environment.etc."install-closure".source' in inst
     assert nixos.DISKO_REF_COMMIT in inst
