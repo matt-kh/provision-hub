@@ -44,6 +44,11 @@ FILES = ("configuration.nix", "disko.nix", "flake.nix", "installer.nix")
 # Name of the hardware file inside the installer's offline flake copy (never rendered; a
 # human-created rendered/hardware-configuration.nix is not imported).
 HW_COPY = "hardware-configuration.installer-copy.nix"
+# The host-owned module (local_module = true) next to spec.toml, and its installer copy.
+LOCAL_FILE = "local.nix"
+LOCAL_COPY = "local.installer-copy.nix"
+# Flake input names prov uses itself (plus the outputs function's own argument).
+RESERVED_INPUTS = frozenset({"nixpkgs", "disko", "self"})
 
 _ATTR = "[A-Za-z_][A-Za-z0-9_-]*"
 _SIZE = "[1-9][0-9]*[MG]"
@@ -152,6 +157,25 @@ SCHEMA: Dict[str, Any] = {
             "items": {"type": "string", "pattern": f"^{_ATTR}(\\.{_ATTR})*$"},
             "uniqueItems": True,
             "default": [],
+        },
+        "local_module": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                f"Import the host-owned NixOS module ../{LOCAL_FILE} next to spec.toml (outside rendered/; git add it). "
+                "For what the spec cannot express: unfree packages, services, programs.*, fonts. It must be "
+                "self-contained (no other relative paths): the installer copies this one file. Gets the flake's "
+                "inputs as the module argument `inputs`."
+            ),
+        },
+        "inputs": {
+            "type": "object",
+            "default": {},
+            "description": (
+                "Extra flake inputs, name -> flake URL pinned to a tag or rev (e.g. github:owner/tool/v1.2.3), "
+                f"for ../{LOCAL_FILE} to use as inputs.<name>. Names: lowercase identifiers, not nixpkgs, disko or self."
+            ),
+            "additionalProperties": {"type": "string", "pattern": "^[a-z][a-z0-9+.-]*:[^\\s\"'${}\\\\]+$", "maxLength": 512},
         },
         "cpu_vendor": {"enum": ["intel", "amd"], "description": "Enables the CPU microcode updates of this vendor."},
         "networking": {
@@ -357,6 +381,48 @@ def _check_networking(spec: Dict[str, Any]) -> List[Finding]:
     return out
 
 
+# A flake URL is pinned when it names a commit (40 hex digits) or a version-like tag (v1.2.3,
+# 2.0, 2026-11-15...), as github:o/r/<ref>, ?ref= or ?rev=. A branch (main, nixos-unstable)
+# moves on nix flake update; a static check cannot tell a tag from a branch beyond this.
+_URL_REF = re.compile(r"^(?:github|gitlab|sourcehut):[^/?]+/[^/?]+/([^/?]+)|[?&](?:ref|rev)=([^&]+)")
+_PINNED_REF = re.compile(r"[0-9a-f]{40}|v?[0-9][A-Za-z0-9._+-]*")
+
+
+def _pinned(url: str) -> bool:
+    found = [m.group(1) or m.group(2) for m in _URL_REF.finditer(url)]
+    return any(_PINNED_REF.fullmatch(ref) for ref in found)
+
+
+def _check_inputs(nixos: Dict[str, Any]) -> List[Finding]:
+    out: List[Finding] = []
+    for name in sorted(nixos["inputs"]):
+        where = f"{NAME}.inputs[{short_repr(name)}]"
+        if not re.fullmatch(r"[a-z][a-z0-9-]*", name) or len(name) > 64 or name in NIX_KEYWORDS:
+            out.append(
+                Finding(
+                    ERROR,
+                    f"input name {short_repr(name)} must be a lowercase identifier (a-z, 0-9, -; at most 64) and not a Nix keyword",
+                    where,
+                )
+            )
+        elif name in RESERVED_INPUTS:
+            out.append(Finding(ERROR, f"input name {short_repr(name)} is used by prov itself; choose another name", where))
+        if not _pinned(nixos["inputs"][name]):
+            out.append(
+                Finding(
+                    WARNING,
+                    f"{short_repr(nixos['inputs'][name])} names no version tag or commit; flake.lock pins it, but nix flake "
+                    "update moves a branch or bare repository on. Pin a release (github:owner/repo/v1.2.3) or a commit",
+                    where,
+                )
+            )
+    if nixos["inputs"] and not nixos["local_module"]:
+        out.append(
+            Finding(WARNING, f"inputs are only usable from ../{LOCAL_FILE}; set local_module = true and use them there", f"{NAME}.inputs")
+        )
+    return out
+
+
 def check(spec: Dict[str, Any], ctx: Any) -> List[Finding]:
     """NixOS-specific rules beyond the JSON Schema."""
     out: List[Finding] = []
@@ -406,6 +472,7 @@ def check(spec: Dict[str, Any], ctx: Any) -> List[Finding]:
         bad = [part for part in attr.split(".") if part in NIX_KEYWORDS]
         if bad:
             out.append(Finding(ERROR, f"{short_repr(attr)}: {short_repr(bad[0])} is a Nix keyword, not a package attribute", f"{NAME}.packages[{p}]"))
+    out += _check_inputs(nixos)
     release = nixos["release"][len("nixos-"):]
     if nixos["state_version"] > release:
         out.append(
@@ -419,27 +486,51 @@ def check(spec: Dict[str, Any], ctx: Any) -> List[Finding]:
 HEADER = "# Rendered by prov (os-install, backend nixos-disko) from spec.toml; edit spec.toml and re-render."
 
 
+def _extras(spec: Dict[str, Any]) -> bool:
+    """True when the target system gets the flake inputs (an extra input or local.nix)."""
+    return bool(spec[NAME]["inputs"]) or spec[NAME]["local_module"]
+
+
 def flake_nix(spec: Dict[str, Any]) -> str:
     host = spec["hostname"]
     system = SYSTEMS[spec["arch"]]
     release = spec[NAME]["release"]
+    extra = spec[NAME]["inputs"]
+    commit = "flake.lock and ../hardware-configuration.nix (if any)"
+    if spec[NAME]["local_module"]:
+        commit = f"flake.lock, ../{LOCAL_FILE} and ../hardware-configuration.nix (if any)"
+    inputs = [
+        f"    nixpkgs.url = {nix_str(f'github:NixOS/nixpkgs/{release}')};",
+        f"    disko.url = {nix_str(f'github:nix-community/disko/{DISKO_REF}')};",
+        '    disko.inputs.nixpkgs.follows = "nixpkgs";',
+    ]
+    if extra:
+        inputs.append("    # Extra inputs from spec.toml (inputs), each with its own locked dependencies.")
+        inputs += [f"    {nix_attr(name)}.url = {nix_str(extra[name])};" for name in sorted(extra)]
+    target = ["    # The target system."]
+    if _extras(spec):
+        among = f" (../{LOCAL_FILE} among them)" if spec[NAME]["local_module"] else ""
+        target += [
+            f"    # Its modules{among} get the flake inputs as `inputs`, without self: on the",
+            "    # installer stick self is a copy of this flake, and a system built from it would differ.",
+        ]
+    target += [f"    nixosConfigurations.{nix_attr(host)} = nixpkgs.lib.nixosSystem {{"]
+    if _extras(spec):
+        target.append('      specialArgs = { inputs = builtins.removeAttrs inputs [ "self" ]; };')
     return "\n".join(
         [
             HEADER,
-            "# Commit this directory, flake.lock and ../hardware-configuration.nix (if any) to git:",
+            f"# Commit this directory, {commit} to git:",
             "# Nix copies only git-tracked files of a flake.",
             "{",
             f"  description = {nix_str(f'NixOS host {host} (prov os-install, backend nixos-disko)')};",
             "",
             "  inputs = {",
-            f"    nixpkgs.url = {nix_str(f'github:NixOS/nixpkgs/{release}')};",
-            f"    disko.url = {nix_str(f'github:nix-community/disko/{DISKO_REF}')};",
-            '    disko.inputs.nixpkgs.follows = "nixpkgs";',
+            *inputs,
             "  };",
             "",
-            "  outputs = { self, nixpkgs, disko, ... }: {",
-            "    # The target system.",
-            f"    nixosConfigurations.{nix_attr(host)} = nixpkgs.lib.nixosSystem {{",
+            "  outputs = { self, nixpkgs, disko, ... }" + ("@inputs" if _extras(spec) else "") + ": {",
+            *target,
             "      modules = [",
             f"        {{ nixpkgs.hostPlatform = {nix_str(system)}; }}",
             "        disko.nixosModules.disko",
@@ -574,9 +665,23 @@ def configuration_nix(spec: Dict[str, Any]) -> str:
         f"    if builtins.pathExists ./{HW_COPY} then [ ./{HW_COPY} ]",
         "    else if !storeRoot && builtins.pathExists ../hardware-configuration.nix then [ ../hardware-configuration.nix ]",
         "    else [ ];",
+    ]
+    imports = "hardware"
+    if nixos["local_module"]:
+        lines += [
+            f"  # local_module: the host-owned ../{LOCAL_FILE} next to spec.toml (outside rendered/), for",
+            f"  # what spec.toml cannot express. Required: git add it. The installer copies it in as ./{LOCAL_COPY}.",
+            "  local =",
+            f"    if builtins.pathExists ./{LOCAL_COPY} then [ ./{LOCAL_COPY} ]",
+            f"    else assert lib.assertMsg (!storeRoot && builtins.pathExists ../{LOCAL_FILE})",
+            f'      "local_module = true: create ../{LOCAL_FILE} next to spec.toml and git add it";',
+            f"    [ ../{LOCAL_FILE} ];",
+        ]
+        imports = "hardware ++ local"
+    lines += [
         "in",
         "{",
-        '  imports = [ (modulesPath + "/installer/scan/not-detected.nix") ] ++ hardware;',
+        f'  imports = [ (modulesPath + "/installer/scan/not-detected.nix") ] ++ {imports};',
         "",
         "  # Fallback for hardware without a hardware-configuration.nix: broad initrd storage/USB drivers.",
     ]
@@ -863,6 +968,19 @@ def installer_nix(spec: Dict[str, Any]) -> str:
     luks = spec[NAME]["layout"] == "ext4-luks"
     passphrase: List[str] = []
     guard: List[str] = []
+    local_copy: List[str] = []
+    if spec[NAME]["local_module"]:
+        # Not guarded by pathExists: configuration.nix requires the file, so a missing one fails
+        # here as well. Only the copy in the store (storeRoot) has no ../ to read.
+        local_copy = [
+            "      + lib.optionalString (!storeRoot) (",
+            f"        assert lib.assertMsg (builtins.pathExists ../{LOCAL_FILE})",
+            f'          "local_module = true: create ../{LOCAL_FILE} next to spec.toml and git add it";',
+            "        ''",
+            f'          cp ${{../{LOCAL_FILE}}} "$out/{LOCAL_COPY}"',
+            "        ''",
+            "      )",
+        ]
     inputs = "pkgs.coreutils pkgs.util-linux disko"
     if luks:
         inputs += " pkgs.lvm2 pkgs.cryptsetup"
@@ -892,6 +1010,7 @@ def installer_nix(spec: Dict[str, Any]) -> str:
             "  # directory (a ?dir= flake ref loses its dir there), so ../hardware-configuration.nix",
             f"  # is copied in as ./{HW_COPY},",
             "  # which configuration.nix checks first.",
+            *([f"  # local_module: ../{LOCAL_FILE} is copied in as ./{LOCAL_COPY} the same way."] if local_copy else []),
             "  # Without a git-tracked flake.lock, disko-install would try to lock the inputs offline,",
             "  # after the wipe is confirmed: refuse to build the installer instead.",
             "  installFlake =",
@@ -909,6 +1028,7 @@ def installer_nix(spec: Dict[str, Any]) -> str:
             "      + lib.optionalString (!storeRoot && builtins.pathExists ../hardware-configuration.nix) ''",
             f'        cp ${{../hardware-configuration.nix}} "$out/{HW_COPY}"',
             "      ''",
+            *local_copy,
             "    );",
             "",
             "  # Every flake input (recursively), so evaluating the flake needs no network.",
@@ -1380,7 +1500,9 @@ def plan(spec: Dict[str, Any], ctx: Any) -> List[str]:
         "",
         "# Static validation only: prov has not installed this configuration on hardware.",
         "# Nix copies only git-tracked files of a flake: keep this item in a git repository and",
-        "# git add the rendered files, flake.lock and ../hardware-configuration.nix before nix runs.",
+        "# git add the rendered files, flake.lock"
+        + (f", ../{LOCAL_FILE}" if nixos["local_module"] else "")
+        + " and ../hardware-configuration.nix before nix runs.",
         "",
         "# 1. Optional, recommended: capture the target's hardware configuration. ON THE TARGET,",
         "#    booted from the stock NixOS minimal ISO, run:",
@@ -1392,7 +1514,8 @@ def plan(spec: Dict[str, Any], ctx: Any) -> List[str]:
         "",
         "# 2. Track the rendered files, lock the flake inputs and commit the lock",
         "#    (render keeps rendered/flake.lock):",
-        "git add . ../spec.toml",
+        *([f"#    local_module: write ../{LOCAL_FILE} next to spec.toml first (see the backend docs)."] if nixos["local_module"] else []),
+        "git add . ../spec.toml" + (f" ../{LOCAL_FILE}" if nixos["local_module"] else ""),
         "nix --extra-experimental-features 'nix-command flakes' flake lock",
         f"git add flake.lock && git commit -m {q(f'Lock the {host} flake inputs')}",
         "",
@@ -1491,6 +1614,17 @@ def plan(spec: Dict[str, Any], ctx: Any) -> List[str]:
             "cat /sys/power/disk",
             "#    Then test it once with   systemctl hibernate   and check the session comes back.",
         ]
+    lines += [
+        "",
+        "# 7. Later changes need no new ISO: edit spec.toml"
+        + (f" or ../{LOCAL_FILE}" if nixos["local_module"] else "")
+        + ", prov render, commit, then ON THE HOST,",
+        "#    in a git checkout of this repository, from this rendered/ directory, as your user",
+        "#    (--sudo evaluates as you and activates as root; Nix may refuse a checkout owned by",
+        "#    another user when it runs as root). Not yet run on an installed host:",
+        f"#        git pull && nixos-rebuild switch --flake .#{q(host)} --sudo",
+        "#    Each switch adds a boot menu entry to roll back to.",
+    ]
     return lines
 
 
@@ -1557,6 +1691,10 @@ packages = ["git", "vim"]
 # networking = "networkd"      # or "networkmanager": connections (Wi-Fi) made on the machine
 #                              # with nmtui/nmcli; then remove [network] above
 # desktop = "none"             # or "gnome" (GNOME + GDM): needs networking = "networkmanager"
+# local_module = false         # true: import the hand-written ../local.nix next to this file
+#                              # (unfree packages, services, programs.*); git add it
+# [nixos-disko.inputs]         # extra flakes for local.nix (inputs.<name>), pinned to a tag
+# tool = "github:example/tool/v1.2.3"
 """
 
 

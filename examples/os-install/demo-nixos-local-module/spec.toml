@@ -1,0 +1,46 @@
+# NixOS with a host-owned module (local_module) and an extra flake input. Synthetic values only.
+api_version = "prov/v1alpha1"
+kind = "os-install"
+backend = "nixos-disko"
+hostname = "demo-nixos-local-module"
+domain = "example.com"
+arch = "amd64"
+firmware = "uefi"
+timezone = "Etc/UTC"
+locale = "en_US.UTF-8"
+keyboard = "us"
+
+[[users]]
+name = "alice"
+gecos = "Alice Example"
+groups = ["wheel"]
+shell = "/bin/zsh"
+password_hash = "$6$EXAMPLEsalt$EXAMPLEhashEXAMPLEhashEXAMPLEhashEXAMPLEhashEXAMPLEhashEXAMPLEhash0123456789"
+ssh_authorized_keys = [
+  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE alice@example.com",
+]
+
+[network.dns]
+nameservers = ["192.0.2.53", "2001:db8::53"]
+search = ["example.com"]
+
+[[network.interfaces]]
+name = "lan0"
+dhcp4 = true
+
+[storage]
+# The one disk disko-install wipes; an obviously fake by-id serial.
+disks = ["/dev/disk/by-id/nvme-EXAMPLE_SSD_SERIAL_0000000000"]
+
+[nixos-disko]
+release = "nixos-26.05"
+state_version = "26.05"
+layout = "ext4"
+swap_size = "8G"
+# Free nixpkgs packages stay here; local.nix adds what the spec cannot express.
+packages = ["git", "htop", "tmux"]
+local_module = true
+
+[nixos-disko.inputs]
+# A tool distributed as its own flake, pinned to a release tag; used in ../local.nix.
+nh = "github:nix-community/nh/v4.5.0"

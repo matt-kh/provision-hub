@@ -268,6 +268,16 @@
           "description": "Resume from hibernation on the swap device (boot.resumeDevice); needs swap_size, at least the RAM size.",
           "type": "boolean"
         },
+        "inputs": {
+          "additionalProperties": {
+            "maxLength": 512,
+            "pattern": "^[a-z][a-z0-9+.-]*:[^\\s\"'${}\\\\]+$",
+            "type": "string"
+          },
+          "default": {},
+          "description": "Extra flake inputs, name -> flake URL pinned to a tag or rev (e.g. github:owner/tool/v1.2.3), for ../local.nix to use as inputs.<name>. Names: lowercase identifiers, not nixpkgs, disko or self.",
+          "type": "object"
+        },
         "layout": {
           "default": "ext4",
           "description": "Disk layout. ext4: GPT on one disk with an ESP (UEFI) or BIOS boot partition, optional swap and an ext4 root. ext4-luks (UEFI only): an ESP and one LUKS2 partition holding LVM volume group 'pool' with optional swap, an ext4 root and the ext4 volumes; the passphrase is typed at install time and at every boot.",
@@ -275,6 +285,11 @@
             "ext4",
             "ext4-luks"
           ]
+        },
+        "local_module": {
+          "default": false,
+          "description": "Import the host-owned NixOS module ../local.nix next to spec.toml (outside rendered/; git add it). For what the spec cannot express: unfree packages, services, programs.*, fonts. It must be self-contained (no other relative paths): the installer copies this one file. Gets the flake's inputs as the module argument `inputs`.",
+          "type": "boolean"
         },
         "networking": {
           "default": "networkd",

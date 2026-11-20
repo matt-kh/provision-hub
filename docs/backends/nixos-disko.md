@@ -54,6 +54,10 @@ packages = ["git", "vim"]    # nixpkgs attribute names
 cpu_vendor = "intel"         # optional: intel | amd, enables microcode updates
 networking = "networkd"      # networkd (needs [network]) | networkmanager (no [network])
 desktop = "none"             # none | gnome (needs networkmanager, release nixos-25.11+)
+local_module = false         # optional: import the hand-written ../local.nix (below)
+
+[nixos-disko.inputs]         # optional: extra flakes for local.nix, pinned to a tag or rev
+tool = "github:example/tool/v1.2.3"
 ```
 
 The encrypted layout adds the root size and extra volumes (see
@@ -354,6 +358,7 @@ evaluation warnings; the LUKS device is unchanged.
 ```text
 <root>/os-install/<name>/spec.toml
 <root>/os-install/<name>/hardware-configuration.nix   # optional, yours; never touched by prov
+<root>/os-install/<name>/local.nix                    # yours when local_module = true; never touched by prov
 <root>/os-install/<name>/rendered/flake.nix
 <root>/os-install/<name>/rendered/configuration.nix
 <root>/os-install/<name>/rendered/disko.nix
@@ -399,6 +404,65 @@ directly in the store. A `rendered/hardware-configuration.nix` is never imported
 next `prov render` deletes it): keep the file next to `spec.toml`. Only that one file is
 copied onto the stick, so it must be self-contained: no `imports` of other relative
 files (the output of `nixos-generate-config` already is).
+
+## Host-owned module and extra inputs
+
+`spec.toml` covers what every host needs; the rest stays in NixOS's own language in a
+hand-written module. With `local_module = true`, `configuration.nix` imports
+`../local.nix` (next to `spec.toml`, outside `rendered/`; `render` never writes or deletes
+it). Use it for what the spec cannot express: proprietary packages, services,
+`programs.*`, fonts. The import is required, not optional: a missing or untracked file
+stops the build with "local_module = true: create ../local.nix next to spec.toml and git
+add it". The installer copies it onto the stick as `local.installer-copy.nix`, exactly
+like the hardware file, so it must be self-contained too: no other relative paths.
+
+`[nixos-disko.inputs]` adds flake inputs, name to flake URL, for tools that ship as their
+own flake rather than in nixpkgs. Each keeps its own locked dependencies (no `follows`), so
+it builds as its authors tested it; that may add another nixpkgs to the store. `nix flake
+lock` pins every input, and a URL that names no tag or rev gets a warning, since `nix flake
+update` would move it. Names are lowercase identifiers, not `nixpkgs`, `disko` or `self`.
+When either key is set, the target system's modules get the flake inputs as the module
+argument `inputs`, without `self`: on the installer stick `self` is a copy of the flake, so
+a system that used it would differ from the one on the ISO and could not be built offline.
+A URL counts as pinned when it names a version-like tag (`v1.2.3`, `2026-11-15`) or a
+40-digit commit; a branch (`main`, `nixos-unstable`) gets the warning. Inputs without
+`local_module = true` get a warning too: nothing could use them.
+
+A `local.nix` (from `examples/os-install/demo-nixos-local-module/`):
+
+```nix
+{ config, lib, pkgs, inputs, ... }:
+{
+  # Proprietary packages, allowed one by one.
+  nixpkgs.config.allowUnfreePredicate = pkg: builtins.elem (lib.getName pkg) [ "vscode" ];
+
+  environment.systemPackages = [
+    pkgs.vscode
+    # A package from an extra flake input (spec.toml [nixos-disko.inputs]).
+    inputs.nh.packages.${pkgs.stdenv.hostPlatform.system}.default
+  ];
+
+  # A service with its own group.
+  virtualisation.docker.enable = true;
+  users.users.alice.extraGroups = [ "docker" ];
+
+  # zsh (the user's shell from spec.toml) with the powerlevel10k prompt and its font.
+  programs.zsh.promptInit = "source ${pkgs.zsh-powerlevel10k}/share/zsh-powerlevel10k/powerlevel10k.zsh-theme";
+  fonts.packages = [ pkgs.nerd-fonts.meslo-lg ];
+}
+```
+
+Static validation only: this example was locked and `nix eval`-ed (system, installer ISO,
+and the stick's flake copy evaluating to the same system derivation), never installed.
+
+### Changing an installed host
+
+No new ISO is needed after the install. Edit `spec.toml` or `local.nix`, `prov render`,
+commit, then on the host, in a git checkout of the repository, from `rendered/`:
+`git pull && nixos-rebuild switch --flake .#<hostname> --sudo` (`prov plan` step 7), as
+your user: `--sudo` evaluates as you and activates as root, where Nix may refuse a git
+checkout owned by another user. Each switch adds a boot menu entry to roll back to. Not yet
+run on an installed host.
 
 ## USB walkthrough
 
@@ -491,4 +555,4 @@ emulation.
 
 Building the ISO or writing the USB from prov, unattended wipe-on-boot installers,
 nixos-anywhere / install over ssh, btrfs / ZFS layouts, LUKS key files, TPM2 or FIDO2
-unlocking, encrypted `/boot`, LUKS on BIOS, home-manager, non-flake output.
+unlocking, encrypted `/boot`, LUKS on BIOS, home-manager, non-flake output, `follows` for extra inputs.
