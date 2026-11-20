@@ -8,6 +8,14 @@ may change incompatibly; every such change has a Migration paragraph. See
 
 ### Added
 
+- nixos-disko: `local_module = true` imports a hand-written `../local.nix` next to
+  `spec.toml` (proprietary packages, services, `programs.*`, fonts), required once set and
+  copied onto the installer stick like the hardware file; `[nixos-disko.inputs]` adds
+  extra flake inputs (name to URL; a warning when a URL pins no tag or rev), passed with
+  every other input to the target's modules as `inputs`. `prov plan` gains step 7, changing
+  an installed host with `nixos-rebuild switch --flake`. Defaults leave rendered files
+  unchanged. Example `examples/os-install/demo-nixos-local-module/` (locked and `nix
+  eval`-ed only).
 - Backend `nixos-disko` for `os-install`: renders a pinned NixOS flake (`flake.nix`,
   `configuration.nix`, `disko.nix`, `installer.nix`) with the target system and an offline
   USB installer ISO whose `install-<hostname>` command stops unless it runs on a terminal

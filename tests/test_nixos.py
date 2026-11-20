@@ -1762,7 +1762,8 @@ def test_gnome_plan_lines():
     size = [i for i, line in enumerate(lines) if "whole desktop closure" in line]
     assert size and size[0] < iso and any("16 GB" in line for line in lines)
     assert any("sudo nmtui   (Ctrl+Alt+F3 for a text console, or use GNOME Settings);" in line for line in lines)
-    assert lines[-1] == "systemctl is-active display-manager"
+    step7 = next(i for i, line in enumerate(lines) if line.startswith("# 7. "))
+    assert lines[step7 - 2] == "systemctl is-active display-manager"  # last post-install check
 
 
 @pytest.mark.parametrize("firmware", ["uefi", "bios"])
@@ -1825,3 +1826,91 @@ def test_starter_hints_for_networking_and_desktop_are_comments():
     for key in ('networking = "networkd"', '"networkmanager"', 'desktop = "none"', '"gnome"'):
         assert any(line.startswith("#") and key in line for line in text.splitlines()), key
     assert "networking" not in starter_raw()["nixos-disko"] and "desktop" not in starter_raw()["nixos-disko"]
+
+
+# --- local_module and inputs (issue #14) ---------------------------------------------------
+
+
+def _local(raw, inputs=None):
+    raw["nixos-disko"]["local_module"] = True
+    if inputs is not None:
+        raw["nixos-disko"]["inputs"] = inputs
+
+
+def test_local_module_and_inputs_default_off():
+    files = nixos.render(host(), Context("demo"))
+    assert "local.nix" not in files["configuration.nix"] and "local.nix" not in files["installer.nix"]
+    assert "@inputs" not in files["flake.nix"] and "specialArgs = { inherit inputs; }" not in files["flake.nix"]
+    assert "imports = [ (modulesPath + \"/installer/scan/not-detected.nix\") ] ++ hardware;" in files["configuration.nix"]
+
+
+def test_local_module_renders_required_import_and_installer_copy():
+    files = nixos.render(host(_local), Context("demo"))
+    conf, inst, flake = files["configuration.nix"], files["installer.nix"], files["flake.nix"]
+    assert "++ hardware ++ local;" in conf
+    assert f"if builtins.pathExists ./{nixos.LOCAL_COPY} then [ ./{nixos.LOCAL_COPY} ]" in conf
+    assert 'assert lib.assertMsg (!storeRoot && builtins.pathExists ../local.nix)' in conf
+    assert f'cp ${{../local.nix}} "$out/{nixos.LOCAL_COPY}"' in inst
+    assert "lib.optionalString (!storeRoot) ''" in inst
+    assert "outputs = { self, nixpkgs, disko, ... }@inputs: {" in flake
+    target = flake.split("# The USB installer")[0]
+    assert "specialArgs = { inherit inputs; };" in target
+    assert "../local.nix" in flake.splitlines()[1]
+
+
+def test_inputs_render_sorted_into_flake():
+    spec = host(lambda r: _local(r, {"zeta": "github:example/zeta/v2.0.0", "alpha": "git+https://example.com/a.git?ref=v1"}))
+    flake = nixos.render(spec, Context("demo"))["flake.nix"]
+    a, z = flake.index('alpha.url = "git+https://example.com/a.git?ref=v1";'), flake.index('zeta.url = "github:example/zeta/v2.0.0";')
+    assert flake.index('disko.inputs.nixpkgs.follows = "nixpkgs";') < a < z
+
+
+@pytest.mark.parametrize("name", ["nixpkgs", "disko", "self", "Bad", "1tool", "with", "a_b"])
+def test_input_names_rejected(name):
+    findings = spec_findings(lambda r: _local(r, {name: "github:example/tool/v1.0.0"}))
+    assert any("input name" in m for m in messages(findings)), findings
+
+
+@pytest.mark.parametrize(
+    "url,pinned",
+    [
+        ("github:example/tool/v1.2.3", True),
+        ("github:example/tool", False),
+        ("gitlab:example/tool/abc123", True),
+        ("git+https://example.com/tool.git?ref=v1", True),
+        ("git+https://example.com/tool.git?rev=0123abcd", True),
+        ("git+https://example.com/tool.git", False),
+        ("https://example.com/tool.tar.gz", False),
+    ],
+)
+def test_input_url_pin_warning(url, pinned):
+    findings = spec_findings(lambda r: _local(r, {"tool": url}))
+    assert not messages(findings)
+    assert any("names no tag or rev" in m for m in messages(findings, WARNING)) is not pinned
+
+
+@pytest.mark.parametrize("url", ['github:example/tool"; x = 1', "github:example/${x}", "no-scheme", "github:a b"])
+def test_input_url_schema_rejects_unsafe(url):
+    raw = starter_raw()
+    _local(raw, {"tool": url})
+    spec, findings = check_host(raw)
+    assert spec is None or messages(findings), findings
+
+
+def test_inputs_without_local_module_warn():
+    findings = spec_findings(lambda r: r["nixos-disko"].update(inputs={"tool": "github:example/tool/v1.0.0"}))
+    assert any("set local_module = true" in m for m in messages(findings, WARNING))
+
+
+def test_plan_mentions_local_module_and_rebuild():
+    lines = nixos.plan(host(_local), Context("demo"))
+    assert "git add . ../spec.toml ../local.nix" in lines
+    assert any(line.startswith("# 7. Later changes need no new ISO: edit spec.toml or ../local.nix") for line in lines)
+    assert "#        git pull && sudo nixos-rebuild switch --flake .#demo" in lines
+    plain = nixos.plan(host(), Context("demo"))
+    assert "git add . ../spec.toml" in plain and not any("local.nix" in line for line in plain)
+
+
+def test_starter_documents_local_module_and_inputs():
+    text = nixos.starter("demo")
+    assert "# local_module = false" in text and "# [nixos-disko.inputs]" in text

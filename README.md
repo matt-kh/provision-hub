@@ -76,7 +76,8 @@ still break, always with a migration note in [CHANGELOG.md](CHANGELOG.md); from 
 `prov/v1` changes are additive only.
 
 **Examples.** [examples/](examples/) is one root with an item per Ubuntu storage layout, a
-NixOS item per layout (`demo-nixos-ext4`, `demo-nixos-gnome-luks`) and their committed
+NixOS item per layout (`demo-nixos-ext4`, `demo-nixos-gnome-luks`), one with a host-owned
+`local.nix` and an extra flake input (`demo-nixos-local-module`), and their committed
 rendered output:
 
 ```sh
