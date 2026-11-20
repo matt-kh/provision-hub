@@ -381,24 +381,38 @@ def _check_networking(spec: Dict[str, Any]) -> List[Finding]:
     return out
 
 
-# A flake URL pins a release when it names a ref or rev: github:o/r/<ref>, ?ref= or ?rev=.
-_PINNED_URL = re.compile(r"^(?:(?:github|gitlab|sourcehut):[^/?]+/[^/?]+/[^/?]+|.*[?&](?:ref|rev)=[^&]+)")
+# A flake URL is pinned when it names a commit (40 hex digits) or a version-like tag (v1.2.3,
+# 2.0, 2026-11-15...), as github:o/r/<ref>, ?ref= or ?rev=. A branch (main, nixos-unstable)
+# moves on nix flake update; a static check cannot tell a tag from a branch beyond this.
+_URL_REF = re.compile(r"^(?:github|gitlab|sourcehut):[^/?]+/[^/?]+/([^/?]+)|[?&](?:ref|rev)=([^&]+)")
+_PINNED_REF = re.compile(r"[0-9a-f]{40}|v?[0-9][A-Za-z0-9._+-]*")
+
+
+def _pinned(url: str) -> bool:
+    found = [m.group(1) or m.group(2) for m in _URL_REF.finditer(url)]
+    return any(_PINNED_REF.fullmatch(ref) for ref in found)
 
 
 def _check_inputs(nixos: Dict[str, Any]) -> List[Finding]:
     out: List[Finding] = []
     for name in sorted(nixos["inputs"]):
-        where = f"{NAME}.inputs.{name}"
+        where = f"{NAME}.inputs[{short_repr(name)}]"
         if not re.fullmatch(r"[a-z][a-z0-9-]*", name) or len(name) > 64 or name in NIX_KEYWORDS:
-            out.append(Finding(ERROR, f"input name {short_repr(name)} must be a lowercase identifier (a-z, 0-9, -) and not a Nix keyword", where))
+            out.append(
+                Finding(
+                    ERROR,
+                    f"input name {short_repr(name)} must be a lowercase identifier (a-z, 0-9, -; at most 64) and not a Nix keyword",
+                    where,
+                )
+            )
         elif name in RESERVED_INPUTS:
             out.append(Finding(ERROR, f"input name {short_repr(name)} is used by prov itself; choose another name", where))
-        if not _PINNED_URL.match(nixos["inputs"][name]):
+        if not _pinned(nixos["inputs"][name]):
             out.append(
                 Finding(
                     WARNING,
-                    f"{short_repr(nixos['inputs'][name])} names no tag or rev; flake.lock pins it, but nix flake update "
-                    "moves it to the newest commit. Pin a release (github:owner/repo/v1.2.3)",
+                    f"{short_repr(nixos['inputs'][name])} names no version tag or commit; flake.lock pins it, but nix flake "
+                    "update moves a branch or bare repository on. Pin a release (github:owner/repo/v1.2.3) or a commit",
                     where,
                 )
             )
@@ -495,10 +509,14 @@ def flake_nix(spec: Dict[str, Any]) -> str:
         inputs += [f"    {nix_attr(name)}.url = {nix_str(extra[name])};" for name in sorted(extra)]
     target = ["    # The target system."]
     if _extras(spec):
-        target.append(f"    # Its modules (../{LOCAL_FILE} among them) get every flake input as `inputs`.")
+        among = f" (../{LOCAL_FILE} among them)" if spec[NAME]["local_module"] else ""
+        target += [
+            f"    # Its modules{among} get the flake inputs as `inputs`, without self: on the",
+            "    # installer stick self is a copy of this flake, and a system built from it would differ.",
+        ]
     target += [f"    nixosConfigurations.{nix_attr(host)} = nixpkgs.lib.nixosSystem {{"]
     if _extras(spec):
-        target.append("      specialArgs = { inherit inputs; };")
+        target.append('      specialArgs = { inputs = builtins.removeAttrs inputs [ "self" ]; };')
     return "\n".join(
         [
             HEADER,
@@ -954,7 +972,15 @@ def installer_nix(spec: Dict[str, Any]) -> str:
     if spec[NAME]["local_module"]:
         # Not guarded by pathExists: configuration.nix requires the file, so a missing one fails
         # here as well. Only the copy in the store (storeRoot) has no ../ to read.
-        local_copy = ["      + lib.optionalString (!storeRoot) ''", f'        cp ${{../{LOCAL_FILE}}} "$out/{LOCAL_COPY}"', "      ''"]
+        local_copy = [
+            "      + lib.optionalString (!storeRoot) (",
+            f"        assert lib.assertMsg (builtins.pathExists ../{LOCAL_FILE})",
+            f'          "local_module = true: create ../{LOCAL_FILE} next to spec.toml and git add it";',
+            "        ''",
+            f'          cp ${{../{LOCAL_FILE}}} "$out/{LOCAL_COPY}"',
+            "        ''",
+            "      )",
+        ]
     inputs = "pkgs.coreutils pkgs.util-linux disko"
     if luks:
         inputs += " pkgs.lvm2 pkgs.cryptsetup"
@@ -1474,7 +1500,9 @@ def plan(spec: Dict[str, Any], ctx: Any) -> List[str]:
         "",
         "# Static validation only: prov has not installed this configuration on hardware.",
         "# Nix copies only git-tracked files of a flake: keep this item in a git repository and",
-        "# git add the rendered files, flake.lock and ../hardware-configuration.nix before nix runs.",
+        "# git add the rendered files, flake.lock"
+        + (f", ../{LOCAL_FILE}" if nixos["local_module"] else "")
+        + " and ../hardware-configuration.nix before nix runs.",
         "",
         "# 1. Optional, recommended: capture the target's hardware configuration. ON THE TARGET,",
         "#    booted from the stock NixOS minimal ISO, run:",
@@ -1486,6 +1514,7 @@ def plan(spec: Dict[str, Any], ctx: Any) -> List[str]:
         "",
         "# 2. Track the rendered files, lock the flake inputs and commit the lock",
         "#    (render keeps rendered/flake.lock):",
+        *([f"#    local_module: write ../{LOCAL_FILE} next to spec.toml first (see the backend docs)."] if nixos["local_module"] else []),
         "git add . ../spec.toml" + (f" ../{LOCAL_FILE}" if nixos["local_module"] else ""),
         "nix --extra-experimental-features 'nix-command flakes' flake lock",
         f"git add flake.lock && git commit -m {q(f'Lock the {host} flake inputs')}",
@@ -1590,8 +1619,10 @@ def plan(spec: Dict[str, Any], ctx: Any) -> List[str]:
         "# 7. Later changes need no new ISO: edit spec.toml"
         + (f" or ../{LOCAL_FILE}" if nixos["local_module"] else "")
         + ", prov render, commit, then ON THE HOST,",
-        "#    in a git checkout of this repository, from this rendered/ directory:",
-        f"#        git pull && sudo nixos-rebuild switch --flake .#{q(host)}",
+        "#    in a git checkout of this repository, from this rendered/ directory, as your user",
+        "#    (--sudo evaluates as you and activates as root; Nix may refuse a checkout owned by",
+        "#    another user when it runs as root). Not yet run on an installed host:",
+        f"#        git pull && nixos-rebuild switch --flake .#{q(host)} --sudo",
         "#    Each switch adds a boot menu entry to roll back to.",
     ]
     return lines

@@ -421,8 +421,12 @@ own flake rather than in nixpkgs. Each keeps its own locked dependencies (no `fo
 it builds as its authors tested it; that may add another nixpkgs to the store. `nix flake
 lock` pins every input, and a URL that names no tag or rev gets a warning, since `nix flake
 update` would move it. Names are lowercase identifiers, not `nixpkgs`, `disko` or `self`.
-When either key is set, the target system's modules get every flake input as the module
-argument `inputs`. Inputs without `local_module = true` get a warning: nothing could use them.
+When either key is set, the target system's modules get the flake inputs as the module
+argument `inputs`, without `self`: on the installer stick `self` is a copy of the flake, so
+a system that used it would differ from the one on the ISO and could not be built offline.
+A URL counts as pinned when it names a version-like tag (`v1.2.3`, `2026-11-15`) or a
+40-digit commit; a branch (`main`, `nixos-unstable`) gets the warning. Inputs without
+`local_module = true` get a warning too: nothing could use them.
 
 A `local.nix` (from `examples/os-install/demo-nixos-local-module/`):
 
@@ -455,8 +459,10 @@ and the stick's flake copy evaluating to the same system derivation), never inst
 
 No new ISO is needed after the install. Edit `spec.toml` or `local.nix`, `prov render`,
 commit, then on the host, in a git checkout of the repository, from `rendered/`:
-`git pull && sudo nixos-rebuild switch --flake .#<hostname>` (`prov plan` step 7). Each
-switch adds a boot menu entry to roll back to.
+`git pull && nixos-rebuild switch --flake .#<hostname> --sudo` (`prov plan` step 7), as
+your user: `--sudo` evaluates as you and activates as root, where Nix may refuse a git
+checkout owned by another user. Each switch adds a boot menu entry to roll back to. Not yet
+run on an installed host.
 
 ## USB walkthrough
 

@@ -38,9 +38,13 @@ let
       + lib.optionalString (!storeRoot && builtins.pathExists ../hardware-configuration.nix) ''
         cp ${../hardware-configuration.nix} "$out/hardware-configuration.installer-copy.nix"
       ''
-      + lib.optionalString (!storeRoot) ''
-        cp ${../local.nix} "$out/local.installer-copy.nix"
-      ''
+      + lib.optionalString (!storeRoot) (
+        assert lib.assertMsg (builtins.pathExists ../local.nix)
+          "local_module = true: create ../local.nix next to spec.toml and git add it";
+        ''
+          cp ${../local.nix} "$out/local.installer-copy.nix"
+        ''
+      )
     );
 
   # Every flake input (recursively), so evaluating the flake needs no network.

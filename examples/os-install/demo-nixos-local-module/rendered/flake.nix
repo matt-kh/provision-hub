@@ -14,9 +14,10 @@
 
   outputs = { self, nixpkgs, disko, ... }@inputs: {
     # The target system.
-    # Its modules (../local.nix among them) get every flake input as `inputs`.
+    # Its modules (../local.nix among them) get the flake inputs as `inputs`, without self: on the
+    # installer stick self is a copy of this flake, and a system built from it would differ.
     nixosConfigurations.demo-nixos-local-module = nixpkgs.lib.nixosSystem {
-      specialArgs = { inherit inputs; };
+      specialArgs = { inputs = builtins.removeAttrs inputs [ "self" ]; };
       modules = [
         { nixpkgs.hostPlatform = "x86_64-linux"; }
         disko.nixosModules.disko

@@ -1851,10 +1851,12 @@ def test_local_module_renders_required_import_and_installer_copy():
     assert f"if builtins.pathExists ./{nixos.LOCAL_COPY} then [ ./{nixos.LOCAL_COPY} ]" in conf
     assert 'assert lib.assertMsg (!storeRoot && builtins.pathExists ../local.nix)' in conf
     assert f'cp ${{../local.nix}} "$out/{nixos.LOCAL_COPY}"' in inst
-    assert "lib.optionalString (!storeRoot) ''" in inst
+    assert "lib.optionalString (!storeRoot) (" in inst
+    assert inst.count("local_module = true: create ../local.nix next to spec.toml and git add it") == 1
     assert "outputs = { self, nixpkgs, disko, ... }@inputs: {" in flake
     target = flake.split("# The USB installer")[0]
-    assert "specialArgs = { inherit inputs; };" in target
+    assert 'specialArgs = { inputs = builtins.removeAttrs inputs [ "self" ]; };' in target
+    assert "(../local.nix among them)" in target
     assert "../local.nix" in flake.splitlines()[1]
 
 
@@ -1875,8 +1877,14 @@ def test_input_names_rejected(name):
     "url,pinned",
     [
         ("github:example/tool/v1.2.3", True),
+        ("github:example/tool/2026-11-15-095805", True),
+        ("github:example/tool/0123456789abcdef0123456789abcdef01234567", True),
         ("github:example/tool", False),
-        ("gitlab:example/tool/abc123", True),
+        ("github:example/tool/main", False),
+        ("github:example/nixpkgs/nixos-unstable", False),
+        ("github:example/tool?dir=sub", False),
+        ("git+https://example.com/tool.git?ref=main", False),
+        ("gitlab:example/tool/abc123", False),
         ("git+https://example.com/tool.git?ref=v1", True),
         ("git+https://example.com/tool.git?rev=0123abcd", True),
         ("git+https://example.com/tool.git", False),
@@ -1886,7 +1894,7 @@ def test_input_names_rejected(name):
 def test_input_url_pin_warning(url, pinned):
     findings = spec_findings(lambda r: _local(r, {"tool": url}))
     assert not messages(findings)
-    assert any("names no tag or rev" in m for m in messages(findings, WARNING)) is not pinned
+    assert any("names no version tag or commit" in m for m in messages(findings, WARNING)) is not pinned
 
 
 @pytest.mark.parametrize("url", ['github:example/tool"; x = 1', "github:example/${x}", "no-scheme", "github:a b"])
@@ -1894,7 +1902,7 @@ def test_input_url_schema_rejects_unsafe(url):
     raw = starter_raw()
     _local(raw, {"tool": url})
     spec, findings = check_host(raw)
-    assert spec is None or messages(findings), findings
+    assert spec is None and messages(findings), findings
 
 
 def test_inputs_without_local_module_warn():
@@ -1906,7 +1914,8 @@ def test_plan_mentions_local_module_and_rebuild():
     lines = nixos.plan(host(_local), Context("demo"))
     assert "git add . ../spec.toml ../local.nix" in lines
     assert any(line.startswith("# 7. Later changes need no new ISO: edit spec.toml or ../local.nix") for line in lines)
-    assert "#        git pull && sudo nixos-rebuild switch --flake .#demo" in lines
+    assert "#        git pull && nixos-rebuild switch --flake .#demo --sudo" in lines
+    assert any("flake.lock, ../local.nix and ../hardware-configuration.nix" in line for line in lines)
     plain = nixos.plan(host(), Context("demo"))
     assert "git add . ../spec.toml" in plain and not any("local.nix" in line for line in plain)
 
@@ -1914,3 +1923,16 @@ def test_plan_mentions_local_module_and_rebuild():
 def test_starter_documents_local_module_and_inputs():
     text = nixos.starter("demo")
     assert "# local_module = false" in text and "# [nixos-disko.inputs]" in text
+
+
+def test_inputs_only_renders_specialargs_without_local_import():
+    spec = host(lambda r: r["nixos-disko"].update(inputs={"tool": "github:example/tool/v1.0.0"}))
+    files = nixos.render(spec, Context("demo"))
+    assert "@inputs" in files["flake.nix"] and 'inputs = builtins.removeAttrs inputs [ "self" ]' in files["flake.nix"]
+    assert "(../local.nix among them)" not in files["flake.nix"]
+    assert "local.nix" not in files["configuration.nix"] and "local.nix" not in files["installer.nix"]
+
+
+def test_local_module_without_inputs_has_no_extra_inputs_block():
+    flake = nixos.render(host(_local), Context("demo"))["flake.nix"]
+    assert "# Extra inputs" not in flake and "@inputs" in flake
