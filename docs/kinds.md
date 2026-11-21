@@ -76,7 +76,7 @@ A kind module exposes:
 | `semantic(spec)` | `list[Finding]` for rules JSON Schema cannot express |
 | `REFS` | cross-spec references; reserved, empty for now |
 | `NAME_KEY` | optional: the core key that should equal the item name (a mismatch is a warning) |
-| `SCHEMA_URL` | optional: the `$id` of the kind's composed schema (an absolute URI) |
+| `SCHEMA_URL` | optional: an `https://` base URL ending in `/`; the composed schema's `$id` is `SCHEMA_URL` + `<NAME>.<version>.schema.json` |
 
 The module docstring's first line is shown by `prov kinds`. Every call into a kind
 (`semantic`) goes through a guarded call: an exception, or a result that is not a
@@ -107,9 +107,11 @@ prov and run `uv sync`; `uv run prov kinds` should list it):
 ```
 
 **Names.** Bare names (`os-install`) are reserved for kinds the `provision-hub`
-distribution registers. Every other kind is **dotted**: `<label>.<dns-subdomain>`, one
-lowercase DNS label followed by a domain you control (`registry.example.org`), at most 253
-characters. The name is still one path segment:
+distribution registers. Every other kind is **dotted**, Kubernetes CRD style:
+`<label>.<group>`, one lowercase DNS label followed by a dotted domain you control
+(`registry.example.org`), at most 253 characters. The group needs a dot itself, so
+`registry.example` (group `example`) is refused. The name is still one path segment, a
+directory name on Linux/POSIX file systems (prov runs on POSIX systems only):
 
 ```text
 <root>/registry.example.org/<name>/spec.toml     # ref: registry.example.org/<name>
@@ -117,24 +119,39 @@ characters. The name is still one path segment:
 
 **api group.** The domain part is the kind's api group: `api_version =
 "example.org/v1alpha1"` for `registry.example.org`. Bare kinds use the group `prov`
-(`prov/v1alpha1`); a dotted kind may not use it (`registry.prov` is refused), and a spec
-of a dotted kind with `api_version = "prov/v1alpha1"` is rejected like any other
-unsupported version.
+(`prov/v1alpha1`); a dotted kind's group always contains a dot, so it can never be `prov`,
+and a spec of a dotted kind with `api_version = "prov/v1alpha1"` is rejected like any
+other unsupported version.
 
-**Schema `$id`.** A dotted kind's composed schema has `$id` `SCHEMA_URL` when the kind sets
-it, else `urn:prov:schema:<NAME>:<version>` (`urn:prov:schema:registry.example.org:v1alpha1`).
-provision-hub's kinds keep the URL of their published file.
+**Schema `$id`.** `SCHEMA_URL`, when a kind sets it, is a base URL: `https://`, printable
+ASCII without spaces, ending in `/`. prov appends the file name, just as it does for
+provision-hub's published files: `SCHEMA_URL = "https://schemas.example.org/prov/"` gives
+`$id` `https://schemas.example.org/prov/registry.example.org.v1alpha1.schema.json`. A dotted
+kind without one gets `urn:prov:schema:<NAME>:<version>`
+(`urn:prov:schema:registry.example.org:v1alpha1`). provision-hub's kinds keep the URL of
+their published file.
 
 **`PLUGIN_API`.** Each kind declares the contract version it implements, `PLUGIN_API = 1`;
 a kind without it, or with another value, is refused. Backends may declare it too (optional,
 default 1). The number changes only when the contract changes incompatibly.
 
 **Discovery.** prov loads every kind once per run. It refuses, with exit code 2 and one
-line naming the entry point, a kind that cannot be imported, breaks the contract above,
-whose entry-point name differs from `NAME`, that is registered twice, or that uses a bare
-name without coming from the `provision-hub` distribution (so a plugin can never shadow a
-built-in kind). `prov list` warns (exit 0) about a dotted directory under the root that
-holds items but whose kind is not installed.
+line naming the entry point (both, for a duplicate), a kind that cannot be imported, breaks
+the contract above, whose entry-point name differs from `NAME`, that is registered twice,
+or that uses a bare name without coming from the `provision-hub` distribution.
+`prov.kinds.builtin()` reads only that distribution's entry points, so a broken third-party
+kind never changes the published schemas.
+
+The distribution check is a **naming rule, not a security boundary**: installed plugins
+are trusted code, imported and run by prov like any other dependency, and a package can
+claim any distribution name. It keeps third-party kinds out of the bare namespace by
+convention; a fork that wants to own bare names must keep the distribution name
+`provision-hub`.
+
+`prov list` warns about a dotted directory under the root that holds items but whose kind
+is not installed, and about a symlinked dotted directory (never followed). Its warnings go
+to stderr, like its errors, so stdout stays the `<ref>\t<backend>` listing; warnings alone
+exit 0.
 
 **Backends of a plugin kind** follow [adding-a-backend.md](adding-a-backend.md) with
 `KIND = "registry.example.org"`. A backend `NAME` may not equal an envelope key or one of

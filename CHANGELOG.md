@@ -70,14 +70,14 @@ may change incompatibly; every such change has a Migration paragraph. See
   backends under `prov.backends`; `os-install` is registered that way, and core imports no
   kind or backend module (`prov.kinds.builtin()` / `prov.registry.builtin()` are the
   entry points of the `provision-hub` distribution). Third-party kinds are dotted,
-  `<label>.<dns-subdomain>` (`registry.example.org`, items under
-  `<root>/registry.example.org/<name>/`), with the domain part as their api group
-  (`api_version = "example.org/v1alpha1"`; the group `prov` stays reserved) and a schema
-  `$id` of `SCHEMA_URL` or `urn:prov:schema:<NAME>:<version>`; bare names are reserved for
-  provision-hub. Kinds and backends declare `PLUGIN_API = 1` (required for kinds, optional
+  Kubernetes CRD style, `<label>.<group>` with a dotted group (`registry.example.org`, items
+  under `<root>/registry.example.org/<name>/`), the group being their api group
+  (`api_version = "example.org/v1alpha1"`), and a schema `$id` of `SCHEMA_URL` (an https
+  base URL to which `<NAME>.<version>.schema.json` is appended) or
+  `urn:prov:schema:<NAME>:<version>`; bare names are reserved for provision-hub. Kinds and backends declare `PLUGIN_API = 1` (required for kinds, optional
   for backends, default 1); a broken, misnamed, duplicate or wrong-API plugin exits 2 with one
-  escaped line, as does a kind whose `semantic` raises. `prov list` warns about a dotted
-  directory with items whose kind is not installed. Docs: "Kind plugins" in
+  escaped line, as does a kind whose `semantic` raises. `prov list` warns, on stderr
+  and with exit 0, about a dotted directory with items whose kind is not installed. Docs: "Kind plugins" in
   `docs/kinds.md`; `docs/adding-a-backend.md` gains `PLUGIN_API` and a vendor-prefix naming
   convention for third-party backends (`acme-talos`). os-install's schema is unchanged.
 
@@ -157,3 +157,8 @@ validated before still validates and renders the same files. Third-party `os-ins
 backends must handle a missing `spec["network"]` in `render`, `plan` and `check`
 (`"network" in spec`); a backend that needs it should report an error in `check`, which runs
 before `render` and `plan`, as `ubuntu-autoinstall` does.
+
+Kind plugins change the Python API, not the spec format: `prov.kinds.KINDS` is gone (use
+`prov.kinds.discover()`, `get(name)` or `builtin()`), and `prov.kinds.core_keys(kind_name)`
+now takes the kind whose properties a backend NAME may not use. Code that registered a kind
+by adding it to `KINDS` registers it through the `prov.kinds` entry-point group instead.

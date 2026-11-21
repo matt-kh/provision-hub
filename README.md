@@ -46,7 +46,7 @@ uv run prov list                                              # every item under
 |---|---|---|
 | `prov kinds` | list the installed kinds (plugins) and their api versions | 0, 2 (broken kind plugin) |
 | `prov backends [--kind K]` | list registered backends (name, kind) | 0, 2 |
-| `prov list` | list every item under the root (ref, backend) | 0, 1 findings (symlinked, unreadable or invalidly named entries), 2 missing root |
+| `prov list` | list every item under the root (ref, backend); findings on stderr | 0 (also with warnings, e.g. a dotted directory whose kind is not installed), 1 findings (symlinked, unreadable or invalidly named entries), 2 missing root |
 | `prov schema <kind> [--backend B]` | print the JSON Schema of a kind | 0, 2 |
 | `prov init <ref> --backend B [--force]` | write a starter `<kind>/<name>/spec.toml` | 0, 2 |
 | `prov render <ref>` | make `<kind>/<name>/rendered/` hold exactly the rendered files | 0, 2 |
