@@ -58,9 +58,11 @@ uv run prov validate os-install/demo --json                   # one JSON documen
 A ref is `<kind>/<name>`, e.g. `os-install/demo`. Exit code 2 means a usage or configuration
 error (missing item, unknown kind or backend, bad envelope, invalid `spec.toml`).
 
-`--json` prints one JSON document instead of the text (sorted keys, ASCII only) with the
-same exit codes; `validate --json` puts every finding in it and nothing on stderr, and an
-exit-2 error stays one text line on stderr with nothing on stdout. Shapes:
+`--json` prints one JSON document instead of the text (sorted keys, ASCII only, a
+`"format": "prov.cli/v1alpha1"` key except for `schema`) with the same exit codes;
+`validate --json` puts every finding in it and nothing on stderr, and an exit-2 error
+stays text on stderr (`prov: error: …`, possibly with indented continuation lines) with
+nothing on stdout. Shapes:
 [docs/kinds.md](docs/kinds.md#machine-readable-output).
 
 **Root.** `--root DIR`, else `$PROV_ROOT`, else the current directory. Layout:

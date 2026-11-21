@@ -162,46 +162,54 @@ its own kind's core properties; other kinds' properties do not matter.
 `prov kinds`, `backends`, `schema`, `validate` and `plan` take `--json` and then print
 exactly one JSON document on stdout: keys sorted, indented by 2, ASCII only (any other
 character, controls and bidi marks included, is a `\uNNNN` escape), one trailing newline.
-Values are raw, as the plugin or spec gave them, not escaped like the text output: decode
-the JSON before showing a value to a human. File names prov reports in `where` keep the
-`\xNN` escapes core adds to them. Exit codes are the same as without `--json`; an exit-2
-error (unknown kind or backend, missing item, invalid envelope, broken plugin, refused plan
-line) is one text line on stderr and stdout stays empty. `prov list` has no `--json`.
+Plugin-supplied fields (summaries, plugin findings' `where` and `message`) are raw, as the
+plugin gave them, not escaped like the text output: decode the JSON and escape before
+showing a value to a human. prov's own messages are composed once for both outputs, so
+where core quotes a spec value or a file name (in a finding's `message` or `where`, e.g.
+`rendered/line\x0aforged`) it already carries prov's `\xNN` escapes. Exit codes are the
+same as without `--json`. An exit-2 error (unknown kind or backend, missing item, invalid
+envelope or spec for `plan`, broken plugin, refused plan line) is text on stderr
+(`prov: error: …`, possibly with indented continuation lines, e.g. one per schema error of
+an invalid spec), and stdout stays empty. `prov list` has no `--json`.
 
 ```text
 prov kinds --json
-{"kinds": [{"name", "group", "api_versions", "summary", "builtin"}, ...]}       # ordered by name
+{"format", "kinds": [{"name", "group", "api_versions", "summary", "builtin"}, ...]}  # ordered by name
 
 prov backends [--kind K] --json
-{"backends": [{"name", "kind", "summary", "builtin", "starter", "check", "preserve"}, ...]}
+{"format", "backends": [{"name", "kind", "summary", "builtin", "starter", "check", "preserve"}, ...]}
                                                      # ordered by (kind, name), like the text
 prov schema <kind> --json                            # the schema itself; --json changes nothing
 
 prov validate <ref> --json                           # exit 0 ok, 1 findings
-{"ref", "backend", "ok", "findings": [{"level", "where", "message"}, ...]}
+{"format", "ref", "backend", "ok", "findings": [{"level", "where", "message"}, ...]}
 
 prov plan <ref> --json
-{"ref", "backend", "rendered_dir", "lines": [...]}
+{"format", "ref", "backend", "rendered_dir", "lines": [...]}
 ```
 
 | Key | Meaning |
 |---|---|
+| `format` | the version of these document formats, `prov.cli/v1alpha1`; not in `schema --json`, which is a JSON Schema document byte-identical to `prov schema` |
 | `name`, `kind` | kind or backend `NAME`; a backend's `KIND` |
 | `group`, `api_versions` | the kind's api group and accepted `api_version` values, oldest first |
 | `summary` | first line of the plugin's docstring (`""` without one) |
 | `builtin` | registered by the `provision-hub` distribution |
 | `starter`, `check` | the backend implements `starter` (`prov init`) / `check` |
 | `preserve` | the backend's `PRESERVE` paths (`[]` without) |
-| `ref`, `backend` | the item ref and its backend; `backend` is `null` when the spec did not validate |
+| `ref`, `backend` | the item ref and the spec's `backend` value, also when other keys fail validation; `null` only when it does not name a registered backend of the item's kind (in practice an exit-2 envelope error) |
 | `ok` | no finding of level `error`; the exit code is 0 exactly when it is `true` |
 | `findings` | every finding, warnings and `skipped` ones included: errors first, then by `where`, `message`, as in the text output; `where` is `""` for the whole item |
 | `rendered_dir` | absolute path of the item's `rendered/` directory, the plan's `cd` target |
-| `lines` | the plan's lines exactly as the text output prints them (header included); a line with an unsafe character is refused, never escaped |
+| `lines` | exactly the lines the text output prints, in order, header comments and `cd` included (text = the lines joined by newlines); a line with an unsafe character is refused, never escaped |
 
-**Stability.** While the formats are `v1alpha*`, keys may still change, always with a
-CHANGELOG entry. Consumers should ignore keys they do not know: later releases add keys to
-these objects (kind outputs, references, conformance fixtures) without notice, and never
-change the meaning of an existing key without a Migration paragraph.
+**Stability.** `format` is versioned on its own, independent of the spec `api_version`s.
+Adding a key to these objects (kind outputs, references, conformance fixtures come later)
+keeps `format` unchanged: consumers ignore keys they do not know. Removing or renaming a
+key, or changing a value's type or meaning, moves `format` on (`prov.cli/v1alpha2`, then
+`prov.cli/v1` with 1.0) and carries a CHANGELOG Migration paragraph; check `format` before
+reading a document. From `prov.cli/v1` on, changes are additive only, like the spec
+formats.
 
 ## os-install (v1alpha1)
 
