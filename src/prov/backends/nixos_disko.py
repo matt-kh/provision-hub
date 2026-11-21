@@ -30,6 +30,7 @@ from ..validate import ERROR, SKIPPED, WARNING, Finding
 
 NAME = "nixos-disko"
 KIND = "os-install"
+PLUGIN_API = 1
 
 # The disko release the flake pins (a tag of github.com/nix-community/disko). Its
 # docs/disko-install.md at this tag is the source of the offline-installer pattern.

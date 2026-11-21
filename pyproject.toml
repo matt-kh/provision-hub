@@ -34,6 +34,12 @@ Repository = "https://github.com/matt-kh/provision-hub"
 [project.scripts]
 prov = "prov.cli:main"
 
+# Kind plugins: one module per kind; entry-point name = the kind's NAME (see docs/kinds.md).
+# prov's own kinds register exactly like third-party ones; only this distribution's kinds
+# may use bare names.
+[project.entry-points."prov.kinds"]
+os-install = "prov.kinds.os_install"
+
 # Backend plugins: one module per backend; entry-point name = the backend's NAME
 # (see docs/adding-a-backend.md).
 [project.entry-points."prov.backends"]

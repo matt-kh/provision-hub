@@ -21,6 +21,7 @@ from ..validate import ERROR, SKIPPED, WARNING, Finding
 
 NAME = "ubuntu-autoinstall"
 KIND = "os-install"
+PLUGIN_API = 1
 
 SCHEMA: Dict[str, Any] = {
     "type": "object",

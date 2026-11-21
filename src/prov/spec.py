@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 from . import kinds
 from .kinds.common import DEFS
 from .registry import Context, call_plugin, for_kind, lookup
-from .schema import ID_PATTERN, LEGACY_KEYS, LEGACY_TABLES, NAME_PATTERN, ConfigError, api_versions, read_toml, spec_schema
+from .schema import KIND_PATTERN, LEGACY_KEYS, LEGACY_TABLES, NAME_PATTERN, ConfigError, api_versions, read_toml, spec_schema
 from .text import show, short_repr
 from .validate import ERROR, WARNING, Finding, apply_defaults, has_errors, schema_errors
 
@@ -26,11 +26,12 @@ def _full(pattern: str, value: str) -> bool:
 def parse_ref(ref: str) -> Tuple[str, str]:
     """``"<kind>/<name>"`` -> (kind, name); ConfigError for anything else.
 
-    The kind must be a known kind and the name one DNS label, so a ref can never escape the
-    root (no ``..``, no extra ``/``, no control characters).
+    The kind must be a known kind (bare, or dotted like ``registry.example.org``) and the
+    name one DNS label, so a ref can never escape the root (no ``..``, no extra ``/``, no
+    control characters).
     """
     kind, sep, name = ref.partition("/")
-    if not sep or not _full(ID_PATTERN, kind):
+    if not sep or not _full(KIND_PATTERN, kind):
         raise ConfigError(f"invalid ref {short_repr(ref)}: expected <kind>/<name>, for example os-install/demo")
     if not _full(NAME_PATTERN, name):
         raise ConfigError(f"invalid name {short_repr(name)} in ref {short_repr(ref)} (lowercase letters, digits, '-'; one DNS label)")
@@ -95,7 +96,7 @@ def check_spec(raw: Mapping[str, Any], kind_name: str, name: str, backends: Mapp
     if findings:
         return None, findings
     spec = apply_defaults(raw, schema)
-    findings = list(kind.semantic(spec))
+    findings = list(kinds.call_kind(kind, "semantic", spec))
     if hasattr(backend, "check"):
         findings += call_plugin(backend, "check", spec, Context(name))
     findings += name_findings(kind, spec, name)

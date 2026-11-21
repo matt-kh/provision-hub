@@ -389,14 +389,16 @@ def test_list_missing_root_exits_2(tmp_path, capsys):
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
-def test_list_unreadable_kind_dir_is_one_finding(tmp_path, capsys, monkeypatch):
+def test_list_unreadable_kind_dir_is_one_finding(tmp_path, capsys, extra_kinds):
+    from conftest import PROVISION_HUB, fake_entry_point
+
     from prov import kinds
 
     widget = types.ModuleType("widget")
-    for key in ("VERSIONS", "PROPERTIES", "REQUIRED", "semantic", "REFS"):
-        setattr(widget, key, getattr(kinds.KINDS["os-install"], key))
+    for key in ("PLUGIN_API", "VERSIONS", "PROPERTIES", "REQUIRED", "semantic", "REFS"):
+        setattr(widget, key, getattr(kinds.get("os-install"), key))
     widget.NAME = "widget"
-    monkeypatch.setitem(kinds.KINDS, "widget", widget)
+    extra_kinds(fake_entry_point(widget, dist=PROVISION_HUB))
     run(capsys, "--root", str(tmp_path), "init", "os-install/web", "--backend", "ubuntu-autoinstall")
     (tmp_path / "widget").mkdir()
     (tmp_path / "widget").chmod(0)

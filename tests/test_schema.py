@@ -18,7 +18,8 @@ from prov.spec import check_spec, load_spec
 from prov.validate import ERROR, schema_errors
 
 STARTER = tomllib.loads(ubuntu.starter("demo"))
-OS_INSTALL = kinds.KINDS["os-install"]
+OS_INSTALL = kinds.builtin()["os-install"]
+BUILTIN_KINDS = kinds.builtin()
 
 
 def check_host(raw, backends=None):
@@ -29,9 +30,9 @@ def published(kind=OS_INSTALL):
     return json.loads((SCHEMA_DIR / schema_file_name(kind)).read_text(encoding="utf-8"))
 
 
-@pytest.mark.parametrize("name", sorted(kinds.KINDS))
+@pytest.mark.parametrize("name", sorted(BUILTIN_KINDS))
 def test_published_schema_matches_code(name):
-    kind = kinds.KINDS[name]
+    kind = BUILTIN_KINDS[name]
     path = SCHEMA_DIR / schema_file_name(kind)
     text = schema_json(spec_schema(kind, for_kind(builtin(), name), DEFS))
     if UPDATE_GOLDENS:
@@ -40,19 +41,19 @@ def test_published_schema_matches_code(name):
 
 
 def test_no_stale_published_schemas():
-    expected = {schema_file_name(k) for k in kinds.KINDS.values()}
+    expected = {schema_file_name(k) for k in kinds.builtin().values()}
     assert {p.name for p in SCHEMA_DIR.glob("*.json")} == expected
 
 
-@pytest.mark.parametrize("name", sorted(kinds.KINDS))
+@pytest.mark.parametrize("name", sorted(BUILTIN_KINDS))
 def test_published_schema_is_valid_draft_2020_12(name):
-    jsonschema.Draft202012Validator.check_schema(published(kinds.KINDS[name]))
+    jsonschema.Draft202012Validator.check_schema(published(BUILTIN_KINDS[name]))
 
 
 @pytest.mark.parametrize("root,kind,name", example_items())
 def test_examples_round_trip_against_published_schema(root, kind, name):
     raw = read_toml(root / kind / name / "spec.toml")
-    schema = published(kinds.KINDS[kind])
+    schema = published(kinds.get(kind))
     jsonschema.Draft202012Validator(schema).validate(raw)
     assert schema_errors(raw, schema) == []
 

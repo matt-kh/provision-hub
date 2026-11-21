@@ -16,10 +16,10 @@ from .kinds.common import DEFS
 from .plan import plan_lines
 from .registry import Context, call_plugin, discover, for_kind, lookup, preserved
 from .render import atomic_write, diff_rendered, safe_item_dir, special_entries, write_rendered
-from .schema import ID_PATTERN, NAME_PATTERN, SPEC_FILE, ConfigError, api_versions, read_toml, schema_json, spec_schema, tomllib
+from .schema import ID_PATTERN, KIND_PATTERN, NAME_PATTERN, SPEC_FILE, ConfigError, api_versions, read_toml, schema_json, spec_schema, tomllib
 from .spec import check_spec, load_spec, parse_ref
 from .text import esc, short_repr, show
-from .validate import ERROR, Finding, has_errors
+from .validate import ERROR, WARNING, Finding, has_errors
 
 EXIT_OK, EXIT_FINDINGS, EXIT_USAGE = 0, 1, 2
 
@@ -50,9 +50,9 @@ def _load(args: argparse.Namespace) -> tuple:
     return backends[spec["backend"]], spec, findings, idir, Context(name)
 
 
-def _print_findings(findings: List[Any]) -> None:
+def _print_findings(findings: List[Any], warnings_to_stderr: bool = False) -> None:
     for f in sorted(findings, key=lambda f: (f.level != ERROR, f.where, f.message)):
-        print(f, file=sys.stderr if f.level == ERROR else sys.stdout)
+        print(f, file=sys.stderr if f.level == ERROR or warnings_to_stderr else sys.stdout)
 
 
 def _summary(obj: Any) -> str:
@@ -61,8 +61,7 @@ def _summary(obj: Any) -> str:
 
 
 def cmd_kinds(args: argparse.Namespace) -> int:
-    for name in sorted(kinds.KINDS):
-        kind = kinds.KINDS[name]
+    for name, kind in kinds.discover().items():
         print(f"{name}\t{', '.join(api_versions(kind))}\t{_summary(kind)}")
     return EXIT_OK
 
@@ -95,8 +94,9 @@ def cmd_list(args: argparse.Namespace) -> int:
     if not root.is_dir():
         raise ConfigError(f"root {show(str(root))} does not exist or is not a directory")
     root = root.resolve()
-    problems: List[Finding] = []
-    for kind in sorted(kinds.KINDS):
+    known = kinds.discover()
+    problems: List[Finding] = _unknown_dotted_kinds(root, known)
+    for kind in known:
         kdir = root / kind
         try:
             if not os.path.lexists(kdir):
@@ -135,8 +135,31 @@ def cmd_list(args: argparse.Namespace) -> int:
                 continue
             backend = raw.get("backend")
             print(f"{ref}\t{backend if isinstance(backend, str) and re.fullmatch(ID_PATTERN.strip('^$'), backend) else '-'}")
-    _print_findings(problems)
-    return EXIT_FINDINGS if problems else EXIT_OK
+    # stdout is the listing (ref, backend); every finding, warnings included, goes to stderr
+    _print_findings(problems, warnings_to_stderr=True)
+    return EXIT_FINDINGS if has_errors(problems) else EXIT_OK
+
+
+def _unknown_dotted_kinds(root: Path, known: Any) -> List[Finding]:
+    """A warning per dotted directory (a third-party kind's shape) that holds items but whose kind is not installed."""
+    out: List[Finding] = []
+    try:
+        entries = sorted(root.iterdir())
+    except OSError:
+        return out  # the kind loop below reports nothing either; an unreadable root is not a kind problem
+    for entry in entries:
+        name = entry.name
+        if "." not in name or name in known or not re.fullmatch(KIND_PATTERN.strip("^$"), name):
+            continue
+        try:
+            if _entry_kind(entry) != "dir":
+                continue
+            holds_items = any(os.path.lexists(item / SPEC_FILE) for item in entry.iterdir())
+        except OSError:
+            holds_items = True  # unreadable: say so rather than hide it
+        if holds_items:
+            out.append(Finding(WARNING, "no kind of this name is installed; its items are not listed (install the plugin that provides it)", name))
+    return out
 
 
 def cmd_schema(args: argparse.Namespace) -> int:
