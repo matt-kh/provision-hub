@@ -68,7 +68,7 @@ stay minimal (pyyaml; tomli on 3.10 only) — justify any new one in the PR.
   text, `short_repr` for values). Plan lines with an unsafe character are refused, never
   escaped. `tests/test_output_escaping.py` sweeps every verb against a hostile root.
 - **Deterministic output.** Sorted keys, stable ordering, no timestamps or random ids;
-  goldens depend on it.
+  goldens depend on it. The principle: [docs/determinism.md](docs/determinism.md).
 - New backends follow [docs/adding-a-backend.md](docs/adding-a-backend.md).
 - Don't edit `.github/workflows/*` or `.harness.toml` unless the user asks.
 

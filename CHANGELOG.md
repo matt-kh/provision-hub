@@ -8,6 +8,10 @@ may change incompatibly; every such change has a Migration paragraph. See
 
 ### Added
 
+- Docs: `docs/determinism.md`, the determinism principle: the same spec and pinned inputs
+  render a byte-identical tree; specs and host-owned fragments (the nixos-disko `local.nix`
+  pattern) are authored and reviewed, kinds and backends are reviewed code with goldens,
+  and apply and behavioural tests stay outside prov.
 - nixos-disko: `local_module = true` imports a hand-written `../local.nix` next to
   `spec.toml` (proprietary packages, services, `programs.*`, fonts), required once set and
   copied onto the installer stick like the hardware file; `[nixos-disko.inputs]` adds

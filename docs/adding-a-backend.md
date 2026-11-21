@@ -206,7 +206,7 @@ Requirements:
 
 - **render** returns every file the backend needs; paths are relative, without `..` or
   control characters. Core writes them to `<root>/<kind>/<name>/rendered/` and removes files
-  it did not return, except the regular files named in `PRESERVE`. Output must be byte-for-byte deterministic (use `prov.util.dump_yaml`
+  it did not return, except the regular files named in `PRESERVE`. Output must be byte-for-byte deterministic ([determinism.md](determinism.md); use `prov.util.dump_yaml`
   or sorted JSON), text only, end with a newline and carry no trailing whitespace. Never
   embed secrets that are not in `spec`.
 - **validate** parses what is on disk (it may have been edited by hand): required files,
