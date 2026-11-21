@@ -92,7 +92,14 @@ def cmd_kinds(args: argparse.Namespace) -> int:
         own = kinds.builtin_names()
         _print_json({
             "kinds": [
-                {"name": name, "group": kind_group(name), "api_versions": api_versions(kind), "summary": _doc_line(kind), "builtin": name in own}
+                {
+                    "name": name,
+                    "group": kind_group(name),
+                    "api_versions": api_versions(kind),
+                    "summary": _doc_line(kind),
+                    "builtin": name in own,
+                    "outputs": getattr(kind, "OUTPUTS", None),
+                }
                 for name, kind in found.items()
             ]
         })  # fmt: skip
@@ -286,7 +293,9 @@ def cmd_validate(args: argparse.Namespace) -> int:
         spec, findings = check_spec(raw, kind, name, backends)
     except ConfigError as exc:
         raise ConfigError(f"{show(str(path))}: {exc}") from None
+    outputs = None  # null in --json while the spec is invalid
     if spec is not None:
+        outputs = kinds.item_outputs(kinds.get(kind), spec)  # a broken outputs is exit 2, like a broken semantic
         plugin, ctx = backends[spec["backend"]], Context(name)
         rendered = idir / "rendered"
         if not rendered.is_dir():
@@ -306,6 +315,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
             "ref": args.ref,
             "backend": backend if isinstance(backend, str) and backend in for_kind(backends, kind) else None,
             "ok": not failed,
+            "outputs": outputs,
             "findings": [{"level": str(f.level), "where": str(f.where), "message": str(f.message)} for f in _sorted_findings(findings)],
         })  # fmt: skip
         return EXIT_FINDINGS if failed else EXIT_OK
