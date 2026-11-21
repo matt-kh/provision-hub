@@ -1,4 +1,10 @@
-"""prov command line. Exit codes: 0 ok, 1 findings or diff, 2 usage or configuration error."""
+"""prov command line. Exit codes: 0 ok, 1 findings or diff, 2 usage or configuration error.
+
+``--json`` (kinds, backends, schema, validate, plan) prints exactly one JSON document on
+stdout through ``prov.text.json_text``; its shapes are documented in docs/kinds.md
+("Machine-readable output"). Exit codes do not change with it, and an exit-2 error stays a
+text line on stderr with nothing on stdout.
+"""
 
 from __future__ import annotations
 
@@ -14,11 +20,11 @@ from typing import Any, List, Optional, Sequence, Tuple
 from . import __version__, kinds
 from .kinds.common import DEFS
 from .plan import plan_lines
-from .registry import Context, call_plugin, discover, for_kind, lookup, preserved
+from .registry import Context, builtin_names, call_plugin, discover, for_kind, lookup, preserved
 from .render import atomic_write, diff_rendered, safe_item_dir, special_entries, write_rendered
-from .schema import ID_PATTERN, KIND_PATTERN, NAME_PATTERN, SPEC_FILE, ConfigError, api_versions, read_toml, schema_json, spec_schema, tomllib
+from .schema import ID_PATTERN, KIND_PATTERN, NAME_PATTERN, SPEC_FILE, ConfigError, api_versions, kind_group, read_toml, schema_json, spec_schema, tomllib
 from .spec import check_spec, load_spec, parse_ref
-from .text import esc, short_repr, show
+from .text import esc, json_text, short_repr, show
 from .validate import ERROR, WARNING, Finding, has_errors
 
 EXIT_OK, EXIT_FINDINGS, EXIT_USAGE = 0, 1, 2
@@ -50,18 +56,43 @@ def _load(args: argparse.Namespace) -> tuple:
     return backends[spec["backend"]], spec, findings, idir, Context(name)
 
 
+def _sorted_findings(findings: List[Any]) -> List[Any]:
+    """Errors first, then by (where, message): the order of both the text and the JSON output."""
+    return sorted(findings, key=lambda f: (f.level != ERROR, f.where, f.message))
+
+
 def _print_findings(findings: List[Any], warnings_to_stderr: bool = False) -> None:
-    for f in sorted(findings, key=lambda f: (f.level != ERROR, f.where, f.message)):
+    for f in _sorted_findings(findings):
         print(f, file=sys.stderr if f.level == ERROR or warnings_to_stderr else sys.stdout)
 
 
-def _summary(obj: Any) -> str:
+def _print_json(document: Any) -> None:
+    """The one JSON document of a ``--json`` call; raw values, ASCII-escaped by ``json_text``."""
+    sys.stdout.write(json_text(document))
+
+
+def _doc_line(obj: Any) -> str:
+    """The first docstring line of a plugin, raw (plugin text: escape before printing)."""
     doc = (getattr(obj, "__doc__", None) or "").strip().splitlines()
-    return esc(doc[0]) if doc else ""  # plugin text
+    return doc[0] if doc else ""
+
+
+def _summary(obj: Any) -> str:
+    return esc(_doc_line(obj))  # plugin text
 
 
 def cmd_kinds(args: argparse.Namespace) -> int:
-    for name, kind in kinds.discover().items():
+    found = kinds.discover()
+    if args.json:
+        own = kinds.builtin_names()
+        _print_json({
+            "kinds": [
+                {"name": name, "group": kind_group(name), "api_versions": api_versions(kind), "summary": _doc_line(kind), "builtin": name in own}
+                for name, kind in found.items()
+            ]
+        })  # fmt: skip
+        return EXIT_OK
+    for name, kind in found.items():
         print(f"{name}\t{', '.join(api_versions(kind))}\t{_summary(kind)}")
     return EXIT_OK
 
@@ -71,6 +102,23 @@ def cmd_backends(args: argparse.Namespace) -> int:
     if args.kind is not None:
         kinds.get(args.kind)
         backends = for_kind(backends, args.kind)
+    if args.json:
+        own = builtin_names()
+        _print_json({
+            "backends": [
+                {
+                    "name": name,
+                    "kind": plugin.KIND,
+                    "summary": _doc_line(plugin),
+                    "builtin": name in own,
+                    "starter": hasattr(plugin, "starter"),
+                    "check": hasattr(plugin, "check"),
+                    "preserve": list(preserved(plugin)),
+                }
+                for name, plugin in backends.items()
+            ]
+        })  # fmt: skip
+        return EXIT_OK
     for name, plugin in backends.items():
         print(f"{name}\t{plugin.KIND}\t{_summary(plugin)}")
     return EXIT_OK
@@ -171,6 +219,7 @@ def _unknown_dotted_kinds(root: Path, known: Any) -> List[Finding]:
 
 
 def cmd_schema(args: argparse.Namespace) -> int:
+    """The schema is JSON already: ``--json`` changes nothing."""
     kind = kinds.get(args.kind)
     backends = for_kind(discover(), args.kind)
     if args.backend is not None:
@@ -245,6 +294,14 @@ def cmd_validate(args: argparse.Namespace) -> int:
                 findings += call_plugin(plugin, "validate", rendered)
             if diff_rendered(rendered, call_plugin(plugin, "render", spec, ctx), preserved(plugin)):
                 findings.append(Finding(ERROR, "out of date with spec.toml; run prov diff / prov render", "rendered"))
+    if args.json:  # every finding on stdout, nothing on stderr; the exit code says the same as without --json
+        _print_json({
+            "ref": args.ref,
+            "backend": spec["backend"] if spec is not None else None,
+            "ok": not has_errors(findings),
+            "findings": [{"level": str(f.level), "where": str(f.where), "message": str(f.message)} for f in _sorted_findings(findings)],
+        })  # fmt: skip
+        return EXIT_FINDINGS if has_errors(findings) else EXIT_OK
     _print_findings(findings)
     if has_errors(findings):
         return EXIT_FINDINGS
@@ -254,7 +311,11 @@ def cmd_validate(args: argparse.Namespace) -> int:
 
 def cmd_plan(args: argparse.Namespace) -> int:
     plugin, spec, _, idir, ctx = _load(args)
-    for line in plan_lines(plugin, spec, ctx, args.ref, idir / "rendered"):
+    lines = plan_lines(plugin, spec, ctx, args.ref, idir / "rendered")  # refuses unsafe lines (exit 2) before printing any
+    if args.json:
+        _print_json({"ref": args.ref, "backend": plugin.NAME, "rendered_dir": str(idir / "rendered"), "lines": lines})
+        return EXIT_OK
+    for line in lines:
         print(line)
     return EXIT_OK
 
@@ -270,27 +331,30 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", metavar="COMMAND", parser_class=_Parser)
     sub.required = True
 
-    def add(name: str, func: Any, help_: str, ref: bool = True) -> argparse.ArgumentParser:
+    def add(name: str, func: Any, help_: str, ref: bool = True, json_help: Optional[str] = None) -> argparse.ArgumentParser:
         p = sub.add_parser(name, help=help_, description=help_)
         if ref:
             p.add_argument("ref", help="item ref <kind>/<name>, e.g. os-install/demo")
-        p.set_defaults(func=func)
+        if json_help is not None:
+            p.add_argument("--json", action="store_true", help=json_help)
+        p.set_defaults(func=func, json=False)
         return p
 
-    add("kinds", cmd_kinds, "list the kinds prov knows and their api versions", ref=False)
-    p = add("backends", cmd_backends, "list registered backends (NAME, KIND)", ref=False)
+    as_json = "print one JSON document instead of text (shapes: docs/kinds.md, Machine-readable output)"
+    add("kinds", cmd_kinds, "list the kinds prov knows and their api versions", ref=False, json_help=as_json)
+    p = add("backends", cmd_backends, "list registered backends (NAME, KIND)", ref=False, json_help=as_json)
     p.add_argument("--kind", help="only backends of this kind")
     add("list", cmd_list, "list every item under the root (ref, backend)", ref=False)
-    p = add("schema", cmd_schema, "print the JSON Schema of a kind for its registered backends", ref=False)
+    p = add("schema", cmd_schema, "print the JSON Schema of a kind for its registered backends", ref=False, json_help="accepted for symmetry; the schema is JSON already")
     p.add_argument("kind")
     p.add_argument("--backend", help="only this backend's table")
     p = add("init", cmd_init, "write a synthetic starter <kind>/<name>/spec.toml")
     p.add_argument("--backend", required=True, help="backend that renders the item")
     p.add_argument("--force", action="store_true", help="overwrite an existing spec.toml")
     add("render", cmd_render, "render artefacts into <kind>/<name>/rendered/")
-    add("validate", cmd_validate, "validate spec.toml and the rendered artefacts")
+    add("validate", cmd_validate, "validate spec.toml and the rendered artefacts", json_help=as_json + "; findings on stdout only")
     add("diff", cmd_diff, "diff a fresh render against <kind>/<name>/rendered/")
-    add("plan", cmd_plan, "print the apply steps for a human (never runs them)")
+    add("plan", cmd_plan, "print the apply steps for a human (never runs them)", json_help=as_json)
     return parser
 
 

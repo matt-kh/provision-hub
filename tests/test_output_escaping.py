@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -261,6 +262,39 @@ def test_every_verb_writes_only_printable_text(hostile_root, capsys):
     assert f"{HOSTILE_KIND}\texample.org/v1alpha1\tHostile kind ev\\x1b[2Jil\n" in outputs[("kinds",)][1]  # first docstring line
     code, _, err = outputs[("render", f"{HOSTILE_KIND}/odd")]
     assert code == 2 and f"kind '{HOSTILE_KIND}' failed in semantic: RuntimeError: ev\\x1b[2Jil\\x0aerror: forged" in err
+
+
+def test_every_json_verb_writes_ascii_json(hostile_root, capsys):
+    """--json: one parseable document of printable ASCII on stdout, or an exit-2 text error and nothing on stdout."""
+    root = str(hostile_root)
+    assert run(capsys, "--root", root, "render", "os-install/finder")[0] == 0  # so its backend's validate runs
+    argvs = [["kinds"], ["backends"], ["backends", "--kind", "os-install"], ["backends", "--kind", HOSTILE_KIND], ["schema", "os-install"], ["schema", HOSTILE_KIND]]
+    for item in ("os-install/web", "os-install/finder", "os-install/raiser", f"{HOSTILE_KIND}/odd", "os-install/missing"):
+        for verb in ("validate", "plan"):
+            argvs.append([verb, item])
+    docs, seen = {}, []
+    for argv in argvs:
+        code, out, err = run(capsys, "--root", root, *argv, "--json")
+        assert code in (0, 1, 2) and "Traceback" not in err and clean(err), (argv, err)
+        seen.append((argv[0], code))
+        if code == 2:
+            assert out == "" and err.startswith("prov: error: ") and err.count("\n") == 1, (argv, out, err)
+            continue
+        assert err == "", (argv, err)
+        assert all(" " <= ch <= "~" or ch == "\n" for ch in out), argv  # printable ASCII only
+        assert not any(line.lstrip().startswith(("forged", "error: forged")) for line in out.splitlines()), argv
+        docs[tuple(argv)] = json.loads(out)
+    assert ("validate", 1) in seen and ("plan", 2) in seen and ("validate", 2) in seen
+    # raw values survive the round trip: escaping is JSON's, not prov.text's
+    kind = next(k for k in docs[("kinds",)]["kinds"] if k["name"] == HOSTILE_KIND)
+    assert kind["summary"] == "Hostile kind ev\x1b[2Jil" and kind["builtin"] is False
+    stub = next(b for b in docs[("backends",)]["backends"] if b["name"] == "stub-findings")
+    assert stub["summary"] == "Stub backend ev\x1b[2Jil"
+    finder = docs[("validate", "os-install/finder")]
+    assert finder["ok"] is False and {"level": "error", "where": HOSTILE, "message": f"validate says {HOSTILE}"} in finder["findings"]
+    assert {"level": "warning", "where": f"where{HOSTILE}", "message": f"check says {HOSTILE}"} in finder["findings"]
+    web = docs[("validate", "os-install/web")]
+    assert any(f["where"] == "rendered/line\\x0aforged" for f in web["findings"]), web  # names stay show()-escaped by core
 
 
 # --- argv echoed by argparse, diff line splitting, plugin edge cases ---------------------
