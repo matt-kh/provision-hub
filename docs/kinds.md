@@ -78,7 +78,7 @@ A kind module exposes:
 | `PROPERTIES` | JSON Schema of the core keys; may `$ref` `#/$defs/<name>` from `common.DEFS` |
 | `REQUIRED` | required core keys |
 | `semantic(spec)` | `list[Finding]` for rules JSON Schema cannot express |
-| `REFS` | the references an item may hold: `{alias: {"kind", "required", "description"}}`, `{}` for none (see [References](#references)) |
+| `REFS` | the references an item may hold: `{alias: {"kind", "required", "description"}}` (`required` and `description` optional), `{}` for none (see [References](#references)) |
 | `NAME_KEY` | optional: the core key that should equal the item name (a mismatch is a warning) |
 | `SCHEMA_URL` | optional: an `https://` base URL ending in `/`; the composed schema's `$id` is `SCHEMA_URL` + `<NAME>.<version>.schema.json` |
 | `OUTPUTS` | optional, together with `outputs`: object-schema fragment of what an item exports (see [Outputs](#outputs)) |
@@ -191,19 +191,22 @@ upstream = "registry.example.org/hub"   # alias = "<kind>/<name>"
 ```python
 REFS = {
     "upstream": {"kind": "registry.example.org", "required": True, "description": "The registry this mirror pulls from."},
-    "peer": {"kind": "mirror.example.org", "required": False, "description": "Another mirror to sync with."},
+    "peer": {"kind": "mirror.example.org"},  # optional, no description
 }
 ```
 
-**Declaring.** `REFS` maps each alias to exactly three keys: `kind`, the kind name of the
-target (bare or dotted; it need not be installed when the kind is loaded), `required`
-(`true` or `false`) and `description`. An alias is an id (`[a-z][a-z0-9-]*`). A kind with
+**Declaring.** `REFS` maps each alias to a dict with `kind`, the kind name of the target
+(bare or dotted; it need not be installed when the kind is loaded), and optionally
+`required` (`true` or `false`, default `false`) and `description` (a string, default
+`""`); any other key is refused. `prov kinds --json` shows every entry with all three keys,
+defaults filled in. An alias matches `^[a-z][a-z0-9_-]{0,62}$`: a lowercase letter, then
+up to 62 lowercase letters, digits, `_` or `-`. A kind with
 `REFS = {}` has no `[refs]` table: its schema does not contain one, and a spec that has one
 fails with `unknown key 'refs'`. For a kind with references, the composed schema
 (`prov schema <kind>`) has a `refs` object with one string property per alias whose
-`pattern` pins the target kind (`^registry\.example\.org/<item name>$`), no other aliases
-(`additionalProperties: false`), and the required aliases in its `required` (then `refs`
-itself is required too). os-install declares none, so its schema is unchanged.
+`pattern` pins the target kind (`^registry\.example\.org/<item name>$`) and that carries
+the alias's `description` when it has one, no other aliases (`additionalProperties:
+false`), and the required aliases in its `required` (then `refs` itself is required too). os-install declares none, so its schema is unchanged.
 
 **Resolution.** `render`, `diff`, `plan` and `validate` resolve the references of the item
 against the root before calling its backend; the backend's `check`, `render` and `plan` get
@@ -218,12 +221,19 @@ ctx.refs["upstream"] == {"ref": "registry.example.org/hub", "kind": "registry.ex
   schema, semantic checks, its backend's `check`, and its own references, so the whole
   closure of references is valid; its outputs are then computed (`outputs(spec)`). The
   consumer gets one hop: the outputs of its direct targets, not of theirs.
-- A target kind without `OUTPUTS` is allowed; its items' outputs are `{}`.
+- A target kind without `OUTPUTS` is allowed, by rule: its items can be referred to, and
+  their outputs are `{}` (the reference still records the dependency, and the target is
+  still checked).
 - Only aliases present in `[refs]` appear in `ctx.refs` (an optional one left out is
   absent). The mapping is deeply read-only: mappings are `types.MappingProxyType`, arrays
   tuples, so a backend cannot change what another call or another item sees; copy them
   (`dict(...)`, `list(...)`) before changing or serialising them.
-- Each target is read and checked at most once per command, however many paths lead to it.
+- Each target is read and checked once per command, however many paths lead to it. Only
+  a target found invalid because a chain below it was too long *from where it was reached*
+  is checked again when a shorter path reaches it (the depth limit counts from the item
+  the command is about, not from the target).
+- Only `spec.toml` of a target is read: its `rendered/` and `build/` are not looked at, so
+  a target that cannot be rendered does not block the items that refer to it.
 - `prov init` checks the starter's `[refs]` by the schema only (the targets may not exist
   yet) and then skips the backend's `check`.
 
@@ -238,12 +248,16 @@ ctx.refs["upstream"] == {"ref": "registry.example.org/hub", "kind": "registry.ex
 | `invalid target: <ref>: no such item (...)` | no `spec.toml` at the target's path |
 | `invalid target: <ref>: <where>: <message>` | the target is invalid; its first error is shown (`run prov validate <ref>` for all) |
 | `invalid target: <a> -> <b>: ...` | an invalid item further down the chain of references, through the refs that lead to it |
+| `invalid target: <ref>: <ref>: is a symlink; refused` | the target's `<kind>/` or `<name>/` directory is a symlink (never followed); a symlinked `spec.toml` reads `spec.toml: not a regular file; ...` |
 | `<ref> refers to the item itself` | self-reference |
 | `reference cycle: <a> -> <b> -> <a>` | a cycle; every item on it is invalid |
 | `more than 32 references in a row (<a> -> ... -> <z>)` | a chain longer than 32 references from the item checked |
 
-A broken plugin of a target (an exception in its kind's `semantic` or `outputs` or its
-backend's `check`) is exit 2, naming the plugin, as for the item itself.
+Findings name targets by ref, never by absolute path. A chain longer than five refs is
+shortened to its first three and last two (`a -> b -> c -> ... -> y -> z`). A broken plugin
+of a target (an exception in its kind's `semantic` or `outputs` or its backend's `check`)
+is exit 2, as for the item itself, naming the target and the plugin:
+`reference target registry.example.org/hub: kind 'registry.example.org' failed in outputs: ...`.
 
 **Staleness.** A consumer's rendered files may depend on its targets' outputs, so editing a
 target's `spec.toml` can make the consumer's `rendered/` out of date: `prov diff` shows the
@@ -258,6 +272,12 @@ symlink or special file, is an error, never read), never leaves the root (refs a
 name and one DNS label: no `..`, no `/`), never writes, runs or connects to anything, and
 reads no `rendered/` or `build/` files. Values from target specs reach the consumer's
 backend only through the target kind's `outputs`.
+
+**Known limitations.** The symlink checks look at a path and then open it, so a process
+that swaps a target's directory for a symlink between the check and the read could make
+prov read another file: the same exposure as for the item's own `spec.toml` today (the
+file itself is opened with `O_NOFOLLOW`, never through a final symlink). Run prov on roots
+that only you write to.
 
 ## Kind plugins
 
@@ -371,8 +391,8 @@ prov plan <ref> --json
 | `ref`, `backend` | the item ref and the spec's `backend` value, also when other keys fail validation; `null` only when it does not name a registered backend of the item's kind (in practice an exit-2 envelope error) |
 | `outputs` (kinds) | the kind's `OUTPUTS` schema, or `null` for a kind without outputs |
 | `outputs` (validate) | the item's outputs ([Outputs](#outputs)), raw like plugin text: `{}` for a kind without `OUTPUTS`; `null` while the spec is invalid (schema, semantic or backend `check` errors), so outputs were not computed. Computed even when `rendered/` is missing or out of date |
-| `refs` (kinds) | the kind's `REFS` (`{}` without references) |
-| `refs` (validate) | the item's resolved references, `{alias: {"ref", "kind"}}` (`{}` without); `null` while the spec is invalid, including when a reference does not resolve |
+| `refs` (kinds) | the kind's `REFS`, defaults filled in: `{alias: {"kind", "required", "description"}}` (`{}` without references) |
+| `refs` (validate) | the item's resolved references, `{alias: {"ref", "kind", "outputs"}}` with the target's outputs, raw like plugin text (`{}` without references); `null` while the spec is invalid, including when a reference does not resolve |
 | `ok` | no finding of level `error`; the exit code is 0 exactly when it is `true` |
 | `findings` | every finding, warnings and `skipped` ones included: errors first, then by `where`, `message`, as in the text output; `where` is `""` for the whole item |
 | `rendered_dir` | absolute path of the item's `rendered/` directory, the plan's `cd` target |

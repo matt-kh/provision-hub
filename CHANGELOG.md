@@ -108,20 +108,23 @@ may change incompatibly; every such change has a Migration paragraph. See
   path or secret-name reference the human writes in the spec, never a value; prov never
   reads live state. os-install declares no outputs. Docs: "Outputs" in `docs/kinds.md`.
 - References: a kind may declare `REFS` (`{alias: {"kind", "required", "description"}}`,
-  checked when the kind is loaded) and its specs then name targets in one optional envelope
+  `required` defaulting to false and `description` to `""`; aliases match
+  `^[a-z][a-z0-9_-]{0,62}$`; checked when the kind is loaded) and its specs then name targets in one optional envelope
   table, `[refs]` (`upstream = "registry.example.org/hub"`); the composed schema gains a
   `refs` object only for such kinds (one pattern per alias pinning the target kind, required
   aliases required), so `schema/os-install.v1alpha1.schema.json` is unchanged. `render`,
   `diff`, `plan` and `validate` resolve the references against the root (new
-  `prov.refs`, `prov.spec.check_item` / `load_item`): each target's `spec.toml` is read
-  without following symlinks, checked in full with its own references, and its kind's
-  outputs reach the backend as the read-only `ctx.refs[alias]` =
+  `prov.refs`, `prov.spec.check_item` / `load_item`): only each target's `spec.toml` is
+  read, without following symlinks (its `rendered/` and `build/` do not matter), checked
+  in full with its own references, and its kind's outputs (`{}` for a kind without
+  `OUTPUTS`) reach the backend as the read-only `ctx.refs[alias]` =
   `{"ref", "kind", "name", "outputs"}`. Missing, invalid or uninstalled targets,
   self-references, cycles and chains of more than 32 references are findings at
-  `refs.<alias>` (`validate` exits 1, the other verbs 2). Editing a target makes its
+  `refs.<alias>` naming targets by ref (`validate` exits 1, the other verbs 2); a broken
+  target plugin is exit 2 naming the target. Editing a target makes its
   consumers' `rendered/` out of date, by design. `kinds --json` adds `"refs"` (the kind's
-  `REFS`), `validate --json` adds `"refs"` (`{alias: {"ref", "kind"}}`, `null` while the spec
-  is invalid); `format` stays `prov.cli/v1alpha1`. Docs: "References" in `docs/kinds.md`.
+  `REFS`, defaults filled in), `validate --json` adds `"refs"` (`{alias: {"ref", "kind",
+  "outputs"}}`, `null` while the spec is invalid); `format` stays `prov.cli/v1alpha1`. Docs: "References" in `docs/kinds.md`.
 
 ### Security
 
