@@ -107,6 +107,21 @@ may change incompatibly; every such change has a Migration paragraph. See
   `prov.cli/v1alpha1`, text output is unchanged. Post-apply facts are exported only as a
   path or secret-name reference the human writes in the spec, never a value; prov never
   reads live state. os-install declares no outputs. Docs: "Outputs" in `docs/kinds.md`.
+- References: a kind may declare `REFS` (`{alias: {"kind", "required", "description"}}`,
+  checked when the kind is loaded) and its specs then name targets in one optional envelope
+  table, `[refs]` (`upstream = "registry.example.org/hub"`); the composed schema gains a
+  `refs` object only for such kinds (one pattern per alias pinning the target kind, required
+  aliases required), so `schema/os-install.v1alpha1.schema.json` is unchanged. `render`,
+  `diff`, `plan` and `validate` resolve the references against the root (new
+  `prov.refs`, `prov.spec.check_item` / `load_item`): each target's `spec.toml` is read
+  without following symlinks, checked in full with its own references, and its kind's
+  outputs reach the backend as the read-only `ctx.refs[alias]` =
+  `{"ref", "kind", "name", "outputs"}`. Missing, invalid or uninstalled targets,
+  self-references, cycles and chains of more than 32 references are findings at
+  `refs.<alias>` (`validate` exits 1, the other verbs 2). Editing a target makes its
+  consumers' `rendered/` out of date, by design. `kinds --json` adds `"refs"` (the kind's
+  `REFS`), `validate --json` adds `"refs"` (`{alias: {"ref", "kind"}}`, `null` while the spec
+  is invalid); `format` stays `prov.cli/v1alpha1`. Docs: "References" in `docs/kinds.md`.
 
 ### Security
 
@@ -156,6 +171,11 @@ may change incompatibly; every such change has a Migration paragraph. See
   kind's core properties; another kind's properties no longer block it. `prov.kinds.KINDS` is
   gone: look kinds up with `prov.kinds.discover()` / `get()`, and register test kinds through
   entry points (the test suite's `extra_kinds` fixture).
+- Plugin contracts: `refs` is reserved as an envelope key (no kind property, no backend
+  `NAME`), and a backend's `REFS`, reserved before, must now be empty. `Context.refs` is
+  populated for items with references; `prov.spec.check_spec` / `load_spec` take an
+  optional `root=` to resolve them (without it, `[refs]` is checked by the schema only and
+  the backend's `check` is skipped for a spec that has references).
 
 ### Known limitations
 
