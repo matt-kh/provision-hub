@@ -52,8 +52,9 @@ ENVELOPE_KEYS = ("api_version", "kind", "backend")
 # only when the kind declares REFS. Reserved like the envelope keys: no kind property and no
 # backend NAME may use them.
 OPTIONAL_ENVELOPE_KEYS = ("refs",)
-# A reference alias (a key of ``[refs]`` and of a kind's REFS): an id, like backend names.
-ALIAS_PATTERN = ID_PATTERN
+# A reference alias (a key of ``[refs]`` and of a kind's REFS): a lowercase id that may hold
+# ``_`` as well as ``-``, at most 63 characters.
+ALIAS_PATTERN = "^[a-z][a-z0-9_-]{0,62}$"
 # Top-level keys of the pre-v1alpha1 host.toml format; reserved, and answered with a migration hint.
 LEGACY_KEYS = ("schema_version", "distro")
 # Tables of that format; a hint only when api_version is missing (a backend could own the name later).
@@ -117,7 +118,7 @@ def spec_schema(kind: Any, backends: Mapping[str, Any], defs: Mapping[str, Any])
     }
     properties.update(copy.deepcopy(dict(kind.PROPERTIES)))
     required = list(ENVELOPE_KEYS) + list(kind.REQUIRED)
-    refs = refs_schema(kind.REFS)
+    refs = refs_schema(kind.REFS)  # checked by prov.kinds.check_kind
     if refs is not None:
         properties["refs"] = refs
         if refs.get("required"):
@@ -160,19 +161,26 @@ def refs_schema(declared: Mapping[str, Any]) -> Any:
 
     One string property per alias, its pattern pinning the target kind; unknown aliases are
     refused; aliases declared ``required`` are required (and then the table itself).
+    ``required`` defaults to false and ``description`` to none (``prov.kinds.declared_refs``).
     """
     if not declared:
         return None
+
+    def prop(decl: Mapping[str, Any]) -> Dict[str, Any]:
+        out: Dict[str, Any] = {"type": "string", "pattern": ref_pattern(decl["kind"])}
+        if decl.get("description"):
+            out["description"] = decl["description"]
+        return out
+
     schema: Dict[str, Any] = {
         "type": "object",
         "additionalProperties": False,
         "description": 'References to other items: alias = "<kind>/<name>".',
         "properties": {
-            alias: {"type": "string", "pattern": ref_pattern(decl["kind"]), "description": decl["description"]}
-            for alias, decl in sorted(declared.items())
+            alias: prop(decl) for alias, decl in sorted(declared.items())
         },
     }
-    required = sorted(alias for alias, decl in declared.items() if decl["required"])
+    required = sorted(alias for alias, decl in declared.items() if decl.get("required", False))
     if required:
         schema["required"] = required
     return schema

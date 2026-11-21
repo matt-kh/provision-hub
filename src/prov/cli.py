@@ -23,6 +23,7 @@ from . import __version__, kinds
 from .kinds.common import DEFS
 from .plan import plan_lines
 from .registry import builtin_names, call_plugin, discover, for_kind, lookup, preserved
+from .refs import thaw
 from .render import atomic_write, diff_rendered, safe_item_dir, special_entries, write_rendered
 from .schema import ID_PATTERN, KIND_PATTERN, NAME_PATTERN, SPEC_FILE, ConfigError, api_versions, kind_group, read_toml, schema_json, spec_schema, tomllib
 from .spec import check_item, check_spec, load_item, parse_ref
@@ -100,7 +101,7 @@ def cmd_kinds(args: argparse.Namespace) -> int:
                     "summary": _doc_line(kind),
                     "builtin": name in own,
                     "outputs": getattr(kind, "OUTPUTS", None),
-                    "refs": kind.REFS,
+                    "refs": kinds.declared_refs(kind),
                 }
                 for name, kind in found.items()
             ]
@@ -293,7 +294,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
     outputs = refs = None  # null in --json while the spec is invalid
     if spec is not None:
         outputs = kinds.item_outputs(kinds.get(kind), spec)  # a broken outputs is exit 2, like a broken semantic
-        refs = {alias: {"ref": entry["ref"], "kind": entry["kind"]} for alias, entry in ctx.refs.items()}
+        refs = {alias: {"ref": entry["ref"], "kind": entry["kind"], "outputs": thaw(entry["outputs"])} for alias, entry in ctx.refs.items()}
         plugin = backends[spec["backend"]]
         rendered = idir / "rendered"
         if not rendered.is_dir():

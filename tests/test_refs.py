@@ -151,7 +151,8 @@ def test_consumer_renders_a_target_output(setup, tmp_path, capsys):
     code, out, _ = run(capsys, "--root", root, "plan", f"{MIRROR}/m1")
     assert code == 0 and f"# pulls from {HUB}" in out.splitlines()
     doc = json.loads(run(capsys, "--root", root, "validate", f"{MIRROR}/m1", "--json")[1])
-    assert doc["ok"] is True and doc["refs"] == {"upstream": {"ref": HUB, "kind": KIND}} and doc["outputs"] == {}
+    upstream = {"ref": HUB, "kind": KIND, "outputs": {"url": "https://hub.example.org:5001", "tags": ["a", "b"], "meta": {"n": 1}}}
+    assert doc["ok"] is True and doc["refs"] == {"upstream": upstream} and doc["outputs"] == {}
     hub = json.loads(run(capsys, "--root", root, "validate", HUB, "--json")[1])
     assert hub["refs"] == {}  # a kind without REFS: empty
 
@@ -325,7 +326,10 @@ def test_depth_limit(setup, tmp_path, capsys):
     n = MAX_DEPTH + 2
     for i in range(n):
         write(tmp_path, f"{MIRROR}/m{i}", mirror_toml(f"m{i}", **({"peer": f"{MIRROR}/m{i + 1}"} if i + 1 < n else {})))
-    check_every_verb(capsys, root, f"{MIRROR}/m0", f"more than {MAX_DEPTH} references in a row ({MIRROR}/m0 -> ... -> {MIRROR}/m{MAX_DEPTH + 1})")
+    chain = f"{MIRROR}/m0 -> {MIRROR}/m1 -> {MIRROR}/m2 -> ... -> {MIRROR}/m{MAX_DEPTH} -> {MIRROR}/m{MAX_DEPTH + 1}"
+    check_every_verb(capsys, root, f"{MIRROR}/m0", f"more than {MAX_DEPTH} references in a row ({chain})")
+    err = run(capsys, "--root", root, "validate", f"{MIRROR}/m0")[2]
+    assert "run prov validate" not in err  # the limit counts from the root item
     # the same chain, entered closer to its end, is fine
     assert run(capsys, "--root", root, "render", f"{MIRROR}/m2")[0] == 0
 
@@ -405,15 +409,24 @@ def test_hostile_target_text_is_escaped(setup, tmp_path, capsys):
         assert not any(line.startswith(("forged", "error: forged")) for line in err.splitlines())
 
 
-def test_broken_target_plugin_is_exit_2(setup, tmp_path, capsys):
-    def outputs(spec):
-        raise RuntimeError(HOSTILE)
+def _raise(*args):
+    raise RuntimeError(HOSTILE)
 
-    root = setup(registry=fake_kind(OUTPUTS=OUTPUTS, outputs=outputs))
+
+@pytest.mark.parametrize("where", ["semantic", "outputs", "check"])
+def test_broken_target_plugin_is_exit_2(setup, tmp_path, capsys, extra_backends, where):
+    registry = fake_kind(OUTPUTS=OUTPUTS, outputs=_raise if where == "outputs" else registry_kind().outputs)
+    if where == "semantic":
+        registry.semantic = _raise
+    root = setup(registry=registry)
+    if where == "check":
+        extra_backends(fake_entry_point(fake_backend(check=_raise), value="prov_registry.text"), fake_entry_point(mirror_backend(), value="prov_mirror.text"))
     write(tmp_path, f"{MIRROR}/m1", mirror_toml("m1"))
+    who = f"backend '{BACKEND}'" if where == "check" else f"kind '{KIND}'"
     for verb in ("validate", "render"):
         code, out, err = run(capsys, "--root", root, verb, f"{MIRROR}/m1")
-        assert (code, out) == (2, "") and f"kind '{KIND}' failed in outputs: RuntimeError: ev\\x1b[2Jil" in err
+        assert (code, out) == (2, ""), err
+        assert f"reference target {HUB}: {who} failed in {where}: RuntimeError: ev\\x1b[2Jil" in err, err
         assert err.count("\n") == 1 and clean(err)
 
 
@@ -475,9 +488,13 @@ def test_without_a_root_refs_are_syntax_only(setup, tmp_path, capsys):
     [
         ({"Bad": {"kind": KIND, "required": True, "description": ""}}, "REFS alias 'Bad' must match"),
         ({1: {"kind": KIND, "required": True, "description": ""}}, "REFS alias 1 must match"),
-        ({"a": {"kind": KIND, "required": True}}, "REFS['a'] must be a dict with exactly the keys description, kind, required"),
-        ({"a": {"kind": KIND, "required": True, "description": "", "x": 1}}, "must be a dict with exactly the keys"),
-        ({"a": [KIND]}, "must be a dict with exactly the keys"),
+        ({"a": {"required": True}}, "REFS['a'] has no kind; keys: kind (required), required, description"),
+        ({"a": {"kind": KIND, "required": True, "description": "", "x": 1}}, "REFS['a'] has unknown key(s) 'x'"),
+        ({"a": [KIND]}, "REFS['a'] must be a dict with the key kind"),
+        ({"a": {"kind": KIND, 1: "x"}}, "REFS['a'] must be a dict with the key kind"),
+        ({"a": {"kind": KIND, ("t",): "x", "z": 1}}, "REFS['a'] must be a dict with the key kind"),
+        ({"a" * 64: {"kind": KIND}}, "must match ^[a-z][a-z0-9_-]{0,62}$"),
+        ({"_a": {"kind": KIND}}, "REFS alias '_a' must match"),
         ({"a": {"kind": "Bad Kind", "required": True, "description": ""}}, "REFS['a'] kind 'Bad Kind' is not a kind name"),
         ({"a": {"kind": KIND, "required": 1, "description": ""}}, "REFS['a'] required must be true or false"),
         ({"a": {"kind": KIND, "required": False, "description": None}}, "REFS['a'] description must be a str"),
@@ -502,3 +519,116 @@ def test_backend_refs_must_be_empty(extra_kinds):
     check_contract(fake_backend(REFS={}), "x = fake")
     with pytest.raises(ConfigError, match=f"REFS is reserved and must be empty; references are declared by the kind \\(REFS of kind '{KIND}'\\)"):
         check_contract(fake_backend(REFS={"image": {}}), "x = fake")
+
+
+# --- review follow-ups -------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("swap", [False, True])
+def test_depth_failure_is_not_an_item_property(setup, tmp_path, capsys, swap):
+    """t is too deep through c1..c31 but fine when reached directly: one finding, in either alias order."""
+    root = setup()
+    for i in range(1, 32):
+        write(tmp_path, f"{MIRROR}/c{i}", mirror_toml(f"c{i}", peer=f"{MIRROR}/c{i + 1}" if i < 31 else f"{MIRROR}/t"))
+    write(tmp_path, f"{MIRROR}/t", mirror_toml("t", peer=f"{MIRROR}/u"))
+    write(tmp_path, f"{MIRROR}/u", mirror_toml("u"))
+    chain, direct = f"{MIRROR}/c1", f"{MIRROR}/t"
+    refs = {"backup": direct, "peer": chain} if swap else {"backup": chain, "peer": direct}
+    write(tmp_path, f"{MIRROR}/top", mirror_toml("top", **refs))
+    code, out, err = run(capsys, "--root", root, "validate", f"{MIRROR}/top", "--json")
+    findings = [f for f in json.loads(out)["findings"] if f["level"] == "error" and f["where"].startswith("refs.")]
+    long_alias = "peer" if swap else "backup"
+    assert [f["where"] for f in findings] == [f"refs.{long_alias}"], findings
+    assert f"more than {MAX_DEPTH} references in a row" in findings[0]["message"]
+
+
+def test_symlinked_target_messages_are_relative(setup, tmp_path, capsys):
+    root = setup()
+    outside = tmp_path.parent / f"{tmp_path.name}-elsewhere"
+    write(outside, HUB, fake_backend().starter("hub"))
+    hub = tmp_path / HUB
+    for p in sorted(hub.rglob("*"), reverse=True):
+        p.unlink()
+    hub.rmdir()
+    os.symlink(outside / HUB, hub)
+    write(tmp_path, f"{MIRROR}/m1", mirror_toml("m1"))
+    code, out, _ = run(capsys, "--root", root, "validate", f"{MIRROR}/m1", "--json")
+    doc = json.loads(out)
+    assert code == 1 and str(tmp_path) not in out
+    assert any(f["message"] == f"invalid target: {HUB}: {HUB}: is a symlink; refused" for f in doc["findings"]), doc
+    code, _, err = run(capsys, "--root", root, "render", f"{MIRROR}/m1")
+    assert code == 2 and "refuses to write" not in err and f"{HUB}: is a symlink; refused" in err
+
+
+def test_target_rendered_symlink_does_not_block_consumers(setup, tmp_path, capsys):
+    root = setup()
+    os.symlink(tmp_path.parent, tmp_path / HUB / "rendered")
+    os.symlink(tmp_path.parent, tmp_path / HUB / "build")
+    write(tmp_path, f"{MIRROR}/m1", mirror_toml("m1"))
+    assert run(capsys, "--root", root, "render", f"{MIRROR}/m1")[0] == 0
+    assert run(capsys, "--root", root, "render", HUB)[0] == 2  # the target itself still refuses
+
+
+def test_symlinked_root(setup, tmp_path, capsys):
+    setup()
+    write(tmp_path, f"{MIRROR}/m1", mirror_toml("m1"))
+    link = tmp_path.parent / f"{tmp_path.name}-link"
+    os.symlink(tmp_path, link)
+    assert run(capsys, "--root", str(link), "render", f"{MIRROR}/m1")[0] == 0
+    assert (tmp_path / MIRROR / "m1/rendered/mirror.txt").read_text() == "m1.example.org mirrors https://hub.example.org:5001\n"
+
+
+def test_long_cycle_is_shortened(setup, tmp_path, capsys):
+    root = setup()
+    for i in range(8):
+        write(tmp_path, f"{MIRROR}/k{i}", mirror_toml(f"k{i}", peer=f"{MIRROR}/k{(i + 1) % 8}"))
+    err = run(capsys, "--root", root, "validate", f"{MIRROR}/k0")[2]
+    assert f"reference cycle: {MIRROR}/k0 -> {MIRROR}/k1 -> {MIRROR}/k2 -> ... -> {MIRROR}/k7 -> {MIRROR}/k0" in err, err
+
+
+def test_diamond_with_both_arms_invalid(setup, tmp_path, capsys, monkeypatch):
+    import prov.refs as refs_module
+
+    root = setup()
+    write(tmp_path, f"{MIRROR}/a", mirror_toml("a", peer=f"{MIRROR}/b", backup=f"{MIRROR}/c"))
+    write(tmp_path, f"{MIRROR}/b", mirror_toml("b", peer=f"{MIRROR}/d"))
+    write(tmp_path, f"{MIRROR}/c", mirror_toml("c", peer=f"{MIRROR}/d"))
+    write(tmp_path, f"{MIRROR}/d", mirror_toml("d", upstream=f"{KIND}/gone"))
+    reads = []
+    real = refs_module.read_toml
+    monkeypatch.setattr(refs_module, "read_toml", lambda path: reads.append(path.parent.name) or real(path))
+    code, out, _ = run(capsys, "--root", root, "validate", f"{MIRROR}/a", "--json")
+    errors = {f["where"]: f["message"] for f in json.loads(out)["findings"] if f["level"] == "error"}
+    assert code == 1 and sorted(reads) == ["b", "c", "d", "hub"]  # each read once
+    assert errors["refs.peer"] == f"invalid target: {MIRROR}/b -> {MIRROR}/d -> {KIND}/gone: no such item (no {KIND}/gone/spec.toml under the root)"
+    assert errors["refs.backup"] == f"invalid target: {MIRROR}/c -> {MIRROR}/d -> {KIND}/gone: no such item (no {KIND}/gone/spec.toml under the root)"
+
+
+def test_resolve_defence_in_depth(setup, tmp_path):
+    """Checks the composed schema makes unreachable through the CLI, for direct resolve() callers."""
+    setup()
+    spec = {"refs": {"nope": HUB, "upstream": f"{MIRROR}/m1", "peer": 7, "backup": "x/../y"}}
+    refs, findings = resolve(tmp_path, MIRROR, "m1", spec, discover())
+    assert dict(refs) == {}
+    by_where = {f.where: f.message for f in findings}
+    assert by_where["refs.nope"].startswith("unknown reference alias 'nope' (this kind declares: backup, cache, peer, upstream)")
+    assert by_where["refs.upstream"] == f"{MIRROR}/m1 is a {MIRROR} item; 'upstream' refers to a {KIND} item"
+    assert by_where["refs.peer"] == "7 is not a ref <kind>/<name>"
+    assert by_where["refs.backup"].startswith("invalid ref 'x/../y'") or by_where["refs.backup"].startswith("invalid name")
+
+
+def test_check_spec_with_root(setup, tmp_path):
+    setup()
+    raw = read_toml(write(tmp_path, f"{MIRROR}/m1", mirror_toml("m1")))
+    spec, findings = check_spec(raw, MIRROR, "m1", discover(), root=tmp_path)
+    assert spec is not None and findings == [] and spec["refs"] == {"upstream": HUB}
+
+
+def test_refs_defaults_and_alias_shape(setup, tmp_path, capsys, extra_kinds):
+    refs = {"up_stream-1": {"kind": KIND}}
+    extra_kinds(fake_entry_point(registry_kind(), value="prov_registry.kind"), fake_entry_point(mirror_kind(REFS=refs), value="prov_mirror.kind"))
+    doc = json.loads(run(capsys, "kinds", "--json")[1])
+    assert next(k for k in doc["kinds"] if k["name"] == MIRROR)["refs"] == {"up_stream-1": {"kind": KIND, "required": False, "description": ""}}
+    schema = json.loads(run(capsys, "schema", MIRROR)[1])
+    assert "refs" not in schema["required"] and "description" not in schema["properties"]["refs"]["properties"]["up_stream-1"]
+    assert refs == {"up_stream-1": {"kind": KIND}}  # the plugin's own REFS is not changed

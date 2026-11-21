@@ -13,7 +13,7 @@ module. Each kind module exposes (see docs/kinds.md):
 ``PROPERTIES``  JSON Schema of the core keys (may ``$ref`` ``#/$defs/<name>`` of ``common.DEFS``)
 ``REQUIRED``    required core keys
 ``semantic``    ``semantic(spec) -> list[Finding]``: checks JSON Schema cannot express
-``REFS``        references to other items: ``{alias: {"kind", "required", "description"}}``
+``REFS``        references to other items: ``{alias: {"kind", "required"?, "description"?}}``
                 (``{}`` for none); the spec's ``[refs]`` table, resolved into ``ctx.refs``
 ``NAME_KEY``    optional: the core key that should equal the item name (warning otherwise)
 ``SCHEMA_URL``  optional: https base URL (ending in ``/``) of the composed schema's ``$id``
@@ -102,19 +102,26 @@ def check_kind(kind: Kind, origin: Optional[str] = None) -> None:
 
 
 REF_FIELDS = ("description", "kind", "required")
+REF_DEFAULTS = {"required": False, "description": ""}
 
 
 def _check_refs(declared: Mapping[Any, Any], who: str) -> None:
-    """``REFS``: alias (an id) -> exactly ``{"kind": <kind name>, "required": bool, "description": str}``.
+    """``REFS``: alias -> ``{"kind": <kind name>, "required": bool (false), "description": str ("")}``.
 
-    The target kind need not be installed now: a missing one is a finding when a spec's
-    reference is resolved (``prov.refs``).
+    ``kind`` is required, the others optional, any other key refused. The target kind need
+    not be installed now: a missing one is a finding when a spec's reference is resolved
+    (``prov.refs``).
     """
     for alias, decl in declared.items():
         if not (type(alias) is str and _full(ALIAS_PATTERN, alias)):
             raise ConfigError(f"{who}: REFS alias {short_repr(alias)} must match {ALIAS_PATTERN}")
-        if not (type(decl) is dict and sorted(decl) == list(REF_FIELDS)):
-            raise ConfigError(f"{who}: REFS[{alias!r}] must be a dict with exactly the keys {', '.join(REF_FIELDS)}")
+        if not (type(decl) is dict and all(type(key) is str for key in decl)):
+            raise ConfigError(f"{who}: REFS[{alias!r}] must be a dict with the key kind (and optionally required, description)")
+        unknown = sorted(set(decl) - set(REF_FIELDS))
+        if unknown or "kind" not in decl:
+            what = f"unknown key(s) {', '.join(short_repr(k) for k in unknown)}" if unknown else "no kind"
+            raise ConfigError(f"{who}: REFS[{alias!r}] has {what}; keys: kind (required), required, description")
+        decl = {**REF_DEFAULTS, **decl}
         target = decl["kind"]
         if not (type(target) is str and len(target) <= KIND_MAX_LENGTH and _full(KIND_PATTERN, target)):
             raise ConfigError(f"{who}: REFS[{alias!r}] kind {short_repr(target)} is not a kind name (an id, or dotted like 'registry.example.org')")
@@ -299,6 +306,11 @@ def core_keys(kind_name: str) -> Dict[str, str]:
         for key in kind.PROPERTIES:
             owners.setdefault(key, f"kind {kind.NAME!r}")
     return owners
+
+
+def declared_refs(kind: Kind) -> Dict[str, Dict[str, Any]]:
+    """A (checked) kind's ``REFS`` with the defaults filled in: alias -> ``{"kind", "required", "description"}``."""
+    return {alias: {**REF_DEFAULTS, **decl} for alias, decl in sorted(kind.REFS.items())}
 
 
 def _is_findings(value: Any) -> bool:
