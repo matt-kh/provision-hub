@@ -117,16 +117,21 @@ def outputs(spec):
   ([adding-a-backend.md](adding-a-backend.md), section 2): supported keywords only, no
   `$defs` of its own, `$ref` only to the shared `#/$defs/<name>`. Its top level is
   `"type": "object"` with `properties` and `"additionalProperties": false`, so every output
-  name is declared. It is public API, versioned with the kind.
+  name is declared. Like `PROPERTIES`, it must be plain JSON data itself (no bytes, sets,
+  tuples, objects or NaN in a `default`, `enum` or `const`). It is public API, versioned
+  with the kind.
 - **`outputs(spec)`** gets the validated spec with defaults applied (envelope and backend
   table included), the spec only: no item name, no file, no other item. It must be a **pure,
   deterministic** function of that spec: the same spec gives equal outputs on every run,
   machine and Python version, with no clock, randomness, environment, files, network or
   subprocesses. It gets a copy of the spec, so changing it changes nothing.
 - The result must be plain JSON data: a `dict` with string keys whose values are `str`,
-  `int`, finite `float`, `bool`, `None`, `list` or `dict` (exact types, at most 32 levels
-  deep), valid against `OUTPUTS`; its strings, like spec values, hold no control
-  characters. prov checks it on every call and returns a copy. An exception, another type,
+  `int`, finite `float`, `bool`, `None`, `list` or `dict` (exact types: no subclasses such
+  as `IntEnum`; at most 32 levels deep), valid against `OUTPUTS`. Integers are 64-bit
+  (-2^63 to 2^63-1); strings and keys, like spec values, hold no control characters (C0,
+  DEL, C1, U+2028, U+2029); no key, at any depth, looks like a secret value (the lint
+  below), so an open nested object cannot return one either. prov checks it on every call
+  and returns a copy. An exception, another type,
   a non-JSON value or a schema violation is exit code 2:
   `kind '<NAME>' failed in outputs: ...`, escaped.
 - `prov validate` computes the outputs of a valid spec (so a broken `outputs` fails it with
@@ -138,12 +143,24 @@ cluster, host, cloud API or secret store. Outputs are known before anything is a
 because they follow from the spec alone. A fact that exists only after the apply step (a
 generated join token, a kubeconfig, a certificate, an admin password) is exported only as a
 **reference the human writes in the spec**: a path where the human keeps it, or the name of
-the secret that holds it (`kubeconfig_path`, `ca_secret_name`), never the value. As a lint,
-`check_kind` rejects an `OUTPUTS` property name (at any depth, through `$ref` too) that
-contains, ignoring case, `password`, `passwd`, `token`, `secret`, `private_key`, `api_key`
-or `credential`, unless it ends in `_path`, `_name` or `_ref`. The lint catches honest
-mistakes, not every secret: a kind can still export one under another name, and reviewers
-of a kind check what its outputs carry.
+the secret that holds it (`kubeconfig_path`, `ca_secret_name`), never the value.
+
+**The secret-name lint.** `check_kind` checks every `OUTPUTS` property name (at any depth,
+in `properties` and `required`, through `$ref` too), and `item_outputs` every key of the
+result. A name is split into words (camelCase first, then `_`, `-`, `.` and spaces;
+`sshPrivateKey` is `ssh private key`) and looks like a secret value when:
+
+- its last word is not `path`, `name`, `ref` or `file` (those make it a reference:
+  `admin_password_path`, `tls_secret_name`, `kubeconfig_file`), and
+- a word is `password`, `passwd`, `passphrase`, `pwd`, `secret`, `secrets`, `credential`,
+  `credentials` or `kubeconfig`; or two adjacent words are `private key`, `api key`,
+  `ssh key` or `tls key`; or the last word is `token` or `tokens`, not after `max` or `num`
+  (`join_token`, but not `max_tokens`, `token_count` or `tokenizer`).
+
+It is a lint, not a guarantee: it catches honest mistakes, not every secret (a kind can
+still export one under another name), and reviewers of a kind check what its outputs carry.
+It is not part of `PLUGIN_API`: its word lists may grow between releases, each time with a
+CHANGELOG entry.
 
 ## Kind plugins
 
