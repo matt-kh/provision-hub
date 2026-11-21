@@ -13,6 +13,7 @@ uv sync                                  # dev env (Python 3.12, .python-version
 uv run pytest -q                         # all tests
 uv run --python 3.10 pytest -q           # oldest supported Python
 uv run prov kinds && uv run prov backends --kind os-install
+uv run prov --root examples validate os-install/demo-lvm --json   # also kinds/backends/schema/plan
 uv run prov --root <dir> init os-install/demo --backend ubuntu-autoinstall
 uv run prov --root <dir> render os-install/demo && uv run prov --root <dir> validate os-install/demo
 uv run prov --root <dir> plan os-install/demo && uv run prov --root <dir> list
@@ -43,7 +44,8 @@ stay minimal (pyyaml; tomli on 3.10 only) — justify any new one in the PR.
   entry-point loading, `PLUGIN_API`, the guarded call. `src/prov/spec.py` — refs and
   envelope checks.
 - `src/prov/text.py` — the output-escaping predicate and helpers (`unsafe`, `esc`, `show`,
-  `short_repr`).
+  `short_repr`) and `json_text`, the one JSON serialisation (schemas, every `--json`
+  document; `ensure_ascii` is its printing boundary, values go in raw).
 - Core modules (`cli`, `spec`, `registry`, `render`, `plan`, `schema`, `validate`, `text`,
   `util`, `plugin`, `kinds/__init__`) must stay kind- and backend-neutral and never import a
   specific kind or backend module; `tests/test_kinds.py` and `tests/test_kind_plugins.py`
@@ -75,7 +77,7 @@ stay minimal (pyyaml; tomli on 3.10 only) — justify any new one in the PR.
   `tests/test_plan.py`).
 - **Escape at the printing boundary.** Never print a file name, plugin text, exception text,
   tool output or spec value raw: route it through `prov.text` (`show` for names, `esc` for
-  text, `short_repr` for values). Plan lines with an unsafe character are refused, never
+  text, `short_repr` for values; `json_text` for a `--json` document). Plan lines with an unsafe character are refused, never
   escaped. `tests/test_output_escaping.py` sweeps every verb against a hostile root.
 - **Deterministic output.** Sorted keys, stable ordering, no timestamps or random ids;
   goldens depend on it. The principle: [docs/determinism.md](docs/determinism.md).

@@ -157,6 +157,52 @@ exit 0.
 `KIND = "registry.example.org"`. A backend `NAME` may not equal an envelope key or one of
 its own kind's core properties; other kinds' properties do not matter.
 
+## Machine-readable output
+
+`prov kinds`, `backends`, `schema`, `validate` and `plan` take `--json` and then print
+exactly one JSON document on stdout: keys sorted, indented by 2, ASCII only (any other
+character, controls and bidi marks included, is a `\uNNNN` escape), one trailing newline.
+Values are raw, as the plugin or spec gave them, not escaped like the text output: decode
+the JSON before showing a value to a human. File names prov reports in `where` keep the
+`\xNN` escapes core adds to them. Exit codes are the same as without `--json`; an exit-2
+error (unknown kind or backend, missing item, invalid envelope, broken plugin, refused plan
+line) is one text line on stderr and stdout stays empty. `prov list` has no `--json`.
+
+```text
+prov kinds --json
+{"kinds": [{"name", "group", "api_versions", "summary", "builtin"}, ...]}       # ordered by name
+
+prov backends [--kind K] --json
+{"backends": [{"name", "kind", "summary", "builtin", "starter", "check", "preserve"}, ...]}
+                                                     # ordered by (kind, name), like the text
+prov schema <kind> --json                            # the schema itself; --json changes nothing
+
+prov validate <ref> --json                           # exit 0 ok, 1 findings
+{"ref", "backend", "ok", "findings": [{"level", "where", "message"}, ...]}
+
+prov plan <ref> --json
+{"ref", "backend", "rendered_dir", "lines": [...]}
+```
+
+| Key | Meaning |
+|---|---|
+| `name`, `kind` | kind or backend `NAME`; a backend's `KIND` |
+| `group`, `api_versions` | the kind's api group and accepted `api_version` values, oldest first |
+| `summary` | first line of the plugin's docstring (`""` without one) |
+| `builtin` | registered by the `provision-hub` distribution |
+| `starter`, `check` | the backend implements `starter` (`prov init`) / `check` |
+| `preserve` | the backend's `PRESERVE` paths (`[]` without) |
+| `ref`, `backend` | the item ref and its backend; `backend` is `null` when the spec did not validate |
+| `ok` | no finding of level `error`; the exit code is 0 exactly when it is `true` |
+| `findings` | every finding, warnings and `skipped` ones included: errors first, then by `where`, `message`, as in the text output; `where` is `""` for the whole item |
+| `rendered_dir` | absolute path of the item's `rendered/` directory, the plan's `cd` target |
+| `lines` | the plan's lines exactly as the text output prints them (header included); a line with an unsafe character is refused, never escaped |
+
+**Stability.** While the formats are `v1alpha*`, keys may still change, always with a
+CHANGELOG entry. Consumers should ignore keys they do not know: later releases add keys to
+these objects (kind outputs, references, conformance fixtures) without notice, and never
+change the meaning of an existing key without a Migration paragraph.
+
 ## os-install (v1alpha1)
 
 One machine's operating-system install: host identity, users, network and whole disks.
