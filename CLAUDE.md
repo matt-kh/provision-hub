@@ -1,7 +1,7 @@
 # CLAUDE.md — working on provision-hub (`prov`)
 
 `prov` renders, validates and plans provisioning artefacts from
-`<root>/<kind>/<name>/spec.toml`. Every spec has a `kind` (core, e.g. `os-install`) and a
+`<root>/<kind>/<name>/spec.toml`. Every spec has a `kind` (plugin, e.g. `os-install`) and a
 `backend` (plugin, e.g. `ubuntu-autoinstall`). Public and organisation-neutral; private
 repos pin its releases, so the spec format is a public API. Generic across OS installs,
 images, VMs and Kubernetes distributions; it champions no backend.
@@ -26,19 +26,29 @@ stay minimal (pyyaml; tomli on 3.10 only) — justify any new one in the PR.
 
 ## Layout
 
-- `src/prov/kinds/` — core kinds (`os_install.py`) and shared `$defs` (`common.py`). Kinds are
-  not pluggable; a new kind is a core change documented in `docs/kinds.md`.
+- `src/prov/kinds/` — built-in kinds (`os_install.py`), discovery and the kind contract
+  (`__init__.py`: `discover`, `builtin`, `get`, `check_kind`, `call_kind`) and shared `$defs`
+  (`common.py`). Kinds are plugins registered through the `prov.kinds` entry-point group in
+  `pyproject.toml` (entry-point name = `NAME`, `PLUGIN_API = 1`); bare names only for this
+  distribution, third-party kinds are dotted (`registry.example.org`, api group
+  `example.org`). See `docs/kinds.md` "Kind plugins".
 - `src/prov/backends/` — built-in backends (`ubuntu_autoinstall.py`, `nixos_disko.py`),
   registered through the `prov.backends` entry-point group in `pyproject.toml` (entry-point
-  name = `NAME`) and listed in `prov.registry.builtin()`. Per-backend docs:
+  name = `NAME`); `prov.registry.builtin()` and `prov.kinds.builtin()` are the entry points of
+  the `provision-hub` distribution, never a list of imports. Per-backend docs:
   `docs/backends/<name>.md`. A backend's optional `PRESERVE` names human-created files
   `render` keeps in `rendered/` (nixos-disko: `flake.lock`).
-- `src/prov/registry.py` — discovery, contract checks, `Context`, `call_plugin` (every call
-  into a backend goes through it). `src/prov/spec.py` — refs and envelope checks.
+- `src/prov/registry.py` — backend discovery, contract checks, `Context`, `call_plugin` (every
+  call into a backend goes through it). `src/prov/plugin.py` — what kinds and backends share:
+  entry-point loading, `PLUGIN_API`, the guarded call. `src/prov/spec.py` — refs and
+  envelope checks.
 - `src/prov/text.py` — the output-escaping predicate and helpers (`unsafe`, `esc`, `show`,
   `short_repr`).
-- Core modules (`cli`, `spec`, `registry`, `render`, `plan`, `schema`, `validate`, `text`) must stay
-  kind- and backend-neutral; `tests/test_kinds.py` proves it with a fake kind + backend.
+- Core modules (`cli`, `spec`, `registry`, `render`, `plan`, `schema`, `validate`, `text`,
+  `util`, `plugin`, `kinds/__init__`) must stay kind- and backend-neutral and never import a
+  specific kind or backend module; `tests/test_kinds.py` and `tests/test_kind_plugins.py`
+  prove it with fake kinds + backends (tests register them with the `extra_kinds` /
+  `extra_backends` fixtures) and an import scan.
 
 ## Rules
 

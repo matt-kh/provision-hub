@@ -16,8 +16,9 @@ party) exposes:
 
 | Member | Required | Signature | Purpose |
 |---|---|---|---|
-| `NAME` | yes | `str` | Backend id, `[a-z][a-z0-9-]*`, globally unique. Equals the entry-point name and the spec's `backend` value, and names its table (`[talos]`). May not equal an envelope key or any kind's core property (`hostname`, `storage`, ...). |
-| `KIND` | yes | `str` | The kind it renders (`"os-install"`); must be a kind prov knows (`prov kinds`). |
+| `NAME` | yes | `str` | Backend id, `[a-z][a-z0-9-]*`, globally unique. Equals the entry-point name and the spec's `backend` value, and names its table (`[talos]`). May not equal an envelope key or one of its own kind's core properties (`hostname`, `storage`, ...). Third parties: see [Naming](#naming-third-party-backends). |
+| `KIND` | yes | `str` | The kind it renders: `"os-install"`, or a third-party kind plugin such as `"registry.example.org"` ([kinds.md](kinds.md#kind-plugins)); must be an installed kind (`prov kinds`). |
+| `PLUGIN_API` | no | `int` | The backend contract version it implements; `1` today, and `1` when absent. Any other value is refused. Declare it: prov's own backends do. |
 | `SCHEMA` | yes | `dict` | JSON Schema fragment for the backend table (section 2). |
 | `render` | yes | `render(spec: dict, ctx: Context) -> dict[str, str]` | Relative POSIX path → file text. Pure: no I/O, no clock, no randomness. |
 | `validate` | yes | `validate(rendered_dir: pathlib.Path) -> list[Finding]` | Check the files on disk. |
@@ -31,18 +32,26 @@ party) exposes:
 
 The module docstring's first line is shown by `prov backends`.
 
+### Naming third-party backends
+
+Backend names are not namespaced: one flat, global set of ids. A third-party backend
+should carry a vendor prefix, `<vendor>-<tool>` (`acme-talos`, not `talos`), so it does
+not collide with a backend another package, or provision-hub itself, ships later. This is a
+convention, not a check; it will be revisited before 1.0.
+
 `Finding` is `prov.validate.Finding(level, message, where="")`, a frozen dataclass; `level` is
 one of `prov.validate.ERROR` (`"error"`), `WARNING` (`"warning"`) or `SKIPPED` (`"skipped"`).
 `where` names the file or spec key (`"machineconfig.yaml"`, `"storage.disks"`). Only errors
 make `prov validate` exit 1. Printed form: `error: storage.disks: needs one disk`.
 
 The registry (`prov.registry.discover`) rejects a backend that lacks a required member, whose
-optional members are not callable, whose `KIND` is unknown, whose `NAME` is not an id,
-differs from its entry-point name, is already registered or collides with a core property,
+optional members are not callable, whose `PLUGIN_API` is not `1`, whose `KIND` is unknown,
+whose `NAME` is not an id, differs from its entry-point name, is already registered or
+collides with an envelope key or a core property of its kind,
 that defines `build` without `BUILD_TOOLS`, whose `PRESERVE` is not a list of safe, normalised relative
 paths, or whose `SCHEMA` uses an unsupported keyword, an
 invalid keyword value or an invalid `pattern`. Every call into a backend goes through
-`prov.registry.call_plugin`: an exception escaping it, or a result of the wrong type (`render`
+`prov.registry.call_plugin` (the same guarded call prov uses for kinds, `prov.plugin`): an exception escaping it, or a result of the wrong type (`render`
 not a `dict[str, str]`, `validate`/`check` not a `list[Finding]`, `plan` not a `list[str]`,
 `starter` not a `str`), is reported as `backend '<NAME>' failed in <method>: ...` with exit
 code 2; a `ConfigError` your backend raises is reported the same way, with your text.
@@ -136,6 +145,7 @@ schema and makes the table required when `backend = "<NAME>"`. Rules:
 
 NAME = "talos"
 KIND = "os-install"
+PLUGIN_API = 1
 
 SCHEMA = {
     "type": "object",
@@ -240,16 +250,19 @@ ubuntu-autoinstall = "prov.backends.ubuntu_autoinstall"
 talos = "prov.backends.talos"
 ```
 
-Third-party package, in its own `pyproject.toml` (then `uv add` it next to prov):
+Third-party package, in its own `pyproject.toml` (then `uv add` it next to prov), with a
+vendor-prefixed name:
 
 ```toml
 [project.entry-points."prov.backends"]
-talos = "prov_talos"
+acme-talos = "prov_acme_talos"
 ```
 
 Run `uv sync` so the entry point is installed; `uv run prov backends --kind os-install`
-should list it. Add a built-in to `prov.registry.builtin()` too, because the published
-schemas are generated from the built-ins.
+should list it. Built-in and third-party backends register the same way; prov never imports
+a backend by name. `prov.registry.builtin()` is the set the `provision-hub` distribution
+registers, and the published schemas are generated from it, so a built-in needs nothing
+beyond its entry point.
 
 ## 5. Schema file, example, goldens, tests
 

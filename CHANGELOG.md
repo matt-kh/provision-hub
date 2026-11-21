@@ -66,6 +66,20 @@ may change incompatibly; every such change has a Migration paragraph. See
 - Backend contract: optional `PRESERVE`, relative paths of human-created regular files in
   `rendered/` that `render` keeps and `diff`/`validate` do not report as stale (used for
   nixos-disko's `flake.lock`).
+- Kind plugins: kinds register under the `prov.kinds` entry-point group exactly like
+  backends under `prov.backends`; `os-install` is registered that way, and core imports no
+  kind or backend module (`prov.kinds.builtin()` / `prov.registry.builtin()` are the
+  entry points of the `provision-hub` distribution). Third-party kinds are dotted,
+  `<label>.<dns-subdomain>` (`registry.example.org`, items under
+  `<root>/registry.example.org/<name>/`), with the domain part as their api group
+  (`api_version = "example.org/v1alpha1"`; the group `prov` stays reserved) and a schema
+  `$id` of `SCHEMA_URL` or `urn:prov:schema:<NAME>:<version>`; bare names are reserved for
+  provision-hub. Kinds and backends declare `PLUGIN_API = 1` (required for kinds, optional
+  for backends, default 1); a broken, misnamed, duplicate or wrong-API plugin exits 2 with one
+  escaped line, as does a kind whose `semantic` raises. `prov list` warns about a dotted
+  directory with items whose kind is not installed. Docs: "Kind plugins" in
+  `docs/kinds.md`; `docs/adding-a-backend.md` gains `PLUGIN_API` and a vendor-prefix naming
+  convention for third-party backends (`acme-talos`). os-install's schema is unchanged.
 
 ### Security
 
@@ -111,6 +125,10 @@ may change incompatibly; every such change has a Migration paragraph. See
   table (at least one interface, addresses, gateways, nameservers); backends that need it
   say so in `check`: `ubuntu-autoinstall` (netplan is rendered from it) and nixos-disko with
   `networking = "networkd"`.
+- Backend contract: a backend `NAME` now collides only with the envelope keys and its own
+  kind's core properties; another kind's properties no longer block it. `prov.kinds.KINDS` is
+  gone: look kinds up with `prov.kinds.discover()` / `get()`, and register test kinds through
+  entry points (the test suite's `extra_kinds` fixture).
 
 ### Known limitations
 

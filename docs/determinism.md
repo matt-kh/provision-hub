@@ -74,6 +74,7 @@ human with the commands `prov plan` prints:
 
 ## Kinds and backends
 
-Backends are plugins ([adding-a-backend.md](adding-a-backend.md)); kinds are part of prov
-core ([kinds.md](kinds.md)). Whoever writes either carries the same guarantee, and proves
-it the same way: examples are goldens, rendered twice and compared with the committed files.
+Kinds and backends are both plugins ([kinds.md](kinds.md#kind-plugins),
+[adding-a-backend.md](adding-a-backend.md)), shipped by provision-hub or by a third-party
+package. Whoever writes either carries the same guarantee, and proves it the same way:
+examples are goldens, rendered twice and compared with the committed files.
