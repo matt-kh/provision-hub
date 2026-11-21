@@ -9,10 +9,11 @@ import pytest
 from conftest import EXAMPLES, fake_entry_point
 from test_kind_plugins import BACKEND, KIND, fake_backend, fake_kind
 
-from prov.cli import main
+from prov.cli import JSON_FORMAT, main
 from prov.text import json_text
 
 ITEM = "os-install/demo-lvm"
+FORMAT = "prov.cli/v1alpha1"
 
 
 def run(capsys, *argv):
@@ -25,6 +26,7 @@ def document(out):
     """Exactly one canonical JSON document: parses, and re-serialises to the same text."""
     doc = json.loads(out)
     assert out == json_text(doc) and out.endswith("}\n") and out.count("\n}\n") == 1
+    assert doc.pop("format") == FORMAT == JSON_FORMAT  # every --json document but schema's
     return doc
 
 
@@ -113,8 +115,20 @@ def test_backends_json_third_party_and_kind_filter(capsys, extra_kinds, extra_ba
     assert code == 0 and BACKEND not in out
 
 
+def test_text_goldens_kinds_and_backends(capsys):
+    """Without --json the text output stays byte-identical."""
+    assert run(capsys, "kinds") == (0, "os-install\tprov/v1alpha1\tOne machine's operating-system install: host identity, users, network and whole disks.\n", "")
+    expected = (
+        "nixos-disko\tos-install\tNixOS with disko: a pinned flake holding the target system and an offline USB installer.\n"
+        "ubuntu-autoinstall\tos-install\tUbuntu Server autoinstall (subiquity): NoCloud seed for an os-install spec.\n"
+    )
+    assert run(capsys, "backends") == (0, expected, "")
+    assert run(capsys, "backends", "--kind", "os-install") == (0, expected, "")
+
+
 def test_schema_json_is_a_no_op(capsys):
-    assert run(capsys, "schema", "os-install", "--json") == run(capsys, "schema", "os-install")
+    code, out, err = run(capsys, "schema", "os-install", "--json")
+    assert (code, out, err) == run(capsys, "schema", "os-install") and '"format"' not in out
     assert run(capsys, "schema", "os-install", "--backend", "nixos-disko", "--json") == run(capsys, "schema", "os-install", "--backend", "nixos-disko")
 
 
@@ -165,14 +179,58 @@ def test_validate_json_not_rendered(root, capsys):
     assert {"level": "error", "where": "rendered", "message": f"not rendered yet; run prov render {ITEM}"} in document(out)["findings"]
 
 
-def test_validate_json_invalid_spec_has_null_backend(root, capsys):
+def _break_hostname(root):
     spec = root / ITEM / "spec.toml"
     spec.write_text(spec.read_text().replace('hostname = "demo-lvm"', 'hostname = "Not_A_Label"'))
+
+
+def test_validate_json_invalid_spec_echoes_backend(root, capsys):
+    _break_hostname(root)
     code, out, err = run(capsys, "--root", str(root), "validate", ITEM, "--json")
     assert code == 1 and err == ""
     doc = document(out)
-    assert doc["backend"] is None and doc["ok"] is False
+    assert doc["backend"] == "ubuntu-autoinstall" and doc["ok"] is False
     assert any(f["level"] == "error" and "Not_A_Label" in f["message"] for f in doc["findings"]), doc
+
+
+def test_validate_json_backend_of_another_kind_is_null(root, capsys, monkeypatch, extra_kinds, extra_backends):
+    """backend is null unless it names a registered backend of the item's kind."""
+    from prov import cli
+    from prov.validate import ERROR, Finding
+
+    extra_kinds(fake_entry_point(fake_kind(), value="prov_registry.kind"))
+    extra_backends(fake_entry_point(fake_backend(), value="prov_registry.text"))
+    _break_hostname(root)
+    spec = root / ITEM / "spec.toml"
+    spec.write_text(spec.read_text().replace('backend = "ubuntu-autoinstall"', f'backend = "{BACKEND}"'))
+    # an unknown or foreign backend is an envelope error: exit 2, text on stderr, empty stdout
+    code, out, err = run(capsys, "--root", str(root), "validate", ITEM, "--json")
+    assert code == 2 and out == "" and err.startswith("prov: error: ")
+    # should a kind ever accept it at finding level, the document still says null
+    monkeypatch.setattr(cli, "check_spec", lambda raw, kind, name, backends: (None, [Finding(ERROR, "e", "x")]))
+    code, out, err = run(capsys, "--root", str(root), "validate", ITEM, "--json")
+    assert code == 1 and err == "" and document(out)["backend"] is None
+
+
+@pytest.mark.parametrize("verb, code_", [("plan", 2), ("validate", 1)])
+def test_schema_invalid_spec_streams(root, capsys, verb, code_):
+    """Envelope valid, schema invalid: plan errors (multi-line text, empty stdout), validate reports findings."""
+    _break_hostname(root)
+    code, out, err = run(capsys, "--root", str(root), verb, ITEM, "--json")
+    assert code == code_
+    if verb == "plan":
+        lines = err.splitlines()
+        assert out == "" and lines[0].startswith("prov: error: ") and lines[0].endswith("invalid spec:") and len(lines) > 1
+        assert all(line.startswith("  ") for line in lines[1:]) and "Not_A_Label" in err
+    else:
+        assert err == "" and document(out)["ok"] is False
+
+
+def test_json_flag_before_the_verb_is_a_usage_error(capsys):
+    with pytest.raises(SystemExit) as exc:
+        main(["--json", "kinds"])
+    out = capsys.readouterr()
+    assert exc.value.code == 2 and out.out == "" and "prov: error:" in out.err
 
 
 @pytest.mark.parametrize("verb", ["validate", "plan"])

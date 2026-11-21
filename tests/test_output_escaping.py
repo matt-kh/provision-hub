@@ -284,6 +284,7 @@ def test_every_json_verb_writes_ascii_json(hostile_root, capsys):
         assert all(" " <= ch <= "~" or ch == "\n" for ch in out), argv  # printable ASCII only
         assert not any(line.lstrip().startswith(("forged", "error: forged")) for line in out.splitlines()), argv
         docs[tuple(argv)] = json.loads(out)
+        assert (docs[tuple(argv)].get("format") == "prov.cli/v1alpha1") is (argv[0] != "schema"), argv
     assert ("validate", 1) in seen and ("plan", 2) in seen and ("validate", 2) in seen
     # raw values survive the round trip: escaping is JSON's, not prov.text's
     kind = next(k for k in docs[("kinds",)]["kinds"] if k["name"] == HOSTILE_KIND)

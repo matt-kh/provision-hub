@@ -2,8 +2,10 @@
 
 ``--json`` (kinds, backends, schema, validate, plan) prints exactly one JSON document on
 stdout through ``prov.text.json_text``; its shapes are documented in docs/kinds.md
-("Machine-readable output"). Exit codes do not change with it, and an exit-2 error stays a
-text line on stderr with nothing on stdout.
+("Machine-readable output"), and every document but ``schema``'s carries
+``"format": JSON_FORMAT``. Exit codes do not change with it, and an exit-2 error stays text
+on stderr (``prov: error: …``, possibly with indented continuation lines) with nothing on
+stdout.
 """
 
 from __future__ import annotations
@@ -28,6 +30,9 @@ from .text import esc, json_text, short_repr, show
 from .validate import ERROR, WARNING, Finding, has_errors
 
 EXIT_OK, EXIT_FINDINGS, EXIT_USAGE = 0, 1, 2
+# The version of the --json document formats (kinds, backends, validate, plan), versioned
+# separately from the spec api_version; bump policy in docs/kinds.md "Machine-readable output".
+JSON_FORMAT = "prov.cli/v1alpha1"
 
 
 class _Parser(argparse.ArgumentParser):
@@ -67,8 +72,8 @@ def _print_findings(findings: List[Any], warnings_to_stderr: bool = False) -> No
 
 
 def _print_json(document: Any) -> None:
-    """The one JSON document of a ``--json`` call; raw values, ASCII-escaped by ``json_text``."""
-    sys.stdout.write(json_text(document))
+    """The one JSON document of a ``--json`` call, stamped with ``format``; raw values, ASCII-escaped by ``json_text``."""
+    sys.stdout.write(json_text({**document, "format": JSON_FORMAT}))
 
 
 def _doc_line(obj: Any) -> str:
@@ -294,16 +299,18 @@ def cmd_validate(args: argparse.Namespace) -> int:
                 findings += call_plugin(plugin, "validate", rendered)
             if diff_rendered(rendered, call_plugin(plugin, "render", spec, ctx), preserved(plugin)):
                 findings.append(Finding(ERROR, "out of date with spec.toml; run prov diff / prov render", "rendered"))
+    failed = has_errors(findings)
     if args.json:  # every finding on stdout, nothing on stderr; the exit code says the same as without --json
+        backend = raw.get("backend")  # the spec's own value, even when other keys fail validation
         _print_json({
             "ref": args.ref,
-            "backend": spec["backend"] if spec is not None else None,
-            "ok": not has_errors(findings),
+            "backend": backend if isinstance(backend, str) and backend in for_kind(backends, kind) else None,
+            "ok": not failed,
             "findings": [{"level": str(f.level), "where": str(f.where), "message": str(f.message)} for f in _sorted_findings(findings)],
         })  # fmt: skip
-        return EXIT_FINDINGS if has_errors(findings) else EXIT_OK
+        return EXIT_FINDINGS if failed else EXIT_OK
     _print_findings(findings)
-    if has_errors(findings):
+    if failed:
         return EXIT_FINDINGS
     print(f"ok: {args.ref}")
     return EXIT_OK

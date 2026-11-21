@@ -140,7 +140,11 @@ def builtin() -> Dict[str, ModuleType]:
 
 
 def builtin_names() -> frozenset:
-    """NAMEs the provision-hub distribution registers backends under (entry-point name = NAME); nothing is loaded."""
+    """NAMEs the provision-hub distribution registers backends under; nothing is loaded.
+
+    Entry-point names stand for NAMEs because ``discover()`` refuses an entry point whose name
+    differs from its NAME: call this after ``discover()`` succeeded (as ``prov backends`` does).
+    """
     return frozenset(ep.name for ep in entry_points(group=ENTRY_POINT_GROUP) if plugins.from_distribution(ep))
 
 
