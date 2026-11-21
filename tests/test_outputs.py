@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import enum
 import json
+import re
 
 import pytest
 from conftest import fake_entry_point
@@ -130,6 +132,22 @@ def test_item_outputs_copies_in_and_out():
 # --- misbehaving outputs: exit 2 naming the kind, escaped ------------------------------------
 
 
+class RaisingRepr:
+    def __repr__(self):
+        raise RuntimeError("repr " + HOSTILE)
+
+    def __hash__(self):
+        return 1
+
+
+class Text(str):
+    pass
+
+
+class Count(enum.IntEnum):
+    ONE = 1
+
+
 def _cyclic():
     value = []
     value.append(value)
@@ -149,11 +167,23 @@ MISBEHAVING = {
     "inf_nested": (lambda spec: {"x": [{"y": float("inf")}]}, "failed in outputs: x[0].y: inf is not a finite number"),
     "int_key": (lambda spec: {"x": {1: "a"}}, "failed in outputs: x: key 1 is not a string"),
     "cyclic": (lambda spec: _cyclic(), "failed in outputs: loop[0][0]"),
-    "hostile_key": (lambda spec: {HOSTILE: {"a"}}, "failed in outputs: ev\\x1b[2Jil\\x0aerror: forged\\u202e: set is not a JSON value"),
+    "hostile_key": (lambda spec: {HOSTILE: 1}, "failed in outputs: <root>: control characters in key 'ev\\x1b[2Jil\\nerror: forged\\u202e'"),
+    "odd_key_path": (lambda spec: {"x": {"a b": {"c": {"d"}}}}, "failed in outputs: x['a b'].c: set is not a JSON value"),
+    "secret_key_nested": (lambda spec: {"url": "https://r.example.org", "replicas": 1, "extra": {"db": {"adminPassword": "x"}}}, "failed in outputs: extra.db: key 'adminPassword' looks like a secret value"),
+    "huge_int": (lambda spec: {"url": "https://r.example.org", "replicas": 2**63}, "failed in outputs: replicas: integer out of range (64-bit)"),
+    "huge_negative_int": (lambda spec: {"x": [-(2**63) - 1]}, "failed in outputs: x[0]: integer out of range (64-bit)"),
+    "huge_int_400_digits": (lambda spec: {"replicas": 10**400}, "failed in outputs: replicas: integer out of range (64-bit)"),
+    "key_with_raising_repr": (lambda spec: {RaisingRepr(): 1}, "failed in outputs: <root>: key of type RaisingRepr is not a string"),
+    "str_subclass_key": (lambda spec: {Text("url"): "x"}, "failed in outputs: <root>: key of type Text is not a string"),
+    "str_subclass_value": (lambda spec: {"url": Text("https://r.example.org"), "replicas": 1}, "failed in outputs: url: Text is not a JSON value"),
+    "int_enum_value": (lambda spec: {"url": "https://r.example.org", "replicas": Count.ONE}, "failed in outputs: replicas: Count is not a JSON value"),
+    "value_with_raising_repr": (lambda spec: {"url": RaisingRepr()}, "failed in outputs: url: RaisingRepr is not a JSON value"),
     "wrong_type": (lambda spec: {"url": "https://r.example.org", "replicas": "one"}, "failed in outputs: does not match OUTPUTS: replicas: expected integer, got str"),
     "missing": (lambda spec: {"url": "https://r.example.org"}, "does not match OUTPUTS: <root>: missing required key 'replicas'"),
-    "unknown_key": (lambda spec: {"url": "https://r.example.org", "replicas": 1, "admin_password": "x"}, "does not match OUTPUTS: <root>: unknown key 'admin_password'"),
-    "control_value": (lambda spec: {"url": "https://r.example.org", "replicas": 1, "tls_secret_name": HOSTILE}, "does not match OUTPUTS: tls_secret_name: control characters"),
+    "unknown_key": (lambda spec: {"url": "https://r.example.org", "replicas": 1, "extra": "x"}, "does not match OUTPUTS: <root>: unknown key 'extra'"),
+    "secret_key": (lambda spec: {"url": "https://r.example.org", "replicas": 1, "admin_password": "x"}, "failed in outputs: <root>: key 'admin_password' looks like a secret value"),
+    "control_value": (lambda spec: {"url": "https://r.example.org", "replicas": 1, "tls_secret_name": HOSTILE}, "failed in outputs: tls_secret_name: control characters (newline, tab, ...) are not allowed"),
+    "control_nested": (lambda spec: {"x": ["ok", "a\u2028b"]}, "failed in outputs: x[1]: control characters"),
     "pattern": (lambda spec: {"url": "http://‮evil", "replicas": 1}, "does not match OUTPUTS: url: 'http://\\u202eevil' does not match"),
 }
 
@@ -200,21 +230,49 @@ def _schema(props, **extra):
     return {"type": "object", "additionalProperties": False, "properties": props, **extra}
 
 
+SECRET_NAMES = [
+    "password", "admin_password", "root_passwd", "disk_passphrase", "admin_pwd", "ClientSecret", "client_secrets",
+    "db_credential", "db_credentials", "kubeconfig", "adminKubeconfig", "password_hash", "password_old",
+    "join_token", "token", "tokens", "refresh-tokens", "bootstrap.token", "joinToken",
+    "ssh_private_key", "sshPrivateKey", "private_key_pem", "cloud_api_key", "apiKey", "APIKey", "API_KEY",
+    "host_ssh_key", "tls_key", "TLSKey", "tls key",
+]  # fmt: skip
+NOT_SECRET_NAMES = [
+    "admin_password_path", "admin_password_name", "join_token_ref", "kubeconfig_file", "tls_secret_name",
+    "db_credential_ref", "API_KEY_PATH", "Private_Key_Name", "sshPrivateKeyFile", "kubeconfigPath",
+    "max_tokens", "num_tokens", "maxTokens", "tokenizer", "token_count", "secretary", "keyboard",
+    "hostname", "address", "key", "public_key", "ssh_public_key", "api_url",
+]  # fmt: skip
+
+
+@pytest.mark.parametrize("name", SECRET_NAMES)
+def test_secret_names(name):
+    assert kinds.secret_looking(name), name
+
+
+@pytest.mark.parametrize("name", NOT_SECRET_NAMES)
+def test_not_secret_names(name):
+    assert not kinds.secret_looking(name), name
+
+
+@pytest.mark.parametrize(
+    "name, words",
+    [("sshPrivateKey_path", ["ssh", "private", "key", "path"]), ("APIKey", ["api", "key"]), ("a-b.c d__e", ["a", "b", "c", "d", "e"]), ("", [])],
+)
+def test_name_words(name, words):
+    assert kinds.name_words(name) == words
+
+
 @pytest.mark.parametrize(
     "schema, name",
     [
         (_schema({"admin_password": {"type": "string"}}), "admin_password"),
-        (_schema({"root_passwd": {"type": "string"}}), "root_passwd"),
-        (_schema({"join_token": {"type": "string"}}), "join_token"),
-        (_schema({"ClientSecret": {"type": "string"}}), "ClientSecret"),
-        (_schema({"ssh_private_key": {"type": "string"}}), "ssh_private_key"),
-        (_schema({"cloud_api_key": {"type": "string"}}), "cloud_api_key"),
-        (_schema({"db_credentials": {"type": "object"}}), "db_credentials"),
-        (_schema({"token_path_old": {"type": "string"}}), "token_path_old"),
         (_schema({"admin": {"type": "object", "properties": {"password": {"type": "string"}}}}), "password"),
         (_schema({"nodes": {"type": "array", "items": {"type": "object", "properties": {"bootstrap_token": {"type": "string"}}}}}), "bootstrap_token"),
         (_schema({}, allOf=[{"properties": {"secret": {"type": "string"}}}]), "secret"),
         (_schema({"ops": {"$ref": "#/$defs/user"}}), "password_hash"),  # through the shared definitions
+        (_schema({"db": {"type": "object", "required": ["apiKey"]}}), "apiKey"),  # a name only in required
+        (_schema({"a": {"type": "object", "additionalProperties": {"type": "object", "properties": {"tls_key": {"type": "string"}}}}}), "tls_key"),
     ],
 )
 def test_secret_looking_output_names_are_rejected(schema, name):
@@ -222,12 +280,76 @@ def test_secret_looking_output_names_are_rejected(schema, name):
         kinds.check_kind(outputs_kind(OUTPUTS=schema))
 
 
-@pytest.mark.parametrize(
-    "name",
-    ["admin_password_path", "join_token_ref", "tls_secret_name", "db_credential_ref", "API_KEY_PATH", "Private_Key_Name", "hostname", "address"],
-)
+@pytest.mark.parametrize("name", NOT_SECRET_NAMES)
 def test_reference_suffixes_and_plain_names_are_allowed(name):
     kinds.check_kind(outputs_kind(OUTPUTS=_schema({name: {"type": "string"}})))
+
+
+@pytest.mark.parametrize(
+    "schema, needle",
+    [
+        (_schema({"a": {"type": "string", "default": b"x"}}), "properties.a.default: bytes is not a JSON value"),
+        (_schema({"a": {"enum": [{1, 2}]}}), "properties.a.enum[0]: set is not a JSON value"),
+        (_schema({"a": {"type": "string", "default": object()}}), "properties.a.default: object is not a JSON value"),
+        (_schema({"a": {"const": float("nan")}}), "properties.a.const: nan is not a finite number"),
+        (_schema({"a": {"type": "string", "default": ("x",)}}), "properties.a.default: tuple is not a JSON value"),
+    ],
+)
+def test_outputs_schema_must_be_plain_json(extra_kinds, capsys, schema, needle):
+    with pytest.raises(ConfigError, match="OUTPUTS is not plain JSON data: ") as exc:
+        kinds.check_kind(outputs_kind(OUTPUTS=schema))
+    assert needle in str(exc.value)
+    extra_kinds(fake_entry_point(outputs_kind(OUTPUTS=schema), value="prov_registry.kind"))
+    code, out, err = run(capsys, "kinds", "--json")
+    assert (code, out) == (2, "") and needle in err and err.count("\n") == 1
+
+
+def test_properties_must_be_plain_json():
+    props = {"hostname": {"type": "string"}, "size": {"type": "integer", "default": float("inf")}}
+    with pytest.raises(ConfigError, match="PROPERTIES is not plain JSON data: size.default: inf is not a finite number"):
+        kinds.check_kind(fake_kind(PROPERTIES=props))
+
+
+def test_outputs_schema_descriptions_may_hold_any_text():
+    """Schemas are plugin text: control characters in a description are escaped by JSON, not refused."""
+    kinds.check_kind(outputs_kind(OUTPUTS=_schema({"a": {"type": "string", "description": HOSTILE}})))
+
+
+def test_json_text_refuses_nan():
+    from prov.text import json_text
+
+    with pytest.raises(ValueError):
+        json_text({"a": float("nan")})
+
+
+def test_integer_type_never_floats_an_int():
+    from prov.validate import schema_errors
+
+    assert schema_errors(10**400, {"type": "integer"}) == []
+    assert schema_errors(True, {"type": "integer"}) == ["<root>: expected integer, got bool"]
+    assert schema_errors(2.0, {"type": "integer"}) == [] and schema_errors(2.5, {"type": "integer"}) != []
+    assert schema_errors(float("inf"), {"type": "integer"}) != []
+
+
+IFACE_OUTPUTS = _schema({"primary": {"$ref": "#/$defs/interface"}})
+
+
+@pytest.mark.parametrize(
+    "value, needle",
+    [
+        ({"primary": {"name": "eth0", "addresses": ["192.0.2.10/24"]}}, None),
+        ({"primary": {"name": "eth0", "mtu": 10}}, "does not match OUTPUTS: primary.mtu: 10 is less than 576"),
+        ({"primary": {"addresses": []}}, "does not match OUTPUTS: primary: missing required key 'name'"),
+    ],
+)
+def test_outputs_ref_to_shared_definitions(value, needle):
+    kind = outputs_kind(OUTPUTS=IFACE_OUTPUTS, outputs=lambda spec: value)
+    kinds.check_kind(kind)
+    if needle is None:
+        assert kinds.item_outputs(kind, {}) == value
+    else:
+        with pytest.raises(ConfigError, match=re.escape(needle)):
+            kinds.item_outputs(kind, {})
 
 
 @pytest.mark.parametrize(
