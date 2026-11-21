@@ -90,6 +90,18 @@ may change incompatibly; every such change has a Migration paragraph. See
   on stderr (`prov: error: …`, possibly with indented continuation lines) with empty
   stdout, and `plan` still refuses unsafe lines. Text output without `--json` is
   unchanged. Shapes and the stability promise: "Machine-readable output" in `docs/kinds.md`.
+- Kind outputs: a kind may declare `OUTPUTS` (an object-schema fragment with
+  `"additionalProperties": false`, under the backend `SCHEMA` rules) together with
+  `outputs(spec)`, a pure, deterministic function of the validated spec that returns plain
+  JSON data valid against `OUTPUTS`. Declaring only one, or an output name that looks like a
+  secret value (`password`, `passwd`, `token`, `secret`, `private_key`, `api_key`,
+  `credential`, unless it ends in `_path`, `_name` or `_ref`; a lint), is refused at load.
+  `prov validate` computes them (a raising or invalid `outputs` exits 2 naming the kind);
+  `validate --json` adds `"outputs"` (`{}` without `OUTPUTS`, `null` while the spec is
+  invalid) and `kinds --json` adds the `OUTPUTS` schema (`null` without); `format` stays
+  `prov.cli/v1alpha1`, text output is unchanged. Post-apply facts are exported only as a
+  path or secret-name reference the human writes in the spec, never a value; prov never
+  reads live state. os-install declares no outputs. Docs: "Outputs" in `docs/kinds.md`.
 
 ### Security
 
