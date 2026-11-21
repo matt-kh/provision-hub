@@ -19,7 +19,7 @@ import re
 from typing import Any, Callable, Optional, Sequence
 
 from .schema import ConfigError
-from .text import esc
+from .text import esc, short_repr
 
 PLUGIN_API = 1
 DISTRIBUTION = "provision-hub"
@@ -63,7 +63,7 @@ def check_api(plugin: Any, who: str, required: bool) -> None:
         return
     api = plugin.PLUGIN_API
     if isinstance(api, bool) or not isinstance(api, int) or api != PLUGIN_API:
-        raise ConfigError(f"{who}: PLUGIN_API {esc(repr(api))[:40]} is not supported (this prov supports PLUGIN_API = {PLUGIN_API})")
+        raise ConfigError(f"{who}: PLUGIN_API {short_repr(api)} is not supported (this prov supports PLUGIN_API = {PLUGIN_API})")
 
 
 def guarded_call(

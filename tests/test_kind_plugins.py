@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import types
 from pathlib import Path
 
@@ -131,9 +132,18 @@ def test_dotted_kind_schema(capsys, registry_kind):
     assert not jsonschema.Draft202012Validator(schema).is_valid(dict(good, api_version="prov/v1alpha1"))
 
 
-def test_schema_url_sets_the_id(extra_kinds, capsys):
-    extra_kinds(fake_entry_point(fake_kind(SCHEMA_URL="https://schemas.example.org/registry.v1alpha1.json")))
-    assert json.loads(run(capsys, "schema", KIND)[1])["$id"] == "https://schemas.example.org/registry.v1alpha1.json"
+def test_schema_url_is_a_base_url(extra_kinds, capsys):
+    extra_kinds(fake_entry_point(fake_kind(SCHEMA_URL="https://schemas.example.org/prov/")))
+    assert json.loads(run(capsys, "schema", KIND)[1])["$id"] == f"https://schemas.example.org/prov/{KIND}.v1alpha1.schema.json"
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["https://schemas.example.org/prov", "http://schemas.example.org/", "https://schemas.example.org/a b/", "https:///", "urn:example:x/", 42],
+)
+def test_schema_url_must_be_an_https_base(url):
+    with pytest.raises(ConfigError, match="SCHEMA_URL must be an https base URL ending in '/'"):
+        kinds.check_kind(fake_kind(SCHEMA_URL=url))
 
 
 def test_builtin_kind_keeps_its_group_and_id():
@@ -152,13 +162,16 @@ def test_prov_group_is_rejected_for_a_dotted_kind(tmp_path, capsys, registry_kin
     assert code == 2 and f"unsupported api_version 'prov/v1alpha1' for kind '{KIND}' (this prov supports: example.org/v1alpha1)" in err
 
 
-def test_kind_dot_prov_is_refused():
-    with pytest.raises(ConfigError, match="api group 'prov' is reserved"):
-        kinds.check_kind(fake_kind("registry.prov"))
+@pytest.mark.parametrize("name", ["registry.prov", "registry.example", "a.b"])
+def test_group_must_be_dotted(name):
+    with pytest.raises(ConfigError, match=f"NAME '{name}' needs a dotted group \\(Kubernetes CRD style\\)"):
+        kinds.check_kind(fake_kind(name))
 
 
 # --- discovery rules -----------------------------------------------------------------------
 
+
+LONG_KIND = "registry." + ".".join(["a" * 60] * 4) + ".example.org"  # pattern-valid, over 253 characters
 
 BAD_KINDS = {
     "bare_third_party_name": (lambda: fake_entry_point(fake_kind("registry"), value="prov_registry"), "bare kind names are reserved for the provision-hub distribution"),
@@ -167,9 +180,10 @@ BAD_KINDS = {
     "plugin_api_2": (lambda: fake_entry_point(fake_kind(PLUGIN_API=2), value="prov_registry"), "PLUGIN_API 2 is not supported (this prov supports PLUGIN_API = 1)"),
     "plugin_api_str": (lambda: fake_entry_point(fake_kind(PLUGIN_API="1"), value="prov_registry"), "PLUGIN_API '1' is not supported"),
     "plugin_api_bool": (lambda: fake_entry_point(fake_kind(PLUGIN_API=True), value="prov_registry"), "PLUGIN_API True is not supported"),
-    "group_prov": (lambda: fake_entry_point(fake_kind("registry.prov"), value="prov_registry"), "api group 'prov' is reserved"),
+    "group_not_dotted": (lambda: fake_entry_point(fake_kind("registry.example"), value="prov_registry"), "NAME 'registry.example' needs a dotted group (Kubernetes CRD style)"),
+    "name_too_long": (lambda: fake_entry_point(fake_kind(LONG_KIND), value="prov_registry"), "at most 253 characters"),
     "bad_name": (lambda: fake_entry_point(fake_kind("Registry.example.org"), value="prov_registry"), "NAME must match"),
-    "bad_schema_url": (lambda: fake_entry_point(fake_kind(SCHEMA_URL="not a url"), value="prov_registry"), "SCHEMA_URL must be an absolute URI"),
+    "bad_schema_url": (lambda: fake_entry_point(fake_kind(SCHEMA_URL="not a url"), value="prov_registry"), "SCHEMA_URL must be an https base URL"),
 }
 
 
@@ -191,7 +205,7 @@ def test_bad_kind_plugins_exit_2_with_one_line(extra_kinds, capsys, case, argv):
 def test_duplicate_kind_is_rejected(extra_kinds, capsys):
     extra_kinds(fake_entry_point(fake_kind(), value="pkg_a"), fake_entry_point(fake_kind(), value="pkg_b"))
     code, _, err = run(capsys, "kinds")
-    assert code == 2 and f"kind '{KIND}' is registered twice" in err
+    assert code == 2 and f"kind '{KIND}' is registered twice: {KIND} = pkg_a and {KIND} = pkg_b" in err
 
 
 def test_third_party_cannot_shadow_a_builtin_kind(extra_kinds, capsys):
@@ -214,6 +228,33 @@ def test_bare_kind_from_provision_hub_is_accepted(extra_kinds, capsys):
     extra_kinds(fake_entry_point(fake_kind("widget"), dist=PROVISION_HUB))
     assert "widget\tprov/v1alpha1\t" in run(capsys, "kinds")[1]
     assert sorted(kinds.builtin()) == ["os-install", "widget"]
+
+
+@pytest.mark.parametrize("case", ["bare_third_party_name", "plugin_api_2", "bad_name"])
+def test_builtin_kinds_ignore_broken_third_party_kinds(extra_kinds, case):
+    extra_kinds(BAD_KINDS[case][0]())
+    assert list(kinds.builtin()) == ["os-install"]
+    with pytest.raises(ConfigError):
+        kinds.discover()
+
+
+def test_builtin_kinds_are_checked(extra_kinds):
+    extra_kinds(fake_entry_point(fake_kind("widget", PLUGIN_API=2), dist=PROVISION_HUB))
+    with pytest.raises(ConfigError, match="PLUGIN_API 2 is not supported"):
+        kinds.builtin()
+
+
+def test_kind_name_length_limit():
+    assert len(LONG_KIND) > 253
+    with pytest.raises(ConfigError, match="at most 253 characters"):
+        kinds.check_kind(fake_kind(LONG_KIND))
+
+
+def test_no_kinds_installed_hints_at_the_installation(monkeypatch, capsys):
+    monkeypatch.setattr(kinds, "entry_points", lambda group: [])
+    kinds.reset()
+    code, _, err = run(capsys, "schema", "os-install")
+    assert code == 2 and "unknown kind 'os-install' (known: none; is provision-hub installed? run uv sync)" in err
 
 
 @pytest.mark.parametrize("dist", ["provision-hub", "provision_hub", "Provision.Hub", "PROVISION__HUB"])
@@ -306,9 +347,17 @@ def test_parse_ref_accepts_a_dotted_kind(registry_kind):
     assert parse_ref(f"{KIND}/hub-1") == (KIND, "hub-1")
 
 
+@pytest.mark.parametrize("verb", ["render", "validate", "init"])
+def test_over_long_kind_in_a_ref_is_unknown_not_an_os_error(tmp_path, capsys, verb):
+    argv = [verb, f"{LONG_KIND}/x"] + (["--backend", BACKEND] if verb == "init" else [])
+    code, out, err = run(capsys, "--root", str(tmp_path), *argv)
+    assert (code, out) == (2, "") and "unknown kind 'registry." in err and err.count("\n") == 1
+    assert not any(tmp_path.iterdir())
+
+
 @pytest.mark.parametrize(
     "ref",
-    ["registry..example.org/x", ".example.org/x", "registry.example.org./x", "Registry.example.org/x", "registry.-example.org/x", "registry.example_org/x", "1registry.example.org/x"],
+    ["registry.example/x", "registry..example.org/x", ".example.org/x", "registry.example.org./x", "Registry.example.org/x", "registry.-example.org/x", "registry.example_org/x", "1registry.example.org/x"],
 )
 def test_parse_ref_rejects_malformed_dotted_kinds(ref):
     with pytest.raises(ConfigError, match="invalid ref"):
@@ -330,6 +379,42 @@ def test_list_warns_about_a_dotted_directory_without_an_installed_kind(tmp_path,
     code, out, err = run(capsys, "--root", root, "list")
     assert (code, out) == (0, "os-install/web\tubuntu-autoinstall\n")
     assert err == f"warning: {KIND}: no kind of this name is installed; its items are not listed (install the plugin that provides it)\n"
+
+
+def test_list_refuses_a_symlinked_dotted_directory(tmp_path, capsys):
+    target = tmp_path / "elsewhere"
+    (target / "hub").mkdir(parents=True)
+    (target / "hub/spec.toml").write_text("x = 1\n")
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / KIND).symlink_to(target)
+    assert run(capsys, "--root", str(root), "list") == (0, "", f"warning: {KIND}: is a symlink; refused (and no kind of this name is installed)\n")
+
+
+def test_list_never_follows_a_symlinked_item_in_a_dotted_directory(tmp_path, capsys):
+    target = tmp_path / "elsewhere"
+    target.mkdir()
+    (target / "spec.toml").write_text("x = 1\n")
+    root = tmp_path / "root"
+    (root / KIND).mkdir(parents=True)
+    (root / KIND / "hub").symlink_to(target)  # only a symlinked item: holds no real item
+    assert run(capsys, "--root", str(root), "list") == (0, "", "")
+
+
+def test_list_ignores_a_dotted_plain_file(tmp_path, capsys):
+    (tmp_path / KIND).write_text("x\n")
+    assert run(capsys, "--root", str(tmp_path), "list") == (0, "", "")
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+def test_list_warns_about_an_unreadable_dotted_directory(tmp_path, capsys):
+    (tmp_path / KIND).mkdir()
+    (tmp_path / KIND).chmod(0)
+    try:
+        code, out, err = run(capsys, "--root", str(tmp_path), "list")
+    finally:
+        (tmp_path / KIND).chmod(0o755)
+    assert (code, out) == (0, "") and err.startswith(f"warning: {KIND}: no kind of this name is installed")
 
 
 def test_list_with_the_kind_installed_lists_its_items(tmp_path, capsys, registry_kind):

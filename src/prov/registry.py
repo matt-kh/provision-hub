@@ -57,14 +57,14 @@ def check_contract(plugin: Backend, origin: str) -> None:
     if not isinstance(plugin.NAME, str) or not isinstance(plugin.KIND, str) or not isinstance(plugin.SCHEMA, dict):
         raise ConfigError(f"backend plugin {origin}: NAME and KIND must be str and SCHEMA a dict")
     if not re.fullmatch(ID_PATTERN.strip("^$"), plugin.NAME):
-        raise ConfigError(f"backend plugin {origin}: NAME {plugin.NAME!r} must match {ID_PATTERN}")
+        raise ConfigError(f"backend plugin {origin}: NAME {short_repr(plugin.NAME)} must match {ID_PATTERN}")
     plugins.check_api(plugin, f"backend plugin {origin}", required=False)
     known = kinds.discover()
     if plugin.KIND not in known:
-        raise ConfigError(f"backend plugin {origin}: unknown KIND {short_repr(plugin.KIND)} (known kinds: {', '.join(known) or 'none'})")
+        raise ConfigError(f"backend plugin {origin}: unknown KIND {short_repr(plugin.KIND)} (known kinds: {kinds.unknown_hint(known)})")
     owner = kinds.core_keys(plugin.KIND).get(plugin.NAME)
     if owner is not None:
-        raise ConfigError(f"backend plugin {origin}: NAME {plugin.NAME!r} collides with a core property of {owner}")
+        raise ConfigError(f"backend plugin {origin}: NAME {short_repr(plugin.NAME)} collides with a core property of {owner}")
     if hasattr(plugin, "PRESERVE"):
         keep = plugin.PRESERVE
         if not (isinstance(keep, (tuple, list)) and all(isinstance(p, str) for p in keep)):
@@ -98,9 +98,9 @@ def discover() -> Dict[str, Backend]:
         plugin = plugins.load(ep, "backend")
         check_contract(plugin, origin)
         if plugin.NAME != ep.name:
-            raise ConfigError(f"backend plugin {origin}: entry-point name differs from NAME {plugin.NAME!r}")
+            raise ConfigError(f"backend plugin {origin}: entry-point name differs from NAME {short_repr(plugin.NAME)}")
         if plugin.NAME in found:
-            raise ConfigError(f"backend {plugin.NAME!r} is registered twice")
+            raise ConfigError(f"backend {short_repr(plugin.NAME)} is registered twice")
         found[plugin.NAME] = plugin
     return dict(sorted(found.items(), key=lambda item: (item[1].KIND, item[0])))
 

@@ -37,10 +37,11 @@ SPEC_FILE = "spec.toml"
 NAME_PATTERN = "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$"
 ID_PATTERN = "^[a-z][a-z0-9-]*$"
 # Kind names: a bare id (reserved for kinds of the provision-hub distribution), or a dotted
-# third-party name ``<label>.<dns-subdomain>`` (``registry.example.org``) whose domain part
-# is the kind's api group (``example.org/v1alpha1``). At most KIND_MAX_LENGTH characters.
+# third-party name ``<label>.<group>`` (``registry.example.org``) whose group is a dotted DNS
+# name (Kubernetes CRD style: ``example.org``, never just ``org``) and the kind's api group
+# (``example.org/v1alpha1``). At most KIND_MAX_LENGTH characters.
 _LABEL = "[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?"
-KIND_PATTERN = f"^([a-z][a-z0-9-]*|[a-z]([a-z0-9-]{{0,61}}[a-z0-9])?(\\.{_LABEL})+)$"
+KIND_PATTERN = f"^([a-z][a-z0-9-]*|[a-z]([a-z0-9-]{{0,61}}[a-z0-9])?(\\.{_LABEL}){{2,}})$"
 KIND_MAX_LENGTH = 253
 
 ENVELOPE_KEYS = ("api_version", "kind", "backend")
@@ -72,12 +73,14 @@ def api_versions(kind: Any) -> List[str]:
 def schema_id(kind: Any) -> str:
     """The ``$id`` of a kind's composed schema.
 
-    The kind's own ``SCHEMA_URL`` when it sets one; else the published file URL for a bare
-    (provision-hub) kind, and ``urn:prov:schema:<NAME>:<version>`` for a dotted one.
+    A kind's ``SCHEMA_URL`` is a base URL (``https://.../``) to which the file name
+    ``<NAME>.<version>.schema.json`` is appended, like ``SCHEMA_BASE_URL`` for the published
+    files of provision-hub's bare kinds; a dotted kind without one gets
+    ``urn:prov:schema:<NAME>:<version>``.
     """
-    url = getattr(kind, "SCHEMA_URL", None)
-    if url is not None:
-        return url
+    base = getattr(kind, "SCHEMA_URL", None)
+    if base is not None:
+        return base + schema_file_name(kind)
     if "." not in kind.NAME:
         return SCHEMA_BASE_URL + schema_file_name(kind)
     return f"urn:prov:schema:{kind.NAME}:{kind.VERSIONS[-1]}"

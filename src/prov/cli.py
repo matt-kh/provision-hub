@@ -85,9 +85,11 @@ def _entry_kind(path: Path) -> str:
 
 
 def cmd_list(args: argparse.Namespace) -> int:
-    """Every item under the root, as ``<ref>\\t<backend>``; problems are findings (exit 1).
+    """Every item under the root, as ``<ref>\\t<backend>`` on stdout.
 
-    Only names matching the item name pattern are ever printed raw; any other name appears as
+    Problems are findings on stderr, warnings included, so stdout stays the listing: errors
+    (symlinks, unreadable entries, invalid names or spec files) exit 1, warnings (a dotted
+    directory whose kind is not installed) exit 0. Only names matching the item name pattern are ever printed raw; any other name appears as
     a capped repr, so a planted file name cannot forge output lines or terminal escapes.
     """
     root = Path(args.root)
@@ -147,18 +149,24 @@ def _unknown_dotted_kinds(root: Path, known: Any) -> List[Finding]:
         entries = sorted(root.iterdir())
     except OSError:
         return out  # the kind loop below reports nothing either; an unreadable root is not a kind problem
+    missing = "no kind of this name is installed; its items are not listed (install the plugin that provides it)"
     for entry in entries:
         name = entry.name
         if "." not in name or name in known or not re.fullmatch(KIND_PATTERN.strip("^$"), name):
             continue
         try:
-            if _entry_kind(entry) != "dir":
+            what = _entry_kind(entry)
+            if what == "symlink":  # never followed
+                out.append(Finding(WARNING, "is a symlink; refused (and no kind of this name is installed)", name))
                 continue
-            holds_items = any(os.path.lexists(item / SPEC_FILE) for item in entry.iterdir())
+            if what != "dir":
+                continue
+            # an item is a real directory holding spec.toml; a symlinked item is never followed
+            holds_items = any(_entry_kind(item) == "dir" and os.path.lexists(item / SPEC_FILE) for item in entry.iterdir())
         except OSError:
             holds_items = True  # unreadable: say so rather than hide it
         if holds_items:
-            out.append(Finding(WARNING, "no kind of this name is installed; its items are not listed (install the plugin that provides it)", name))
+            out.append(Finding(WARNING, missing, name))
     return out
 
 
