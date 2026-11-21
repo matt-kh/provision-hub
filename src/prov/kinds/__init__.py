@@ -13,7 +13,8 @@ module. Each kind module exposes (see docs/kinds.md):
 ``PROPERTIES``  JSON Schema of the core keys (may ``$ref`` ``#/$defs/<name>`` of ``common.DEFS``)
 ``REQUIRED``    required core keys
 ``semantic``    ``semantic(spec) -> list[Finding]``: checks JSON Schema cannot express
-``REFS``        cross-spec references (reserved; empty for now)
+``REFS``        references to other items: ``{alias: {"kind", "required", "description"}}``
+                (``{}`` for none); the spec's ``[refs]`` table, resolved into ``ctx.refs``
 ``NAME_KEY``    optional: the core key that should equal the item name (warning otherwise)
 ``SCHEMA_URL``  optional: https base URL (ending in ``/``) of the composed schema's ``$id``
 ``OUTPUTS``     optional, with ``outputs``: object-schema fragment of what an item exports
@@ -35,7 +36,7 @@ from types import ModuleType
 from typing import Any, Dict, Iterator, List, Mapping, Optional, Set, Tuple
 
 from .. import plugin as plugins
-from ..schema import ENVELOPE_KEYS, ID_PATTERN, KIND_MAX_LENGTH, KIND_PATTERN, LEGACY_KEYS, ConfigError
+from ..schema import ALIAS_PATTERN, ENVELOPE_KEYS, ID_PATTERN, KIND_MAX_LENGTH, KIND_PATTERN, LEGACY_KEYS, OPTIONAL_ENVELOPE_KEYS, ConfigError
 from ..text import esc, short_repr
 from .common import DEFS
 
@@ -78,9 +79,10 @@ def check_kind(kind: Kind, origin: Optional[str] = None) -> None:
         raise ConfigError(f"{who}: PROPERTIES and REFS must be dicts")
     if not (isinstance(kind.REQUIRED, list) and set(kind.REQUIRED) <= set(kind.PROPERTIES)):
         raise ConfigError(f"{who}: REQUIRED must be a list of PROPERTIES keys")
-    clash = sorted(set(kind.PROPERTIES) & set(ENVELOPE_KEYS + LEGACY_KEYS))
+    clash = sorted(set(kind.PROPERTIES) & set(ENVELOPE_KEYS + OPTIONAL_ENVELOPE_KEYS + LEGACY_KEYS))
     if clash:
         raise ConfigError(f"{who}: core properties may not redefine envelope keys {clash}")
+    _check_refs(kind.REFS, who)
     if not callable(kind.semantic):
         raise ConfigError(f"{who}: semantic is not callable")
     name_key = getattr(kind, "NAME_KEY", None)
@@ -97,6 +99,29 @@ def check_kind(kind: Kind, origin: Optional[str] = None) -> None:
     except ValueError as exc:
         raise ConfigError(f"{who}: invalid PROPERTIES: {esc(str(exc))}") from None
     _check_outputs(kind, who)
+
+
+REF_FIELDS = ("description", "kind", "required")
+
+
+def _check_refs(declared: Mapping[Any, Any], who: str) -> None:
+    """``REFS``: alias (an id) -> exactly ``{"kind": <kind name>, "required": bool, "description": str}``.
+
+    The target kind need not be installed now: a missing one is a finding when a spec's
+    reference is resolved (``prov.refs``).
+    """
+    for alias, decl in declared.items():
+        if not (type(alias) is str and _full(ALIAS_PATTERN, alias)):
+            raise ConfigError(f"{who}: REFS alias {short_repr(alias)} must match {ALIAS_PATTERN}")
+        if not (type(decl) is dict and sorted(decl) == list(REF_FIELDS)):
+            raise ConfigError(f"{who}: REFS[{alias!r}] must be a dict with exactly the keys {', '.join(REF_FIELDS)}")
+        target = decl["kind"]
+        if not (type(target) is str and len(target) <= KIND_MAX_LENGTH and _full(KIND_PATTERN, target)):
+            raise ConfigError(f"{who}: REFS[{alias!r}] kind {short_repr(target)} is not a kind name (an id, or dotted like 'registry.example.org')")
+        if type(decl["required"]) is not bool:
+            raise ConfigError(f"{who}: REFS[{alias!r}] required must be true or false")
+        if type(decl["description"]) is not str:
+            raise ConfigError(f"{who}: REFS[{alias!r}] description must be a str")
 
 
 # The secret-name lint over output names (docs/kinds.md "Outputs"). A lint, not a guarantee,
@@ -268,7 +293,7 @@ def core_keys(kind_name: str) -> Dict[str, str]:
     A backend NAME names a top-level table, so it may not be an envelope key or one of its
     own kind's core properties. Other kinds' properties do not matter: a spec has one kind.
     """
-    owners = {key: "the spec envelope" for key in ENVELOPE_KEYS + LEGACY_KEYS}
+    owners = {key: "the spec envelope" for key in ENVELOPE_KEYS + OPTIONAL_ENVELOPE_KEYS + LEGACY_KEYS}
     kind = _discovered()[0].get(kind_name)
     if kind is not None:
         for key in kind.PROPERTIES:

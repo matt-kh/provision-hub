@@ -327,7 +327,7 @@ def test_value_and_regex_errors_exit_2(tmp_path, capsys, monkeypatch, exc, needl
         raise exc
 
     run(capsys, "--root", str(tmp_path), "init", "os-install/demo", "--backend", "ubuntu-autoinstall")
-    monkeypatch.setattr(cli, "load_spec", boom)
+    monkeypatch.setattr(cli, "load_item", boom)
     code, _, err = run(capsys, "--root", str(tmp_path), "render", "os-install/demo")
     assert code == 2 and needle in err
 
