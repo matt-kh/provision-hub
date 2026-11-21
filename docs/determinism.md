@@ -57,7 +57,7 @@ let an item import a hand-written fragment, following the nixos-disko `local.nix
   goldens say that the fragment is imported.
 - The backend checks it: the rendered artefacts require the file once the spec opts in
   (nixos-disko stops the build when `../local.nix` is missing or not git-tracked), and the
-  fragment is pinned by the same lock as everything else.
+  flake inputs the fragment uses are pinned by the same lock as everything else.
 
 A fragment is the place for what is specific to one host; anything several items need
 belongs in the spec format or a backend.
