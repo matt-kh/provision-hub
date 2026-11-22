@@ -80,6 +80,16 @@ may change incompatibly; every such change has a Migration paragraph. See
   and with exit 0, about a dotted directory with items whose kind is not installed. Docs: "Kind plugins" in
   `docs/kinds.md`; `docs/adding-a-backend.md` gains `PLUGIN_API` and a vendor-prefix naming
   convention for third-party backends (`acme-talos`). os-install's schema is unchanged.
+- `--json` on `prov kinds`, `backends`, `schema` (a no-op: the schema is JSON already),
+  `validate` and `plan`: one JSON document on stdout, sorted keys, ASCII only, raw plugin
+  values, a top-level `"format": "prov.cli/v1alpha1"` (not in `schema`'s output)
+  (`kinds`: name, group, api_versions, summary, builtin; `backends`: name, kind, summary,
+  builtin, starter, check, preserve; `validate`: ref, backend, ok, findings with level,
+  where, message; `plan`: ref, backend, rendered_dir, lines identical to the text). Exit
+  codes are unchanged; `validate --json` writes nothing on stderr; exit-2 errors stay text
+  on stderr (`prov: error: …`, possibly with indented continuation lines) with empty
+  stdout, and `plan` still refuses unsafe lines. Text output without `--json` is
+  unchanged. Shapes and the stability promise: "Machine-readable output" in `docs/kinds.md`.
 
 ### Security
 

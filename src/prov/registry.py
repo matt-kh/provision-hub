@@ -139,6 +139,15 @@ def builtin() -> Dict[str, ModuleType]:
     return dict(sorted(found.items()))
 
 
+def builtin_names() -> frozenset:
+    """NAMEs the provision-hub distribution registers backends under; nothing is loaded.
+
+    Entry-point names stand for NAMEs because ``discover()`` refuses an entry point whose name
+    differs from its NAME: call this after ``discover()`` succeeded (as ``prov backends`` does).
+    """
+    return frozenset(ep.name for ep in entry_points(group=ENTRY_POINT_GROUP) if plugins.from_distribution(ep))
+
+
 def _utf8(text: str) -> bool:
     try:
         text.encode("utf-8")

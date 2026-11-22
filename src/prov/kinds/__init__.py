@@ -153,6 +153,11 @@ def builtin() -> Dict[str, ModuleType]:
     return dict(sorted(found.items()))
 
 
+def builtin_names() -> frozenset:
+    """NAMEs of the discovered kinds that the provision-hub distribution registers (``prov kinds --json``)."""
+    return _discovered()[1]
+
+
 def unknown_hint(known: Dict[str, Kind]) -> str:
     """The list of known kinds for an "unknown kind" message, or a hint when there is none."""
     if known:

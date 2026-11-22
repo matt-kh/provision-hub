@@ -40,22 +40,30 @@ uv run prov validate os-install/demo                          # checks spec.toml
 uv run prov diff os-install/demo                              # fresh render vs. rendered/ on disk
 uv run prov plan os-install/demo                              # prints the seed-ISO and boot steps; runs nothing
 uv run prov list                                              # every item under the root
+uv run prov validate os-install/demo --json                   # one JSON document (kinds, backends, schema, validate, plan)
 ```
 
 | Command | Does | Exit codes |
 |---|---|---|
-| `prov kinds` | list the installed kinds (plugins) and their api versions | 0, 2 (broken kind plugin) |
-| `prov backends [--kind K]` | list registered backends (name, kind) | 0, 2 |
+| `prov kinds [--json]` | list the installed kinds (plugins) and their api versions | 0, 2 (broken kind plugin) |
+| `prov backends [--kind K] [--json]` | list registered backends (name, kind) | 0, 2 |
 | `prov list` | list every item under the root (ref, backend); findings on stderr | 0 (also with warnings, e.g. a dotted directory whose kind is not installed), 1 findings (symlinked, unreadable or invalidly named entries), 2 missing root |
-| `prov schema <kind> [--backend B]` | print the JSON Schema of a kind | 0, 2 |
+| `prov schema <kind> [--backend B] [--json]` | print the JSON Schema of a kind (`--json` changes nothing) | 0, 2 |
 | `prov init <ref> --backend B [--force]` | write a starter `<kind>/<name>/spec.toml` | 0, 2 |
 | `prov render <ref>` | make `<kind>/<name>/rendered/` hold exactly the rendered files | 0, 2 |
-| `prov validate <ref>` | envelope, schema and semantic checks, rendered-file checks, staleness | 0, 1 findings, 2 |
+| `prov validate <ref> [--json]` | envelope, schema and semantic checks, rendered-file checks, staleness | 0, 1 findings, 2 |
 | `prov diff <ref>` | unified diff from `rendered/` to a fresh render | 0, 1 diff, 2 |
-| `prov plan <ref>` | print the apply steps for a human | 0, 2 |
+| `prov plan <ref> [--json]` | print the apply steps for a human | 0, 2 |
 
 A ref is `<kind>/<name>`, e.g. `os-install/demo`. Exit code 2 means a usage or configuration
 error (missing item, unknown kind or backend, bad envelope, invalid `spec.toml`).
+
+`--json` prints one JSON document instead of the text (sorted keys, ASCII only, a
+`"format": "prov.cli/v1alpha1"` key except for `schema`) with the same exit codes;
+`validate --json` puts every finding in it and nothing on stderr, and an exit-2 error
+stays text on stderr (`prov: error: …`, possibly with indented continuation lines) with
+nothing on stdout. Shapes:
+[docs/kinds.md](docs/kinds.md#machine-readable-output).
 
 **Root.** `--root DIR`, else `$PROV_ROOT`, else the current directory. Layout:
 

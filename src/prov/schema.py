@@ -17,10 +17,11 @@ changes; anything breaking becomes ``prov/v2`` with a reader for v1.
 from __future__ import annotations
 
 import copy
-import json
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Mapping
+
+from .text import json_text
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -132,12 +133,12 @@ def spec_schema(kind: Any, backends: Mapping[str, Any], defs: Mapping[str, Any])
 
 
 def schema_json(schema: Mapping[str, Any]) -> str:
-    """Canonical serialisation used for the published file and ``prov schema``.
+    """Canonical serialisation used for the published file and ``prov schema`` (``prov.text.json_text``).
 
     ASCII only: any non-ASCII character (including a plugin description's controls or bidi
     marks) is a JSON ``\\uNNNN`` escape, so the output is safe to print and still valid JSON.
     """
-    return json.dumps(schema, indent=2, sort_keys=True, ensure_ascii=True) + "\n"
+    return json_text(schema)
 
 
 MAX_SPEC_FILE_BYTES = 1024 * 1024
