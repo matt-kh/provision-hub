@@ -120,14 +120,14 @@ PASSING = [
     "ok\tbasic\tvalidate\tno errors",
     "ok\tbasic\tcontains\t1 string(s) found",
     "ok\tbasic\tabsent\t1 string(s) absent",
-    "ok\tbasic\tplan\t5 line(s), for a human to run; prov never runs them",
+    "ok\tbasic\tplan\t5 line(s) pass the plan checks; prov never runs them",
     "skipped\tcached\trefs\trefs.cache: kind 'cache.example.org' is not installed; its literal outputs were checked as JSON data only",
     "ok\tcached\tspec\tvalid",
     "ok\tcached\toutputs\t1 output(s); no expect.outputs to compare",
     "ok\tcached\trender\t2 file(s), equal on a second render",
     "ok\tcached\twrite\t2 change(s) in a fresh temporary rendered/; diff empty; a second write makes 0 changes",
     "ok\tcached\tvalidate\tno errors",
-    "ok\tcached\tplan\t5 line(s), for a human to run; prov never runs them",
+    "ok\tcached\tplan\t5 line(s) pass the plan checks; prov never runs them",
     "ok\teven-replicas\tspec\trejected as expected: error: replicas: replicas must be odd",
     "ok\twith-registry\trefs\t1 reference(s) match their target kinds' OUTPUTS",
     "ok\twith-registry\tspec\tvalid",
@@ -136,8 +136,8 @@ PASSING = [
     "ok\twith-registry\twrite\t2 change(s) in a fresh temporary rendered/; diff empty; a second write makes 0 changes",
     "ok\twith-registry\tvalidate\tno errors",
     "ok\twith-registry\tcontains\t1 string(s) found",
-    "ok\twith-registry\tplan\t5 line(s), for a human to run; prov never runs them",
-    f"conformance {BACKEND} ({SITE}): 4 fixture(s): 4 ok, 0 FAIL, 0 skipped",
+    "ok\twith-registry\tplan\t5 line(s) pass the plan checks; prov never runs them",
+    f"conformance {BACKEND} ({SITE}): 4 fixture(s): 4 ok, 0 FAIL, 0 skipped; 1 check(s) skipped",
 ]
 
 
@@ -155,12 +155,12 @@ def test_json_document(install, capsys):
     code, out, err = run(capsys, "conformance", BACKEND, "--json")
     assert (code, err) == (0, "")
     doc = json.loads(out)
-    assert sorted(doc) == ["backend", "fixtures", "format", "kind", "ok"]
-    assert (doc["format"], doc["backend"], doc["kind"], doc["ok"]) == ("prov.cli/v1alpha1", BACKEND, SITE, True)
+    assert sorted(doc) == ["backend", "fixtures", "format", "kind", "ok", "skipped_checks"]
+    assert (doc["format"], doc["backend"], doc["kind"], doc["ok"], doc["skipped_checks"]) == ("prov.cli/v1alpha1", BACKEND, SITE, True, 1)
     assert [f["name"] for f in doc["fixtures"]] == ["basic", "cached", "even-replicas", "with-registry"]
     assert all(f["status"] == "ok" for f in doc["fixtures"])
     lines = [f"{c['status']}\t{f['name']}\t{c['check']}\t{c['detail']}" for f in doc["fixtures"] for c in f["checks"]]
-    assert lines == PASSING[:-1]
+    assert lines == PASSING[:-1]  # the same statuses; JSON spells FAIL as "fail"
 
 
 def test_runs_are_byte_identical(install, capsys):
@@ -301,7 +301,7 @@ def test_unsupported_fixture_is_skipped(install, capsys):
     assert code == 0
     assert "skipped\tcached\tsupported\tthe backend cannot express this fixture: this backend has no cache" in out.splitlines()
     assert not any(line.startswith(("ok\tcached", "FAIL\tcached")) for line in out.splitlines())
-    assert out.splitlines()[-1].endswith("4 fixture(s): 3 ok, 0 FAIL, 1 skipped")
+    assert out.splitlines()[-1].endswith("4 fixture(s): 3 ok, 0 FAIL, 1 skipped; 0 check(s) skipped")
     doc = json.loads(run(capsys, "conformance", BACKEND, "--json")[1])
     assert doc["ok"] is True and next(f for f in doc["fixtures"] if f["name"] == "cached")["status"] == "skipped"
 
@@ -386,8 +386,7 @@ def test_expect_outputs_of_a_kind_without_outputs(extra_kinds, capsys):
 
 
 BAD_BACKEND_FIXTURES = {
-    "unknown fixture": ({"FIXTURES": {"nope": {}}}, "FIXTURES names 'nope', not a fixture of kind 'site.example.org' (fixtures: basic, cached, even-replicas, with-registry)"),
-    "unknown unsupported": ({"UNSUPPORTED_FIXTURES": {"nope": "why"}}, "UNSUPPORTED_FIXTURES names 'nope'"),
+    "non-str name": ({"FIXTURES": {1: {}}}, "FIXTURES must be a dict of fixture name -> backend table"),
     "both": ({"UNSUPPORTED_FIXTURES": {"basic": "why"}}, "'basic' in both FIXTURES and UNSUPPORTED_FIXTURES"),
     "table not dict": ({"FIXTURES": {"basic": []}}, "FIXTURES must be a dict of fixture name -> backend table"),
     "empty reason": ({"UNSUPPORTED_FIXTURES": {"cached": " "}}, "UNSUPPORTED_FIXTURES must be a dict of fixture name -> reason"),
@@ -403,11 +402,29 @@ def test_bad_backend_fixtures_are_refused(install, capsys, case):
     assert (code, out) == (2, "") and message in err and clean(err), err
 
 
+def test_unknown_fixture_names_fail_in_conformance_only(install, capsys):
+    """A stale fixture name in a backend does not stop it loading: other verbs work, conformance fails."""
+    install(backend=site_backend(FIXTURES={"basic": {"port": 8081}, "renamed": {}}, UNSUPPORTED_FIXTURES={"gone\x1b[2J": "old"}))
+    assert run(capsys, "backends", "--kind", SITE)[0] == 0
+    assert run(capsys, "kinds")[0] == 0 and run(capsys, "schema", SITE)[0] == 0
+    code, out, err = run(capsys, "conformance", BACKEND)
+    assert (code, err) == (1, "") and clean(out)
+    lines = out.splitlines()
+    assert lines[-3:] == [
+        "FAIL\tgone\\x1b[2J\ttable\tUNSUPPORTED_FIXTURES names unknown fixture 'gone\\x1b[2J' (fixtures of kind site.example.org: basic, cached, even-replicas, with-registry)",
+        "FAIL\trenamed\ttable\tFIXTURES names unknown fixture 'renamed' (fixtures of kind site.example.org: basic, cached, even-replicas, with-registry)",
+        f"conformance {BACKEND} ({SITE}): 6 fixture(s): 4 ok, 2 FAIL, 0 skipped; 1 check(s) skipped",
+    ]
+    doc = json.loads(run(capsys, "conformance", BACKEND, "--json")[1])
+    assert doc["ok"] is False and doc["fixtures"][-1] == {"name": "renamed", "status": "fail", "checks": [{"check": "table", "status": "fail", "detail": lines[-2].split("\t")[3]}]}
+
+
 def test_backend_fixtures_of_a_kind_without_fixtures(extra_kinds, extra_backends, capsys):
     extra_kinds(fake_entry_point(fake_kind(), value="prov_registry.kind"))
     extra_backends(fake_entry_point(fake_backend(FIXTURES={"basic": {}}), value="prov_registry.text"))
-    code, _, err = run(capsys, "backends")
-    assert code == 2 and "fixtures: none: kind 'registry.example.org' declares no FIXTURES" in err
+    assert run(capsys, "backends")[0] == 0
+    code, _, err = run(capsys, "conformance", "example-registry-text")
+    assert code == 2 and "kind registry.example.org has no fixtures" in err
 
 
 def test_kinds_and_backends_json_list_fixtures(install, capsys):
@@ -444,4 +461,205 @@ def test_hostile_plugin_text_is_escaped(install, capsys):
     doc = json.loads(out)
     checks = {(f["name"], c["check"]): c for f in doc["fixtures"] for c in f["checks"]}
     assert checks[("cached", "supported")]["detail"] == f"the backend cannot express this fixture: reason {HOSTILE}"  # raw in JSON
-    assert checks[("basic", "validate")]["status"] == "FAIL"
+    assert checks[("basic", "validate")]["status"] == "fail"
+    assert next(f for f in doc["fixtures"] if f["name"] == "basic")["status"] == "fail"
+
+
+# --- temporary directory: no leaks, always removed ---------------------------------------
+
+
+@pytest.fixture
+def made_temps(monkeypatch):
+    """Record every directory mkdtemp creates."""
+    made = []
+    real = tempfile.mkdtemp
+
+    def mkdtemp(*args, **kwargs):
+        made.append(real(*args, **kwargs))
+        return made[-1]
+
+    monkeypatch.setattr(tempfile, "mkdtemp", mkdtemp)
+    return made
+
+
+def test_temp_path_never_printed_through_a_symlinked_tmpdir(install, capsys, monkeypatch, tmp_path, made_temps):
+    """TMPDIR through a symlink: the resolved, unresolved and show() forms and the basename all read <tmp>."""
+    real = tmp_path / "real-tmp"
+    real.mkdir()
+    link = tmp_path / "link-tmp"
+    link.symlink_to(real)
+    monkeypatch.setattr(tempfile, "tempdir", str(link))
+
+    def validate(d):
+        unresolved = str(d).replace(str(real), str(link))
+        return [Finding(ERROR, f"a {d} b {os.path.realpath(d)} c {unresolved} d {show_name(d)} e {os.path.basename(made_temps[0])}")]
+
+    install(backend=site_backend(validate=validate))
+    code, out, _ = run(capsys, "conformance", BACKEND)
+    assert code == 1
+    assert made_temps[0].startswith(str(link)) and not os.path.exists(made_temps[0])
+    line = next(line for line in out.splitlines() if line.startswith("FAIL\tbasic\tvalidate"))
+    assert line == "FAIL\tbasic\tvalidate\terror: a <tmp>/site.example.org/basic/rendered b <tmp>/site.example.org/basic/rendered c <tmp>/site.example.org/basic/rendered d <tmp>/site.example.org/basic/rendered e <tmp>"
+    for leak in (str(real), str(link), "prov-conformance-"):
+        assert leak not in out
+
+
+def show_name(path):
+    from prov.text import show
+
+    return show(str(path))
+
+
+def test_os_error_while_writing_is_a_fail(install, capsys, monkeypatch, made_temps):
+    import errno
+
+    import prov.render
+
+    def full(target, text):
+        raise OSError(errno.ENOSPC, "No space left on device", str(target))
+
+    monkeypatch.setattr(prov.render, "atomic_write", full)
+    install()
+    code, out, err = run(capsys, "conformance", BACKEND)
+    assert (code, err) == (1, "")
+    assert "FAIL\tbasic\twrite\t<tmp>/site.example.org/basic/rendered/site.conf: No space left on device" in out.splitlines()
+    assert "prov-conformance-" not in out and not os.path.exists(made_temps[0])
+
+
+def test_cleanup_when_a_plugin_removes_the_tree(install, capsys, made_temps):
+    import shutil
+
+    def validate(d):
+        shutil.rmtree(made_temps[0])
+        return []
+
+    install(backend=site_backend(validate=validate))
+    assert run(capsys, "conformance", BACKEND)[0] == 0
+    assert not os.path.exists(made_temps[0])
+
+
+def test_cleanup_when_a_plugin_locks_a_directory(install, capsys, made_temps):
+    def validate(d):
+        os.chmod(d / "tests", 0)
+        os.chmod(d, 0o500)
+        return []
+
+    install(backend=site_backend(validate=validate))
+    assert run(capsys, "conformance", BACKEND)[0] == 0
+    assert not os.path.exists(made_temps[0])
+
+
+def test_cleanup_failure_is_exit_2(install, capsys, monkeypatch, made_temps):
+    import prov.conformance
+
+    monkeypatch.setattr(prov.conformance, "_remove", lambda tmp: False)
+    install()
+    code, out, err = run(capsys, "conformance", BACKEND)
+    assert (code, out) == (2, "") and "could not remove the temporary directory <tmp>" in err
+    assert os.path.basename(made_temps[0]) not in err
+    import shutil
+
+    shutil.rmtree(made_temps[0])  # the test's own cleanup: _remove was stubbed out
+
+
+def test_system_exit_in_a_plugin_is_a_fail_and_cleans_up(install, capsys, made_temps):
+    def render(spec, ctx):
+        raise SystemExit(3)
+
+    install(backend=site_backend(render=render))
+    code, out, _ = run(capsys, "conformance", BACKEND)
+    assert code == 1 and "FAIL\tbasic\trender\tbackend 'example-site-goss' failed in render: SystemExit: 3" in out
+    assert not os.path.exists(made_temps[0])
+
+
+def test_keyboard_interrupt_propagates_and_cleans_up(install, capsys, monkeypatch, made_temps):
+    import prov.conformance
+
+    def validate(d):
+        raise KeyboardInterrupt
+
+    def broken_remove(tmp):  # a failing cleanup must not replace the interrupt
+        real_remove(tmp)
+        raise OSError("cleanup trouble")
+
+    real_remove = prov.conformance._remove
+    monkeypatch.setattr(prov.conformance, "_remove", broken_remove)
+    install(backend=site_backend(validate=validate))
+    with pytest.raises(KeyboardInterrupt):
+        main(["conformance", BACKEND])
+    assert made_temps and not os.path.exists(made_temps[0])
+
+
+# --- negative fixtures: rejected for the right reason ------------------------------------
+
+
+REQUIRED_PORT = {"type": "object", "additionalProperties": False, "required": ["port"], "properties": {"port": {"type": "integer"}}}
+
+
+def test_negative_fixture_may_not_have_a_backend_table(install, capsys):
+    install(backend=site_backend(FIXTURES={"basic": {"port": 8081}, "even-replicas": {"port": "eighty"}}))
+    code, out, _ = run(capsys, "conformance", BACKEND)
+    assert code == 1
+    assert any(line.startswith("FAIL\teven-replicas\ttable\ta backend table is not allowed for a fixture expected to be invalid") for line in out.splitlines())
+
+
+def test_negative_fixture_is_rejected_by_the_kind_despite_a_required_backend_table(install, capsys):
+    """The backend SCHEMA requires port, but a negative fixture's empty table is not checked against it."""
+    tables = {name: {"port": 8081} for name in ("basic", "cached", "with-registry")}
+    install(backend=site_backend(SCHEMA=REQUIRED_PORT, FIXTURES=tables))
+    code, out, _ = run(capsys, "conformance", BACKEND)
+    assert code == 0 and "ok\teven-replicas\tspec\trejected as expected: error: replicas: replicas must be odd" in out.splitlines()
+
+
+def test_negative_fixture_not_passed_by_a_backend_table_error(install, capsys):
+    """The review's case: a broken semantic accepts even replicas; the backend's table rules must not hide it."""
+    tables = {name: {"port": 8081} for name in ("basic", "cached", "with-registry")}
+    install(kind=site_kind(semantic=lambda spec: []), backend=site_backend(SCHEMA=REQUIRED_PORT, FIXTURES=tables))
+    code, out, _ = run(capsys, "conformance", BACKEND)
+    assert code == 1
+    assert "FAIL\teven-replicas\tspec\taccepted, but the fixture expects it to be rejected (expect.valid = false)" in out.splitlines()
+
+
+def test_negative_fixture_rejected_only_inside_the_table(install, capsys):
+    install(kind=site_kind(semantic=lambda spec: []), backend=site_backend(check=lambda spec, ctx: [Finding(ERROR, "port refused", f"{BACKEND}.port")] if spec["replicas"] == 2 else []))
+    code, out, _ = run(capsys, "conformance", BACKEND)
+    assert code == 1
+    assert f"FAIL\teven-replicas\tspec\trejected only inside the backend table '{BACKEND}', which does not count: error: {BACKEND}.port: port refused" in out.splitlines()
+
+
+@pytest.mark.parametrize("wanted, status", [("must be odd", "ok"), ("must be prime", "FAIL")])
+def test_expect_error(install, capsys, wanted, status):
+    table = fixtures()
+    table["even-replicas"]["expect"]["error"] = wanted
+    install(kind=site_kind(FIXTURES=table))
+    code, out, _ = run(capsys, "conformance", BACKEND)
+    line = next(line for line in out.splitlines() if line.startswith(("ok\teven-replicas", "FAIL\teven-replicas")))
+    assert line.startswith(f"{status}\teven-replicas\tspec\t") and code == (0 if status == "ok" else 1)
+    if status == "FAIL":
+        assert "rejected, but no error contains expect.error 'must be prime': error: replicas: replicas must be odd" in line
+
+
+@pytest.mark.parametrize("expect", [{"valid": True, "error": "x"}, {"valid": False, "error": ""}, {"valid": False, "error": 1}])
+def test_bad_expect_error_is_refused(extra_kinds, capsys, expect):
+    extra_kinds(fake_entry_point(site_kind(FIXTURES={"x": {"spec": {}, "expect": expect}}), value="prov_site.kind"))
+    code, _, err = run(capsys, "kinds")
+    assert code == 2 and "expect.error is a non-empty string, only for a fixture with expect.valid = false" in err
+
+
+# --- smaller cases ------------------------------------------------------------------------
+
+
+def test_all_fixtures_unsupported_exits_0(install, capsys):
+    reasons = {name: "not this one" for name in fixtures()}
+    install(backend=site_backend(FIXTURES={}, UNSUPPORTED_FIXTURES=reasons))
+    code, out, _ = run(capsys, "conformance", BACKEND)
+    assert code == 0 and out.splitlines()[-1] == f"conformance {BACKEND} ({SITE}): 4 fixture(s): 0 ok, 0 FAIL, 4 skipped; 0 check(s) skipped"
+
+
+def test_synthetic_ref_collisions():
+    assert synthetic_ref("x.example.org", "a_b") == "x.example.org/a-b"
+    assert synthetic_ref("x.example.org", "a-b", frozenset({"x.example.org/a-b"})) == "x.example.org/a-b-2"
+    assert synthetic_ref("x.example.org", "a-b", frozenset({"x.example.org/a-b", "x.example.org/a-b-2"})) == "x.example.org/a-b-3"
+    long = "a" * 63
+    ref = synthetic_ref("x.example.org", long, frozenset({f"x.example.org/{long}"}))
+    assert ref == f"x.example.org/{'a' * 61}-2"

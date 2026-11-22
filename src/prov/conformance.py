@@ -8,12 +8,15 @@ only checks that the plan lines pass the refusal checks of ``prov.plan``.
 Per fixture of the backend's kind (``prov.kinds.fixtures``), in name order:
 
 ``supported``  the backend lists the fixture in ``UNSUPPORTED_FIXTURES``: skipped, with its reason
-``table``      the backend has no table for the fixture and its ``SCHEMA`` requires keys
+``table``      the backend has no table for a valid fixture although its ``SCHEMA`` requires
+               keys, or a table for a fixture expected to be invalid (not allowed)
 ``refs``       each literal ``refs`` entry matches its target kind's ``OUTPUTS`` (skipped
                when that kind is not installed: then checked as JSON data only)
 ``spec``       envelope + fixture spec + backend table (+ ``[refs]``) checked like a spec file
                (``prov.spec.check_raw``) with ``ctx.refs`` from the literals; a fixture with
-               ``expect.valid = false`` must be rejected, and stops here
+               ``expect.valid = false`` must be rejected, and stops here: it is composed with
+               an empty backend table that the backend's ``SCHEMA`` is not applied to, and
+               only errors outside that table count (one containing ``expect.error``, if given)
 ``outputs``    the kind's outputs; equal to ``expect.outputs`` when given
 ``render``     two renders give equal file maps
 ``write``      written to a fresh temporary ``<tmp>/<kind>/<fixture>/rendered/``: then
@@ -22,26 +25,32 @@ Per fixture of the backend's kind (``prov.kinds.fixtures``), in name order:
                when it reports skipped findings, such as a missing external tool)
 ``contains``   each ``expect.contains`` string appears in a rendered file
 ``absent``     no ``expect.absent`` string appears in any rendered file
-``plan``       ``prov.plan.plan_lines`` accepts the plan (never executed, never printed)
+``plan``       ``prov.plan.plan_lines`` accepts the plan (never executed, never printed
+               for a human to run)
 
 A failure in ``table``, ``refs``, ``spec``, ``render`` or ``write`` ends the fixture: the
 later checks depend on it. A plugin failure (exception, wrong return type) is a FAIL of the
-check it happened in, not an exit-2 error.
+check it happened in, not an exit-2 error. A name in the backend's ``FIXTURES`` or
+``UNSUPPORTED_FIXTURES`` that is not a fixture of the kind is an extra entry with a FAIL of
+``table``, after the kind's fixtures.
 
-The temporary directory is outside ``--root`` (nothing is written there), removed before
-``run`` returns, and its path never appears in a result: plugin text that names it reads
-``<tmp>`` instead.
+Files are written only to a fresh temporary directory (``tempfile.mkdtemp``, under
+``$TMPDIR``), never in the item tree, and removed before ``run`` returns, best effort
+against plugins that change permissions or remove it; its path never appears in a result:
+plugin text that names it, resolved or not, reads ``<tmp>`` instead.
 """
 
 from __future__ import annotations
 
 import copy
+import os
 import shutil
+import sys
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 from . import kinds
 from .kinds.common import DEFS
@@ -55,6 +64,7 @@ from .text import esc, short_repr, show
 from .validate import ERROR, SKIPPED, WARNING, Finding, json_equal, schema_errors
 
 OK, FAIL, SKIP = "ok", "FAIL", "skipped"
+JSON_STATUS = {OK: "ok", FAIL: "fail", SKIP: "skipped"}  # the --json spelling of each status
 
 
 @dataclass(frozen=True)
@@ -87,6 +97,11 @@ class Result:
     def ok(self) -> bool:
         return all(f.status != FAIL for f in self.fixtures)
 
+    @property
+    def skipped_checks(self) -> int:
+        """Checks skipped inside fixtures that ran (an unsupported fixture's ``supported`` is not counted)."""
+        return sum(1 for f in self.fixtures if not f.unsupported for c in f.checks if c.status == SKIP)
+
 
 class _Stop(Exception):
     """Ends one fixture after a failed prerequisite check."""
@@ -103,25 +118,58 @@ def _first_errors(findings: List[Finding]) -> str:
     return _finding_text(errors[0]) + more
 
 
-def synthetic_ref(kind_name: str, alias: str) -> str:
-    """``<target kind>/<alias>`` with every run of characters other than ``[a-z0-9]`` as one ``-``: a valid ref."""
+def synthetic_ref(kind_name: str, alias: str, taken: frozenset = frozenset()) -> str:
+    """``<target kind>/<alias>`` with every run of characters other than ``[a-z0-9]`` as one ``-``: a valid ref.
+
+    A ref already in ``taken`` (``a_b`` and ``a-b`` to the same kind) gets the first free
+    suffix ``-2``, ``-3``, ...
+    """
     name = "".join(ch if ch.isascii() and ch.isalnum() else "-" for ch in alias)
     while "--" in name:
         name = name.replace("--", "-")
-    return f"{kind_name}/{name.strip('-')[:63].rstrip('-')}"
+    base = name.strip("-")
+    ref, n = f"{kind_name}/{base[:63].rstrip('-')}", 1
+    while ref in taken:
+        n += 1
+        suffix = f"-{n}"
+        ref = f"{kind_name}/{base[: 63 - len(suffix)].rstrip('-')}{suffix}"
+    return ref
+
+
+def _in_table(finding: Finding, table: str) -> bool:
+    """True for a finding about the backend table ``table``: its ``where``, or a schema error's message, starts with it."""
+    where, message = str(finding.where), str(finding.message)
+    text = where if where else message.partition(": ")[0]
+    return text == table or text.startswith((table + ".", table + "["))
+
+
+class _Relaxed:
+    """A backend whose SCHEMA accepts any table: negative fixtures are checked without the backend's table rules."""
+
+    SCHEMA = {"type": "object"}
+
+    def __init__(self, plugin: Any) -> None:
+        self._plugin = plugin
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._plugin, name)
+
+
+def _os_error(exc: OSError) -> str:
+    name = f"{show(os.fsdecode(exc.filename))}: " if exc.filename is not None else ""
+    return f"{name}{esc(str(exc.strerror or exc))}"
 
 
 class _Run:
     """One fixture through one backend; results go to ``self.result``."""
 
-    def __init__(self, plugin: Any, kind: Any, backends: Mapping[str, Any], name: str, fixture: Dict[str, Any], tmp: Path) -> None:
+    def __init__(self, plugin: Any, kind: Any, backends: Mapping[str, Any], name: str, fixture: Dict[str, Any], tmp: Path, scrub: Callable[[str], str]) -> None:
         self.plugin, self.kind, self.backends = plugin, kind, backends
-        self.name, self.fixture, self.tmp = name, fixture, tmp
+        self.name, self.fixture, self.tmp, self.scrub = name, fixture, tmp, scrub
         self.result = FixtureResult(name)
 
     def add(self, check: str, status: str, detail: str) -> None:
-        detail = detail.replace(str(self.tmp), "<tmp>").replace(show(str(self.tmp)), "<tmp>")
-        self.result.checks.append(Check(check, status, detail))
+        self.result.checks.append(Check(check, status, self.scrub(detail)))
 
     def stop(self, check: str, detail: str) -> None:
         self.add(check, FAIL, detail)
@@ -153,10 +201,14 @@ class _Run:
         rendered = self._write(files)
         self._validate(rendered)
         self._texts(files)
-        self._plan(spec, ctx, rendered)
+        self._plan(spec, ctx)
 
     def _table(self) -> Dict[str, Any]:
         tables = getattr(self.plugin, "FIXTURES", {})
+        if not self.fixture["expect"]["valid"]:
+            if self.name in tables:
+                self.stop("table", f"a backend table is not allowed for a fixture expected to be invalid (expect.valid = false); remove FIXTURES[{self.name!r}]: negative fixtures are checked with an empty table")
+            return {}
         if self.name in tables:
             return copy.deepcopy(tables[self.name])
         if not self.plugin.SCHEMA.get("required"):
@@ -175,7 +227,7 @@ class _Run:
         absent: List[str] = []
         for alias, outputs in sorted(literals.items()):
             target = declared[alias]["kind"]
-            out[alias] = (target, synthetic_ref(target, alias), outputs)
+            out[alias] = (target, synthetic_ref(target, alias, frozenset(ref for _, ref, _ in out.values())), outputs)
             if target not in installed:
                 absent.append(f"refs.{alias}: kind {short_repr(target)} is not installed; its literal outputs were checked as JSON data only")
                 continue
@@ -208,23 +260,45 @@ class _Run:
                 resolved[alias] = MappingProxyType({"ref": ref, "kind": target, "name": target_name, "outputs": freeze(copy.deepcopy(outputs))})
             return MappingProxyType(resolved), []
 
-        expect_valid = self.fixture["expect"]["valid"]
+        expect = self.fixture["expect"]
+        backends = self.backends if expect["valid"] else {**self.backends, plugin.NAME: _Relaxed(plugin)}
         try:
-            spec, findings, resolved = check_raw(raw, kind.NAME, name, self.backends, resolver)
+            spec, findings, resolved = check_raw(raw, kind.NAME, name, backends, resolver)
         except ConfigError as exc:
             self.stop("spec", str(exc))
         rejected = any(f.level == ERROR for f in findings)
-        if not expect_valid:
-            if rejected:
-                self.add("spec", OK, f"rejected as expected: {_first_errors(findings)}")
-            else:
-                self.add("spec", FAIL, "accepted, but the fixture expects it to be rejected (expect.valid = false)")
+        if not expect["valid"]:
+            self._rejected(findings)
             return None, Context(name)
         if rejected:
             self.stop("spec", _first_errors(findings))
         warnings = sum(1 for f in findings if f.level == WARNING)
         self.add("spec", OK, "valid" + (f" ({warnings} warning(s))" if warnings else ""))
         return spec, Context(name, resolved)
+
+    def _rejected(self, findings: List[Finding]) -> None:
+        """A negative fixture: an error outside the backend table, containing ``expect.error`` when given."""
+        errors = [f for f in findings if f.level == ERROR]
+        counted = [f for f in errors if not _in_table(f, self.plugin.NAME)]
+        wanted = self.fixture["expect"].get("error")
+        if wanted is not None:
+            matching = [f for f in counted if wanted in _finding_text(f)]
+            if matching:
+                self.add("spec", OK, f"rejected as expected: {_first_errors(matching)}")
+            elif counted:
+                self.add("spec", FAIL, f"rejected, but no error contains expect.error {short_repr(wanted)}: {_first_errors(counted)}")
+            else:
+                self.add("spec", FAIL, self._not_rejected(errors))
+            return
+        if counted:
+            self.add("spec", OK, f"rejected as expected: {_first_errors(counted)}")
+        else:
+            self.add("spec", FAIL, self._not_rejected(errors))
+
+    def _not_rejected(self, errors: List[Finding]) -> str:
+        if errors:
+            return f"rejected only inside the backend table {self.plugin.NAME!r}, which does not count: {_first_errors(errors)}"
+        return "accepted, but the fixture expects it to be rejected (expect.valid = false)"
 
     def _outputs(self, spec: Dict[str, Any]) -> None:
         try:
@@ -263,6 +337,8 @@ class _Run:
             again = write_rendered(rendered, files, keep)
         except ConfigError as exc:
             self.stop("write", str(exc))
+        except OSError as exc:
+            self.stop("write", _os_error(exc))
         if again:
             self.stop("write", f"a second write made {len(again)} change(s): {', '.join(again[:5])}")
         self.add("write", OK, f"{len(changes)} change(s) in a fresh temporary rendered/; diff empty; a second write makes 0 changes")
@@ -273,6 +349,9 @@ class _Run:
             findings = call_plugin(self.plugin, "validate", rendered)
         except ConfigError as exc:
             self.add("validate", FAIL, str(exc))
+            return
+        except OSError as exc:  # guarded_call turns a plugin's own OSError into ConfigError; this is a backstop
+            self.add("validate", FAIL, _os_error(exc))
             return
         if any(f.level == ERROR for f in findings):
             self.add("validate", FAIL, _first_errors(findings))
@@ -301,18 +380,77 @@ class _Run:
             else:
                 self.add("absent", OK, f"{len(expect['absent'])} string(s) absent")
 
-    def _plan(self, spec: Dict[str, Any], ctx: Context, rendered: Path) -> None:
+    def _plan(self, spec: Dict[str, Any], ctx: Context) -> None:
+        placeholder = Path("<tmp>") / self.kind.NAME / self.name / "rendered"  # the header's cd line; never printed
         try:
-            lines = plan_lines(self.plugin, copy.deepcopy(spec), ctx, f"{self.kind.NAME}/{self.name}", rendered)
+            lines = plan_lines(self.plugin, copy.deepcopy(spec), ctx, f"{self.kind.NAME}/{self.name}", placeholder)
         except ConfigError as exc:
             self.add("plan", FAIL, str(exc))
             return
-        self.add("plan", OK, f"{len(lines)} line(s), for a human to run; prov never runs them")
+        self.add("plan", OK, f"{len(lines)} line(s) pass the plan checks; prov never runs them")
+
+
+def _scrubber(raw: str, tmp: Path) -> Callable[[str], str]:
+    """Replace every spelling of the temporary directory in a detail by ``<tmp>``.
+
+    The forms as created, absolute and resolved (``$TMPDIR`` may be a symlink), raw and as
+    ``show`` prints them, longest first; then the random basename itself.
+    """
+    forms = {raw, os.path.abspath(raw), os.path.realpath(raw), str(tmp)}
+    forms |= {show(form) for form in forms}
+    ordered = sorted(forms, key=lambda form: (-len(form), form))
+    base = os.path.basename(raw)
+
+    def scrub(text: str) -> str:
+        for form in ordered:
+            text = text.replace(form, "<tmp>")
+        return text.replace(base, "<tmp>")
+
+    return scrub
+
+
+def _unlock(top: Path) -> None:
+    """Make every directory below ``top`` (and ``top``) writable and searchable again; symlinks are never followed."""
+    try:
+        os.chmod(top, 0o700)
+    except OSError:
+        pass
+    for dirpath, dirnames, _ in os.walk(top):  # top-down: children are unlocked before they are listed
+        for name in dirnames:
+            path = os.path.join(dirpath, name)
+            if not os.path.islink(path):
+                try:
+                    os.chmod(path, 0o700)
+                except OSError:
+                    pass
+
+
+def _remove(tmp: Path) -> bool:
+    """Remove the temporary directory, best effort; True when it is gone."""
+
+    def retry(func: Any, path: str, exc: BaseException) -> None:
+        if isinstance(exc, FileNotFoundError):
+            return
+        try:
+            os.chmod(os.path.dirname(path), 0o700)
+            func(path)
+        except OSError:
+            pass
+
+    for _ in range(2):
+        if not os.path.lexists(tmp):
+            return True
+        _unlock(tmp)
+        if sys.version_info >= (3, 12):
+            shutil.rmtree(tmp, onexc=retry)
+        else:  # pragma: no cover - Python 3.10 and 3.11
+            shutil.rmtree(tmp, onerror=lambda func, path, info: retry(func, path, info[1]))
+    return not os.path.lexists(tmp)
 
 
 def run(backend_name: str) -> Result:
     """Run every fixture of the backend's kind through it; ConfigError (exit 2) for an unknown
-    backend or a kind without fixtures."""
+    backend, a kind without fixtures, or a temporary directory that could not be removed."""
     backends = discover()
     if backend_name not in backends:
         raise ConfigError(f"unknown backend {short_repr(backend_name)} (registered: {', '.join(backends) or 'none'})")
@@ -321,21 +459,42 @@ def run(backend_name: str) -> Result:
     fixtures = kinds.fixtures(kind)
     if not fixtures:
         raise ConfigError(f"kind {kind.NAME} has no fixtures (FIXTURES); nothing to check for backend {plugin.NAME}")
-    tmp = Path(tempfile.mkdtemp(prefix="prov-conformance-"))
+    raw = tempfile.mkdtemp(prefix="prov-conformance-")
+    tmp = Path(raw).resolve()
+    scrub = _scrubber(raw, tmp)
     try:
-        results = tuple(_Run(plugin, kind, backends, name, fixture, tmp).go() for name, fixture in fixtures.items())
-    finally:
-        shutil.rmtree(tmp)
-    return Result(plugin.NAME, kind.NAME, results)
+        results = [_Run(plugin, kind, backends, name, fixture, tmp, scrub).go() for name, fixture in fixtures.items()]
+    except BaseException:  # KeyboardInterrupt included: clean up, never replace the exception in flight
+        try:
+            _remove(tmp)
+        except Exception:
+            pass
+        raise
+    if not _remove(tmp):
+        raise ConfigError("could not remove the temporary directory <tmp> (a prov-conformance-* directory in $TMPDIR); remove it by hand")
+    results += _unknown_names(plugin, kind, fixtures)
+    return Result(plugin.NAME, kind.NAME, tuple(results))
+
+
+def _unknown_names(plugin: Any, kind: Any, fixtures: Mapping[str, Any]) -> List[FixtureResult]:
+    """An entry with a FAIL of ``table`` per backend key that names no fixture of the kind."""
+    out = []
+    known = ", ".join(fixtures)
+    for member in ("FIXTURES", "UNSUPPORTED_FIXTURES"):
+        for name in sorted(getattr(plugin, member, {})):
+            if name not in fixtures:
+                detail = f"{member} names unknown fixture {short_repr(name)} (fixtures of kind {kind.NAME}: {known})"
+                out.append(FixtureResult(name, [Check("table", FAIL, detail)]))
+    return sorted(out, key=lambda f: f.name)
 
 
 def text_lines(result: Result) -> List[str]:
     """``<status>\\t<fixture>\\t<check>\\t<detail>`` per check, then a summary line; escaped."""
-    lines = [f"{c.status}\t{f.name}\t{c.check}\t{esc(c.detail)}" for f in result.fixtures for c in f.checks]
+    lines = [f"{c.status}\t{esc(f.name)}\t{c.check}\t{esc(c.detail)}" for f in result.fixtures for c in f.checks]
     counts = {status: sum(1 for f in result.fixtures if f.status == status) for status in (OK, FAIL, SKIP)}
     lines.append(
         f"conformance {result.backend} ({result.kind}): {len(result.fixtures)} fixture(s): "
-        f"{counts[OK]} ok, {counts[FAIL]} FAIL, {counts[SKIP]} skipped"
+        f"{counts[OK]} ok, {counts[FAIL]} FAIL, {counts[SKIP]} skipped; {result.skipped_checks} check(s) skipped"
     )
     return lines
 
@@ -346,8 +505,13 @@ def document(result: Result) -> Dict[str, Any]:
         "backend": result.backend,
         "kind": result.kind,
         "ok": result.ok,
+        "skipped_checks": result.skipped_checks,
         "fixtures": [
-            {"name": f.name, "status": f.status, "checks": [{"check": c.check, "status": c.status, "detail": c.detail} for c in f.checks]}
+            {
+                "name": f.name,
+                "status": JSON_STATUS[f.status],
+                "checks": [{"check": c.check, "status": JSON_STATUS[c.status], "detail": c.detail} for c in f.checks],
+            }
             for f in result.fixtures
         ],
     }

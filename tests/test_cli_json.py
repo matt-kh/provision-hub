@@ -116,8 +116,8 @@ def test_backends_json_third_party_and_kind_filter(capsys, extra_kinds, extra_ba
                 "starter": False,
                 "check": False,
                 "preserve": [],
-        "fixtures": [],
-        "unsupported_fixtures": {},
+                "fixtures": [],
+                "unsupported_fixtures": {},
             }
         ]
     }

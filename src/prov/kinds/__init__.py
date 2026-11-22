@@ -215,14 +215,14 @@ def _check_outputs(kind: Kind, who: str) -> None:
 
 
 FIXTURE_FIELDS = ("expect", "refs", "spec")
-EXPECT_FIELDS = ("absent", "contains", "outputs", "valid")
+EXPECT_FIELDS = ("absent", "contains", "error", "outputs", "valid")
 
 
 def fixtures(kind: Kind) -> Dict[str, Dict[str, Any]]:
     """A (checked) kind's conformance ``FIXTURES``, ordered by name, ``expect`` defaults filled in.
 
     Each value is ``{"spec": {...}, "refs": {alias: {outputs}}, "expect": {"valid": bool, ...}}``
-    (``refs`` ``{}`` without; ``outputs``, ``contains`` and ``absent`` only when given). A
+    (``refs`` ``{}`` without; ``error``, ``outputs``, ``contains`` and ``absent`` only when given). A
     deep copy: the caller may change it.
     """
     out: Dict[str, Dict[str, Any]] = {}
@@ -281,15 +281,17 @@ def _check_fixtures(kind: Kind, who: str) -> None:
                 raise ConfigError(f"{at} is not plain JSON outputs: {esc(problem)}")
         expect = fixture.get("expect", {})
         if not (type(expect) is dict and all(type(k) is str for k in expect)):
-            raise ConfigError(f"{at}: expect must be a dict with the keys valid, outputs, contains, absent (all optional)")
+            raise ConfigError(f"{at}: expect must be a dict with the keys valid, error, outputs, contains, absent (all optional)")
         unknown = sorted(set(expect) - set(EXPECT_FIELDS))
         if unknown:
-            raise ConfigError(f"{at}: expect has unknown key(s) {', '.join(short_repr(k) for k in unknown)}; keys: valid, outputs, contains, absent")
+            raise ConfigError(f"{at}: expect has unknown key(s) {', '.join(short_repr(k) for k in unknown)}; keys: valid, error, outputs, contains, absent")
         valid = expect.get("valid", True)
         if type(valid) is not bool:
             raise ConfigError(f"{at}: expect.valid must be true or false")
-        if not valid and set(expect) - {"valid"}:
+        if not valid and set(expect) - {"valid", "error"}:
             raise ConfigError(f"{at}: a fixture expected to be invalid stops at the spec check; drop expect.outputs, contains and absent")
+        if "error" in expect and (valid or not (type(expect["error"]) is str and expect["error"])):
+            raise ConfigError(f"{at}: expect.error is a non-empty string, only for a fixture with expect.valid = false")
         for key in ("contains", "absent"):
             texts = expect.get(key, [])
             if not (type(texts) is list and all(type(t) is str and t for t in texts)):

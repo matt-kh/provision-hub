@@ -5,7 +5,7 @@ A backend is a module (or any object) exposing the contract in ``docs/adding-a-b
 ``plan(spec, ctx)``, and optionally ``PLUGIN_API`` (default 1), ``check(spec, ctx)``,
 ``starter(name)``, ``PRESERVE``, ``REFS``, ``FIXTURES`` and ``UNSUPPORTED_FIXTURES``
 (conformance: the backend table per kind fixture, and the fixtures it cannot express, with a
-reason), ``artifacts(spec)`` and ``build(spec, ctx)`` with
+reason; only their shape is checked at discovery), ``artifacts(spec)`` and ``build(spec, ctx)`` with
 ``BUILD_TOOLS`` (build is reserved: checked here, not called yet; a backend's ``REFS`` is
 reserved and must be empty, references are declared by the kind and reach the backend as
 ``ctx.refs``).
@@ -109,30 +109,25 @@ def check_contract(plugin: Backend, origin: str) -> None:
 def _check_fixtures(plugin: Backend, origin: str) -> None:
     """``FIXTURES`` {fixture: backend table} and ``UNSUPPORTED_FIXTURES`` {fixture: reason}, both optional.
 
-    Every key names a fixture of the backend's kind (installed: ``check_contract`` checked
-    KIND first), and no fixture is in both. A table is plain JSON data; whether it matches
-    ``SCHEMA`` is for ``prov conformance``, which checks the composed fixture spec.
+    Only their shape is checked here: str keys, plain JSON tables, non-empty reasons, no
+    fixture in both. Whether each key names a fixture of the kind is for ``prov conformance``
+    (a FAIL there), so a backend whose kind renamed a fixture still loads for every other
+    verb; whether a table matches ``SCHEMA`` is checked there too, on the composed spec.
     """
     who = f"backend plugin {origin}"
-    known = kinds.fixtures(kinds.get(plugin.KIND))
-    hint = ", ".join(known) or f"none: kind {plugin.KIND!r} declares no FIXTURES"
     tables = getattr(plugin, "FIXTURES", {})
     reasons = getattr(plugin, "UNSUPPORTED_FIXTURES", {})
-    if type(tables) is not dict or not all(type(t) is dict for t in tables.values()):
+    if type(tables) is not dict or not all(type(n) is str and type(t) is dict for n, t in tables.items()):
         raise ConfigError(f"{who}: FIXTURES must be a dict of fixture name -> backend table (a dict)")
-    if type(reasons) is not dict or not all(type(r) is str and r.strip() for r in reasons.values()):
+    if type(reasons) is not dict or not all(type(n) is str and type(r) is str and r.strip() for n, r in reasons.items()):
         raise ConfigError(f"{who}: UNSUPPORTED_FIXTURES must be a dict of fixture name -> reason (a non-empty str)")
-    for member, names in (("FIXTURES", tables), ("UNSUPPORTED_FIXTURES", reasons)):
-        for name in names:
-            if name not in known:
-                raise ConfigError(f"{who}: {member} names {short_repr(name)}, not a fixture of kind {plugin.KIND!r} (fixtures: {hint})")
     both = sorted(set(tables) & set(reasons))
     if both:
-        raise ConfigError(f"{who}: {', '.join(repr(n) for n in both)} in both FIXTURES and UNSUPPORTED_FIXTURES")
+        raise ConfigError(f"{who}: {', '.join(short_repr(n) for n in both)} in both FIXTURES and UNSUPPORTED_FIXTURES")
     for name, table in sorted(tables.items()):
         problem = kinds.json_problem(table, f"FIXTURES.{name}", strict=False, max_depth=kinds.SCHEMA_MAX_DEPTH)
         if problem:
-            raise ConfigError(f"{who}: FIXTURES[{name!r}] is not plain JSON data: {esc(problem)}")
+            raise ConfigError(f"{who}: FIXTURES[{short_repr(name)}] is not plain JSON data: {esc(problem)}")
 
 
 def discover() -> Dict[str, Backend]:
