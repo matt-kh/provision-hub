@@ -64,10 +64,10 @@ stay minimal (pyyaml; tomli on 3.10 only) — justify any new one in the PR.
   under `<kind>/<name>/rendered/`; `build/` is reserved for a later `prov build`.
   `validate` may run read-only local validators (e.g. `cloud-init schema`) and reports a
   missing tool as `skipped: <tool> not installed`. `tests/test_plan.py` enforces that plan
-  executes nothing. `conformance` is static + rendered only: it writes only to a temporary
-  directory outside `--root` that it removes, and never runs a plan or a behavioural test
-  (a backend may render e.g. `goss.yaml`; its plan prints the command for a human;
-  `tests/test_conformance.py` guards it).
+  executes nothing. `conformance` is static + rendered only: it writes only to a fresh
+  temporary directory from `$TMPDIR` (never the item tree) that it removes, and never runs
+  a plan or a behavioural test (a backend may render e.g. `goss.yaml`; its plan prints the
+  command for a human; `tests/test_conformance.py` guards it).
 - **Synthetic data only.** Examples, fixtures and tests use documentation addresses
   (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24, 2001:db8::/32), example.com/org/net and
   fake ssh keys containing `EXAMPLE`. `tests/test_synthetic_data.py` enforces it. Never

@@ -128,19 +128,27 @@ may change incompatibly; every such change has a Migration paragraph. See
 - Conformance: a kind may declare `FIXTURES` (`{name: {"spec", "refs", "expect"}}`: core
   keys, literal outputs per reference alias, and `expect` with `valid` (default true),
   `outputs`, `contains`, `absent`; checked when the kind loads), and a backend `FIXTURES`
-  (its table per fixture) and `UNSUPPORTED_FIXTURES` (fixture -> reason; both checked against
-  the kind's fixture names when the backend is discovered). New verb
+  (its table per fixture) and `UNSUPPORTED_FIXTURES` (fixture -> reason; both checked for
+  shape only when the backend is discovered; a name the kind does not have is a `FAIL` of
+  `table` in conformance, not a load error). New verb
   `prov conformance <backend> [--json]` (`prov.conformance`) composes each fixture into a
   spec with synthetic refs (`<target kind>/<alias>`) and checks, static and rendered only:
   literal refs outputs against the target kind's `OUTPUTS` (skipped when it is not
-  installed), the spec (negative fixtures must be rejected), outputs, two equal renders, a
-  write to a temporary `rendered/` that diffs clean and rewrites with 0 changes, the
-  backend's `validate`, `contains`/`absent`, and the plan's refusal checks. Lines
-  `ok|FAIL|skipped<TAB><fixture><TAB><check><TAB><detail>` and a summary; exit 0, 1 when a
-  fixture failed, 2 for an unknown backend or a kind without fixtures. It never runs a plan,
-  a test runner or a subprocess, and writes only to a temporary directory outside `--root`
-  that it removes. `kinds --json` adds `"fixtures"`, `backends --json` adds `"fixtures"` and
-  `"unsupported_fixtures"`; `format` stays `prov.cli/v1alpha1`. os-install ships no
+  installed), the spec (a negative fixture gets no backend table, is checked without the
+  backend's `SCHEMA` and must be rejected by an error outside the backend table, containing
+  the optional `expect.error`), outputs, two equal renders, a write to a temporary
+  `rendered/` that diffs clean and rewrites with 0 changes, the backend's `validate`,
+  `contains`/`absent`, and the plan's refusal checks. Lines
+  `ok|FAIL|skipped<TAB><fixture><TAB><check><TAB><detail>` and a summary line with the
+  number of skipped checks (a skipped check leaves its fixture ok); exit 0, 1 when a
+  fixture failed, 2 for an unknown backend, a kind without fixtures or a temporary
+  directory that could not be removed. `--json` statuses are `"ok"`, `"fail"`,
+  `"skipped"`, plus `"skipped_checks"`; check names, the summary line and the keys are part
+  of the stable format. It never runs a plan, a test runner or a subprocess, and writes
+  only to a fresh temporary directory from `$TMPDIR` (never the item tree) that it removes,
+  best effort; the directory's path never appears in the output. `kinds --json` adds
+  `"fixtures"`, `backends --json` adds `"fixtures"` (sorted names) and
+  `"unsupported_fixtures"` (`{name: reason}`); `format` stays `prov.cli/v1alpha1`. os-install ships no
   fixtures yet. Docs: "Conformance fixtures" in `docs/kinds.md`, "Conformance" in
   `docs/adding-a-backend.md`.
 
