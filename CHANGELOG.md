@@ -148,9 +148,19 @@ may change incompatibly; every such change has a Migration paragraph. See
   only to a fresh temporary directory from `$TMPDIR` (never the item tree) that it removes,
   best effort; the directory's path never appears in the output. `kinds --json` adds
   `"fixtures"`, `backends --json` adds `"fixtures"` (sorted names) and
-  `"unsupported_fixtures"` (`{name: reason}`); `format` stays `prov.cli/v1alpha1`. os-install ships no
-  fixtures yet. Docs: "Conformance fixtures" in `docs/kinds.md`, "Conformance" in
+  `"unsupported_fixtures"` (`{name: reason}`); `format` stays `prov.cli/v1alpha1`. Docs: "Conformance fixtures" in `docs/kinds.md`, "Conformance" in
   `docs/adding-a-backend.md`.
+- os-install conformance fixtures: `conf-uefi-static`, `conf-uefi-dhcp`, `conf-bios-dhcp`,
+  `conf-two-disks` and the negative `conf-bad-gateway-family` and `conf-duplicate-user`
+  (synthetic data, tool-neutral `contains`/`absent` strings, `expect.error` pinning the
+  rule). `ubuntu-autoinstall` and `nixos-disko` give a table for each; nixos-disko skips
+  `conf-two-disks` (one-disk layouts). Both pass `prov conformance` (static checks of
+  rendered files only; nothing installed). Exported as generated, drift-tested
+  `conformance/os-install.v1alpha1.fixtures.json` (format `prov.conformance/v1alpha1`:
+  `kind`, `api_version`, `fixtures`, `backends` with `fixtures` tables and `unsupported`
+  reasons) via `prov.conformance.export_fixtures`, regenerated with `PROV_UPDATE_GOLDENS=1`
+  and included in the sdist, so other implementations can run the same cases. Docs:
+  "Exported fixtures" and the os-install fixtures in `docs/kinds.md`.
 
 ### Security
 

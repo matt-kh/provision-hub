@@ -375,8 +375,8 @@ tool) leaves the fixture `ok`, and is counted on the summary line, the last line
 (the `supported` line of an unsupported fixture is not counted as a skipped check).
 
 **Exit codes.** 0 when no fixture failed (ok or skipped, all of them skipped included), 1
-when one did, 2 for an unknown backend, a kind without fixtures (`kind os-install has no
-fixtures`; os-install ships none yet), a broken plugin that fails to load, or a temporary
+when one did, 2 for an unknown backend, a kind without fixtures (`kind <kind> has no
+fixtures`), a broken plugin that fails to load, or a temporary
 directory that could not be removed.
 
 **JSON** (`--json`): `{"format", "backend", "kind", "ok", "skipped_checks", "fixtures":
@@ -399,6 +399,56 @@ is an exit-2 error naming it `<tmp>` (look for `prov-conformance-*` in `$TMPDIR`
 never appears in the output: plugin text that names it, resolved through a symlinked
 `$TMPDIR` or not, reads `<tmp>`. The output is deterministic (the same plugins give
 byte-identical text and JSON).
+
+### Exported fixtures
+
+The fixtures of every kind prov ships, with each built-in backend's tables and reasons, are
+also published as generated, language-neutral files next to `schema/`:
+`conformance/<kind>.<version>.fixtures.json` (today
+[conformance/os-install.v1alpha1.fixtures.json](../conformance/os-install.v1alpha1.fixtures.json)).
+They are written by `prov.conformance.export_fixtures(kind, backends)` with the same
+canonical JSON as the schema files (sorted keys, indent 2, ASCII only, one trailing
+newline), regenerated with `PROV_UPDATE_GOLDENS=1 uv run pytest -q`, and a test fails when
+they drift from the code (`tests/test_conformance_builtin.py`). A kind without fixtures gets
+no file.
+
+```json
+{
+  "api_version": "prov/v1alpha1",
+  "backends": {
+    "<backend>": {
+      "fixtures": {"<fixture>": {"...": "the backend table"}},
+      "unsupported": {"<fixture>": "why the backend cannot express it"}
+    }
+  },
+  "fixtures": {
+    "<fixture>": {"spec": {"...": "core keys"}, "refs": {}, "expect": {"valid": true, "contains": ["..."]}}
+  },
+  "format": "prov.conformance/v1alpha1",
+  "kind": "os-install"
+}
+```
+
+- `format` names this layout; `kind` and `api_version` (the kind's current version) are the
+  envelope of every case.
+- `fixtures` is the kind's `FIXTURES` in normalised form: every fixture has `spec`, `refs`
+  (`{}` without) and `expect` with `valid` filled in; `error`, `outputs`, `contains` and
+  `absent` only when given. The meaning of each key is the one above.
+- `backends` holds the built-in backends of the kind, each with `fixtures` (its table per
+  fixture) and `unsupported` (fixture -> reason); a fixture in neither uses `{}` as its table.
+
+**Running the same cases in another implementation** (a port of a backend, or a different
+renderer reading prov specs): for each backend and each fixture not in `unsupported`,
+compose the spec `{"api_version", "kind", "backend": <backend>, ...spec, <backend>: <table>}`
+(plus a `refs` table of synthetic refs and the literal outputs when `refs` is not empty, as
+described above), then apply the checks of the table above that your tool can express:
+schema (`schema/<kind>.<version>.schema.json`) and your semantic rules, rejection for
+`valid = false` (with `error` contained in `<where>: <message>` of an error outside the
+backend table), deterministic render, the `contains` / `absent` strings in the rendered
+files, and your own static validator. These are **static** checks of rendered files only:
+passing them says nothing about whether an install works. The format is
+`prov.conformance/v1alpha1`: while alpha it changes only with a CHANGELOG entry, and new
+keys are additions that readers ignore.
 
 ## Kind plugins
 
@@ -554,6 +604,24 @@ Authoritative schema: [schema/os-install.v1alpha1.schema.json](../schema/os-inst
 Semantic checks: addresses in CIDR form, gateways and nameservers are IPs of the right
 family, interface and user names unique, every interface has an address or DHCP (the
 network checks only when `[network]` is present).
+
+Conformance fixtures (`prov conformance <backend>`; exported to
+[conformance/os-install.v1alpha1.fixtures.json](../conformance/os-install.v1alpha1.fixtures.json)),
+synthetic data only; each positive fixture expects its hostname and every disk path in the
+rendered files:
+
+| Fixture | Case | Expected |
+|---|---|---|
+| `conf-uefi-static` | UEFI, one by-id disk, one interface with a static 192.0.2.10/24 address, gateway and DNS, one sudo user with an `EXAMPLE` ssh key | valid; hostname, disk, address, gateway, nameserver and key rendered |
+| `conf-uefi-dhcp` | UEFI, one disk, one DHCP interface, the same user | valid; hostname, disk and key rendered; no 192.0.2. address |
+| `conf-bios-dhcp` | as `conf-uefi-dhcp` with `firmware = "bios"` | valid; hostname, disk and key rendered |
+| `conf-two-disks` | two disks (the first is the boot disk), DHCP | valid; hostname and both disks rendered |
+| `conf-bad-gateway-family` | an IPv6 address as `gateway4` | rejected: `network.interfaces[0].gateway4: 2001:db8::1 is not an IPv4 address` |
+| `conf-duplicate-user` | the same user twice | rejected: `users: user 'ops' defined more than once` |
+
+Skipped by a built-in backend: `nixos-disko` cannot express `conf-two-disks` (its layouts
+install to exactly one disk). Static validation only: passing them means the rendered files
+are consistent and pass the backend's `validate`, not that an install works.
 
 Backends: `ubuntu-autoinstall` (Ubuntu Server 22.04/24.04 NoCloud seed; layouts `lvm`,
 `zfs`, `mdraid`), `nixos-disko` (NixOS flake with disko and an offline USB installer; layout

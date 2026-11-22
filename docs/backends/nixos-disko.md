@@ -551,6 +551,16 @@ the ISO to Windows and write the stick with Rufus (DD mode) or balenaEtcher. An 
 builds natively on an x86_64 machine; an arm64 ISO needs an aarch64 builder or binfmt
 emulation.
 
+## Conformance
+
+`uv run prov conformance nixos-disko` renders the os-install fixtures
+([kinds.md](../kinds.md#os-install-v1alpha1)) with the table
+`release = "nixos-26.05"`, `state_version = "26.05"`. `conf-two-disks` is skipped
+(`UNSUPPORTED_FIXTURES`): the layouts install to exactly one disk. The other fixtures
+render without a `flake.lock` (only the ISO build needs one; `validate` checks it only when
+present), and `validate` reports `skipped: nix not installed` where nix is missing. Static
+checks only: nothing is locked, evaluated, built or installed.
+
 ## Not covered (follow-ups)
 
 Building the ISO or writing the USB from prov, unattended wipe-on-boot installers,

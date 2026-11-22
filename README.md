@@ -139,7 +139,8 @@ Then:
 uv sync                               # Python 3.12 by default (.python-version)
 uv run pytest -q
 uv run --python 3.10 pytest -q        # the oldest supported Python
-PROV_UPDATE_GOLDENS=1 uv run pytest   # accept intended changes to goldens and the schema file
+uv run prov conformance ubuntu-autoinstall   # os-install fixtures through a backend (static only)
+PROV_UPDATE_GOLDENS=1 uv run pytest   # accept intended changes to goldens, schema and conformance files
 ```
 
 Agents working on this repository: see [CLAUDE.md](CLAUDE.md).

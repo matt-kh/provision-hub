@@ -300,7 +300,10 @@ beyond its entry point.
 
 Checklist: `uv run pytest -q`, `uv run --python 3.10 pytest -q`,
 `uv run prov --root examples validate os-install/demo-talos-cp`, `uv run prov conformance <NAME>`
-(once the kind ships fixtures), `pre-commit run --all-files`.
+(exit 0: every fixture of the kind ok or skipped with a reason), then
+`PROV_UPDATE_GOLDENS=1 uv run pytest -q` to regenerate `conformance/<kind>.<version>.fixtures.json`
+(a built-in backend's tables and reasons are exported there; review the diff), and
+`pre-commit run --all-files`.
 
 ## 6. Conformance
 
@@ -327,6 +330,13 @@ UNSUPPORTED_FIXTURES = {"two-disks": "talos installs to exactly one disk"}
   dropped a fixture) fails `prov conformance` but does not stop your backend loading.
 - List a fixture in `UNSUPPORTED_FIXTURES` only when your tool truly cannot express it, with
   a reason a reader can check; never relax `validate` or `check` to make a fixture pass.
+- os-install ships fixtures ([kinds.md](kinds.md#os-install-v1alpha1)); an os-install
+  backend gives a table (or a reason) for each. A built-in backend's tables and reasons are
+  exported with the kind's fixtures to `conformance/<kind>.<version>.fixtures.json`
+  ([Exported fixtures](kinds.md#exported-fixtures)); regenerate it with
+  `PROV_UPDATE_GOLDENS=1 uv run pytest -q` after changing them.
+- Conformance is static: it proves the rendered files are consistent, never that an install
+  works.
 - Behavioural tests (does the installed host answer on its port, are the disks laid out?)
   are files you render, such as `goss.yaml`, and a command your `plan` prints for a human
   (`goss --gossfile goss.yaml validate`). `prov conformance` and every other prov command

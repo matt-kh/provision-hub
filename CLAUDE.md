@@ -19,7 +19,7 @@ uv run prov --root <dir> render os-install/demo && uv run prov --root <dir> vali
 uv run prov --root <dir> plan os-install/demo && uv run prov --root <dir> list
 uv run prov --root examples validate os-install/demo-lvm
 uv run prov --root examples plan os-install/demo-nixos-ext4   # nixos-disko USB steps
-uv run prov conformance <backend>        # kind FIXTURES through one backend (os-install has none yet: exit 2)
+uv run prov conformance ubuntu-autoinstall && uv run prov conformance nixos-disko   # os-install FIXTURES, static only
 pre-commit run --all-files               # same hooks as the CI lint job
 ```
 
@@ -47,7 +47,8 @@ stay minimal (pyyaml; tomli on 3.10 only) — justify any new one in the PR.
   `src/prov/refs.py` — resolves a spec's `[refs]` into `Context.refs`: reads only targets'
   `spec.toml` under the root, never through symlinks.
   `src/prov/conformance.py` — `prov conformance <backend>`: kind `FIXTURES` (+ backend
-  `FIXTURES` / `UNSUPPORTED_FIXTURES`) composed, checked, rendered and validated statically.
+  `FIXTURES` / `UNSUPPORTED_FIXTURES`) composed, checked, rendered and validated statically;
+  `export_fixtures` builds the published `conformance/*.fixtures.json`.
 - `src/prov/text.py` — the output-escaping predicate and helpers (`unsafe`, `esc`, `show`,
   `short_repr`) and `json_text`, the one JSON serialisation (schemas, every `--json`
   document; `ensure_ascii` is its printing boundary, values go in raw).
@@ -95,9 +96,11 @@ stay minimal (pyyaml; tomli on 3.10 only) — justify any new one in the PR.
 ## Goldens
 
 The committed `examples/<kind>/<name>/rendered/` directories are the golden files, and
-`schema/<kind>.<version>.schema.json` is generated from the code. After an intended change:
+`schema/<kind>.<version>.schema.json` and `conformance/<kind>.<version>.fixtures.json` (kind
+`FIXTURES` + built-in backends' tables and reasons) are generated from the code. After an
+intended change:
 
 ```sh
-PROV_UPDATE_GOLDENS=1 uv run pytest -q   # rewrites goldens and the schema files
-git diff examples/ schema/                # review every changed line before committing
+PROV_UPDATE_GOLDENS=1 uv run pytest -q   # rewrites goldens, schema and conformance files
+git diff examples/ schema/ conformance/   # review every changed line before committing
 ```
