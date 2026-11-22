@@ -332,8 +332,10 @@ def test_temp_path_never_printed(install, capsys):
 # --- exit 2 -------------------------------------------------------------------------------
 
 
-def test_builtin_backend_kind_without_fixtures(capsys):
-    assert run(capsys, "conformance", "ubuntu-autoinstall") == (2, "", "prov: error: kind os-install has no fixtures (FIXTURES); nothing to check for backend ubuntu-autoinstall\n")
+def test_builtin_backend_kind_with_fixtures_passes(capsys):
+    """os-install ships fixtures (part of tests/test_conformance_builtin.py); the built-in backend passes."""
+    code, out, err = run(capsys, "conformance", "ubuntu-autoinstall")
+    assert (code, err) == (0, "") and out.splitlines()[-1].startswith("conformance ubuntu-autoinstall (os-install): ")
 
 
 def test_unknown_backend(capsys):

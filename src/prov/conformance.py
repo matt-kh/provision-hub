@@ -471,6 +471,39 @@ def _unknown_names(plugin: Any, kind: Any, fixtures: Mapping[str, Any]) -> List[
     return sorted(out, key=lambda f: f.name)
 
 
+EXPORT_FORMAT = "prov.conformance/v1alpha1"
+
+
+def fixtures_file_name(kind: Any) -> str:
+    """``<kind>.<current version>.fixtures.json``, the exported conformance file of a kind."""
+    return f"{kind.NAME}.{kind.VERSIONS[-1]}.fixtures.json"
+
+
+def export_fixtures(kind: Any, backends: Mapping[str, Any]) -> Dict[str, Any]:
+    """The language-neutral conformance document of one kind (docs/kinds.md "Exported fixtures").
+
+    ``{"format", "kind", "api_version", "fixtures", "backends"}``: the kind's fixtures in the
+    ``prov.kinds.fixtures`` form (``expect`` defaults filled in) and, per backend of that kind
+    in ``backends`` (keyed by NAME), its tables (``fixtures``) and reasons (``unsupported``).
+    Kind-neutral: the caller chooses the backends (the published files use
+    ``prov.registry.builtin()``). Serialise with ``prov.text.json_text``.
+    """
+    return {
+        "format": EXPORT_FORMAT,
+        "kind": kind.NAME,
+        "api_version": api_versions(kind)[-1],
+        "fixtures": kinds.fixtures(kind),
+        "backends": {
+            name: {
+                "fixtures": copy.deepcopy(dict(getattr(plugin, "FIXTURES", {}))),
+                "unsupported": dict(getattr(plugin, "UNSUPPORTED_FIXTURES", {})),
+            }
+            for name, plugin in sorted(backends.items())
+            if plugin.KIND == kind.NAME
+        },
+    }
+
+
 def text_lines(result: Result) -> List[str]:
     """``<status>\\t<fixture>\\t<check>\\t<detail>`` per check, then a summary line; escaped."""
     lines = [f"{c.status}\t{esc(f.name)}\t{c.check}\t{esc(c.detail)}" for f in result.fixtures for c in f.checks]

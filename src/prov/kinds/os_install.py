@@ -117,3 +117,59 @@ def semantic(spec: Dict[str, Any]) -> List[Finding]:
     for dup in sorted({n for n in users if users.count(n) > 1}):
         out.append(Finding(ERROR, f"user {short_repr(dup)} defined more than once", "users"))
     return out
+
+
+# --- conformance fixtures (docs/kinds.md "Conformance fixtures") ---------------------------
+#
+# Synthetic intent specs every os-install backend should render (or say it cannot): the
+# expectations are tool-neutral strings any backend's files must contain. Static checks only;
+# none of these has been installed. Exported to conformance/os-install.v1alpha1.fixtures.json.
+
+_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE ops@example.com"
+_OPS = {"name": "ops", "groups": ["wheel"], "sudo": True, "ssh_authorized_keys": [_KEY]}
+_DHCP = {"interfaces": [{"name": "enp1s0", "dhcp4": True}]}
+_DISK0 = "/dev/disk/by-id/virtio-EXAMPLE_DISK_SERIAL_0000"
+_DISK1 = "/dev/disk/by-id/virtio-EXAMPLE_DISK_SERIAL_0001"
+_STATIC = {
+    "interfaces": [{"name": "enp1s0", "addresses": ["192.0.2.10/24"], "gateway4": "192.0.2.254"}],
+    "dns": {"nameservers": ["192.0.2.53"], "search": ["example.com"]},
+}
+
+FIXTURES: Dict[str, Any] = {
+    "conf-uefi-static": {
+        "spec": {
+            "hostname": "conf-uefi-static",
+            "domain": "example.com",
+            "firmware": "uefi",
+            "users": [_OPS],
+            "network": _STATIC,
+            "storage": {"disks": [_DISK0]},
+        },
+        "expect": {"contains": ["conf-uefi-static", _DISK0, "192.0.2.10", "192.0.2.254", "192.0.2.53", _KEY]},
+    },
+    "conf-uefi-dhcp": {
+        "spec": {"hostname": "conf-uefi-dhcp", "users": [_OPS], "network": _DHCP, "storage": {"disks": [_DISK0]}},
+        "expect": {"contains": ["conf-uefi-dhcp", _DISK0, _KEY], "absent": ["192.0.2."]},
+    },
+    "conf-bios-dhcp": {
+        "spec": {"hostname": "conf-bios-dhcp", "firmware": "bios", "users": [_OPS], "network": _DHCP, "storage": {"disks": [_DISK0]}},
+        "expect": {"contains": ["conf-bios-dhcp", _DISK0, _KEY]},
+    },
+    "conf-two-disks": {
+        "spec": {"hostname": "conf-two-disks", "users": [_OPS], "network": _DHCP, "storage": {"disks": [_DISK0, _DISK1]}},
+        "expect": {"contains": ["conf-two-disks", _DISK0, _DISK1]},
+    },
+    "conf-bad-gateway-family": {
+        "spec": {
+            "hostname": "conf-bad-gateway-family",
+            "users": [_OPS],
+            "network": {"interfaces": [{"name": "enp1s0", "addresses": ["192.0.2.10/24"], "gateway4": "2001:db8::1"}]},
+            "storage": {"disks": [_DISK0]},
+        },
+        "expect": {"valid": False, "error": "network.interfaces[0].gateway4: 2001:db8::1 is not an IPv4 address"},
+    },
+    "conf-duplicate-user": {
+        "spec": {"hostname": "conf-duplicate-user", "users": [_OPS, _OPS], "network": _DHCP, "storage": {"disks": [_DISK0]}},
+        "expect": {"valid": False, "error": "users: user 'ops' defined more than once"},
+    },
+}

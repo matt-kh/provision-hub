@@ -53,6 +53,13 @@ SCHEMA: Dict[str, Any] = {
     },
 }
 
+# Tables for the os-install conformance fixtures (prov conformance ubuntu-autoinstall).
+_FIXTURE_TABLE: Dict[str, Any] = {"release": "24.04", "storage": {"layout": "lvm"}}
+FIXTURES: Dict[str, Any] = {
+    name: _FIXTURE_TABLE
+    for name in ("conf-uefi-static", "conf-uefi-dhcp", "conf-bios-dhcp", "conf-two-disks", "conf-bad-gateway-family", "conf-duplicate-user")
+}
+
 KERNEL_CMDLINE = "autoinstall ds=nocloud"
 RAID_MIN_DISKS = {1: 2, 5: 3, 6: 4, 10: 4}
 

@@ -195,6 +195,16 @@ SCHEMA: Dict[str, Any] = {
     },
 }
 
+# Tables for the os-install conformance fixtures (prov conformance nixos-disko).
+_FIXTURE_TABLE: Dict[str, Any] = {"release": "nixos-26.05", "state_version": "26.05"}
+FIXTURES: Dict[str, Any] = {
+    name: _FIXTURE_TABLE
+    for name in ("conf-uefi-static", "conf-uefi-dhcp", "conf-bios-dhcp", "conf-bad-gateway-family", "conf-duplicate-user")
+}
+UNSUPPORTED_FIXTURES: Dict[str, str] = {
+    "conf-two-disks": "layouts ext4 and ext4-luks install to exactly one disk (check refuses storage.disks with more than one)",
+}
+
 ESP_MIN_MIB = 256
 BIOS_BOOT_SIZE = "1M"
 FREE = "100%FREE"

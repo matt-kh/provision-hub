@@ -1,4 +1,4 @@
-"""Shared test helpers. Set PROV_UPDATE_GOLDENS=1 to rewrite goldens and the published schemas."""
+"""Shared test helpers. Set PROV_UPDATE_GOLDENS=1 to rewrite goldens, the published schemas and conformance files."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ import pytest
 REPO = Path(__file__).resolve().parent.parent
 EXAMPLES = REPO / "examples"
 SCHEMA_DIR = REPO / "schema"
+CONFORMANCE_DIR = REPO / "conformance"
 UPDATE_GOLDENS = os.environ.get("PROV_UPDATE_GOLDENS") == "1"
 
 
