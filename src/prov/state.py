@@ -121,7 +121,10 @@ def render_digest(rendered_dir: Path) -> Optional[str]:
         raise ConfigError(f"{show(str(rendered_dir))} is a symlink; prov refuses to read through symlinks")
     if not rendered_dir.is_dir():
         return None
-    files, others = tree_entries(rendered_dir)
+    try:
+        files, others = tree_entries(rendered_dir)
+    except OSError as exc:
+        raise ConfigError(f"{show(str(rendered_dir))}: cannot read {show(os.fsdecode(exc.filename or ''))}: {exc.strerror or exc}") from None
     if others:
         rel = others[0].relative_to(rendered_dir).as_posix()
         raise ConfigError(f"{show(str(rendered_dir))}: symlink, special file or unsafely named file {show(rel)}; run prov render")
@@ -130,7 +133,11 @@ def render_digest(rendered_dir: Path) -> Optional[str]:
         rel = path.relative_to(rendered_dir).as_posix()
         if "\\" in rel:
             raise ConfigError(f"{show(str(rendered_dir))}: file name {show(rel)} holds a backslash; it has no stable digest")
-        entries.append((rel.encode("utf-8"), rel, hashlib.sha256(read_regular_bytes(path)).hexdigest()))
+        try:
+            data = read_regular_bytes(path)
+        except (OSError, NotRegularFileError) as exc:  # unreadable, or swapped for a symlink meanwhile
+            raise ConfigError(f"{show(str(rendered_dir))}: cannot read {show(rel)}: {getattr(exc, 'strerror', None) or exc}") from None
+        entries.append((rel.encode("utf-8"), rel, hashlib.sha256(data).hexdigest()))
     manifest = "".join(f"{digest}  {rel}\n" for _, rel, digest in sorted(entries))
     return DIGEST_PREFIX + hashlib.sha256(manifest.encode("utf-8")).hexdigest()
 
@@ -139,8 +146,8 @@ def render_digest(rendered_dir: Path) -> Optional[str]:
 
 
 def parse_time(text: str) -> datetime:
-    """An RFC 3339 timestamp (``Z`` or a numeric offset) as an aware datetime; ValueError otherwise."""
-    m = re.fullmatch(_RFC3339.strip("^$"), text)
+    """An RFC 3339 timestamp (``Z`` or a numeric offset, ASCII digits) as an aware UTC datetime; ValueError otherwise."""
+    m = re.fullmatch(_RFC3339.strip("^$"), text, re.ASCII)
     if m is None:
         raise ValueError(f"not an RFC 3339 timestamp: {short_repr(text)}")
     year, month, day, hour, minute, second, frac, zone = m.groups()
@@ -149,12 +156,16 @@ def parse_time(text: str) -> datetime:
     if zone != "Z":
         sign = 1 if zone[0] == "+" else -1
         tz = timezone(sign * timedelta(hours=int(zone[1:3]), minutes=int(zone[4:6])))
-    return datetime(int(year), int(month), int(day), int(hour), int(minute), int(second), micro, tzinfo=tz)
+    try:  # converting to UTC refuses instants outside years 1-9999 (e.g. 0001-01-01T00:00:00+01:00)
+        return datetime(int(year), int(month), int(day), int(hour), int(minute), int(second), micro, tzinfo=tz).astimezone(timezone.utc)
+    except OverflowError:
+        raise ValueError(f"out of range: {short_repr(text)}") from None
 
 
 def format_time(when: datetime) -> str:
-    """UTC, seconds precision, ``Z``: the form prov prints."""
-    return when.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    """UTC, seconds precision, ``Z``: the form prov prints (four-digit year, as RFC 3339 requires)."""
+    u = when.astimezone(timezone.utc)
+    return f"{u.year:04d}-{u.month:02d}-{u.day:02d}T{u.hour:02d}:{u.minute:02d}:{u.second:02d}Z"
 
 
 _UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
@@ -300,7 +311,8 @@ def lifecycle_of(record: Optional[Mapping[str, Any]], decommissioned: bool, now:
 
 
 def sync_of(record: Optional[Mapping[str, Any]], desired: Optional[str]) -> str:
-    """drifted (the host says so) wins; then pending (it applied another render), unknown or in-sync."""
+    """In this order: drifted (the host says so), unknown (no digest on either side), pending (it
+    applied another render), unknown (drift.status unknown), in-sync."""
     if record is None:
         return NO_SYNC
     drift = record["drift"]["status"]

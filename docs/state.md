@@ -30,17 +30,19 @@ record what they applied.
 
 The digest is sha256 over a `sha256sum` manifest: one `<sha256 hex>  <path>` line per file
 (two spaces, POSIX relative path, newline-terminated), ordered by the path's UTF-8 bytes. An
-agent reproduces it with coreutils and findutils alone, run inside `rendered/`:
+agent reproduces it with GNU coreutils and findutils alone (BusyBox and BSD `find` lack
+`-printf`), run inside `rendered/`:
 
 ```sh
+set -o pipefail   # an unreadable file or directory must fail, not hash part of the tree
 find . -type f -printf '%P\0' | LC_ALL=C sort -z | xargs -0r sha256sum -- | sha256sum
 # prefix the first field with "sha256:"
 ```
 
 An empty `rendered/` has the digest of the empty manifest. `prov digest` exits 2 when the
-item is not rendered, or when `rendered/` holds a symlink, a special file, an unsafely named
-file or a name with a backslash (`sha256sum` would escape it); `prov render` never writes
-any of those.
+item is not rendered, when `rendered/` holds a symlink, a special file, an unsafely named
+file or a name with a backslash (`sha256sum` would escape it; `prov render` never writes
+any of those), or when a file or directory in it cannot be read.
 
 ## State records
 
@@ -110,20 +112,23 @@ chars>\t<last seen>` (`-` where there is none). Findings go to stderr.
 | `planned` | no record yet |
 | `active` | the record's `last_seen` is within `--stale-after` (default 72h) |
 | `stale` | the record is older than that: the host stopped reporting |
-| `decommissioned` | `[state] decommissioned = true`, whatever the host reports; still reporting within `--stale-after` is a warning |
-| `invalid` | the spec or the record is invalid (error findings, exit 1) |
+| `decommissioned` | `[state] decommissioned = true`, whatever a valid record says; still reporting within `--stale-after` is a warning |
+| `invalid` | the spec or the record is invalid, or `spec.toml` cannot be read (error findings, exit 1); wins over `decommissioned` |
 
-| Sync | When |
+| Sync | When (the first row that matches) |
 |---|---|
 | `-` | no record |
-| `drifted` | the record's `drift.status` is `drifted` (wins over the rest) |
+| `drifted` | the record's `drift.status` is `drifted` |
+| `unknown` | the record has no `render_digest`, or `rendered/` is missing or unreadable |
 | `pending` | the record's `render_digest` differs from the digest of `rendered/`: a newer render waits to be applied |
-| `unknown` | no `render_digest` in the record, `rendered/` is missing, or `drift.status` is `unknown` |
+| `unknown` | `drift.status` is `unknown` |
 | `in-sync` | the host applied the current render and reports no drift |
 
 Exit codes: 0 whatever the lifecycle and sync (drift, pending and stale are states, not
-errors), 1 when an item, a record or the scan has an error, 2 for a usage error (an unknown
-or missing named ref, a missing state directory, a bad `--stale-after` or `--now`). A
+errors), 1 when an item, a record or the scan has an error (an unreadable `rendered/` file
+included), 2 for a usage error (an unknown or missing named ref, a missing state directory,
+a bad `--stale-after` or `--now`). `--state-dir ""` means no records even when
+`$PROV_STATE_DIR` is set. A
 `last_seen` more than five minutes in the future is a warning (clock skew on the host).
 
 `--json` prints one document ([Machine-readable output](kinds.md#machine-readable-output)):

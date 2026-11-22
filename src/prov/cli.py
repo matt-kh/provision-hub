@@ -159,7 +159,7 @@ def cmd_list(args: argparse.Namespace) -> int:
     directory whose kind is not installed) exit 0. Only names matching the item name pattern are ever printed raw; any other name appears as
     a capped repr, so a planted file name cannot forge output lines or terminal escapes.
     """
-    rows, problems = _scan_items(Path(args.root))
+    rows, problems, _ = _scan_items(Path(args.root))
     for ref, backend in rows:
         print(f"{ref}\t{backend}")
     # stdout is the listing (ref, backend); every finding, warnings included, goes to stderr
@@ -167,11 +167,13 @@ def cmd_list(args: argparse.Namespace) -> int:
     return EXIT_FINDINGS if has_errors(problems) else EXIT_OK
 
 
-def _scan_items(root: Path) -> Tuple[List[Tuple[str, str]], List[Finding]]:
-    """((ref, backend or "-") per item, findings) for every item under the root, as ``prov list`` shows them.
+def _scan_items(root: Path) -> Tuple[List[Tuple[str, str]], List[Finding], List[str]]:
+    """((ref, backend or "-") per item, findings, unreadable refs) for every item under the root.
 
-    Refs are listed only for item names matching the name pattern; the backend is "-" when
-    spec.toml does not name a valid backend id.
+    Rows are what ``prov list`` shows: refs only for item names matching the name pattern; the
+    backend is "-" when spec.toml does not name a valid backend id. Items with a valid name
+    whose spec.toml cannot be read or parsed are not rows but findings, and their refs are
+    returned as unreadable (``prov status`` still shows them, as invalid).
     """
     if not root.is_dir():
         raise ConfigError(f"root {show(str(root))} does not exist or is not a directory")
@@ -179,6 +181,7 @@ def _scan_items(root: Path) -> Tuple[List[Tuple[str, str]], List[Finding]]:
     known = kinds.discover()
     problems: List[Finding] = _unknown_dotted_kinds(root, known)
     rows: List[Tuple[str, str]] = []
+    unreadable: List[str] = []
     for kind in known:
         kdir = root / kind
         try:
@@ -215,10 +218,11 @@ def _scan_items(root: Path) -> Tuple[List[Tuple[str, str]], List[Finding]]:
                 raw = read_toml(entry / SPEC_FILE)
             except ConfigError as exc:
                 problems.append(Finding(ERROR, str(exc).replace(show(str(entry / SPEC_FILE)) + ": ", ""), ref))
+                unreadable.append(ref)
                 continue
             backend = raw.get("backend")
             rows.append((ref, backend if isinstance(backend, str) and re.fullmatch(ID_PATTERN.strip("^$"), backend) else "-"))
-    return rows, problems
+    return rows, problems, unreadable
 
 
 def _unknown_dotted_kinds(root: Path, known: Any) -> List[Finding]:
@@ -368,8 +372,8 @@ def cmd_digest(args: argparse.Namespace) -> int:
 
 
 def _state_dir(arg: Optional[str]) -> Optional[Path]:
-    """--state-dir, else $PROV_STATE_DIR, else None (no records: every item is planned)."""
-    value = arg or os.environ.get("PROV_STATE_DIR")
+    """--state-dir, else $PROV_STATE_DIR, else None (no records: every item is planned); an empty value is None."""
+    value = arg if arg is not None else os.environ.get("PROV_STATE_DIR")  # --state-dir "": no records
     if not value:
         return None
     path = Path(value)
@@ -396,6 +400,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     else:
         now = datetime.now(timezone.utc)
     scan_findings: List[Finding] = []
+    unreadable: List[str] = []
     if args.refs:
         refs = []
         for ref in args.refs:  # a named item must exist: a typo is a usage error, not a row
@@ -404,11 +409,14 @@ def cmd_status(args: argparse.Namespace) -> int:
                 raise ConfigError(f"{ref}: not found ({show(str(idir / SPEC_FILE))} does not exist)")
             refs.append(ref)
     else:
-        rows, scan_findings = _scan_items(root)
-        refs = [ref for ref, _ in rows]
+        rows, scan_findings, unreadable = _scan_items(root)
+        refs = sorted([ref for ref, _ in rows] + unreadable)  # unreadable items are rows too (invalid; the scan already reported why)
     backends = discover()
     statuses = []
     for ref in refs:
+        if ref in unreadable:  # spec.toml unreadable or not TOML: the scan finding says why
+            statuses.append(state.Status(ref, None, state.INVALID, state.NO_SYNC))
+            continue
         kind, name, idir = item_dir(root, ref)
         try:
             _, spec, findings, _ = check_item(root, kind, name, backends)

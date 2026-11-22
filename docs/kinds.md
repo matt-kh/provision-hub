@@ -569,7 +569,7 @@ prov validate <ref> --json                           # exit 0 ok, 1 findings
 {"format", "ref", "backend", "ok", "outputs", "refs", "findings": [{"level", "where", "message"}, ...]}
 
 prov plan <ref> --json
-{"format", "ref", "backend", "rendered_dir", "render_digest", "lines": [...]}   # render_digest null when not rendered
+{"format", "ref", "backend", "rendered_dir", "render_digest", "lines": [...]}   # render_digest null when not rendered or unreadable (the text header says why)
 
 prov digest <ref> --json
 {"format", "ref", "digest"}

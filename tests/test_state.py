@@ -445,3 +445,87 @@ def test_status_runs_nothing_and_writes_nothing(root, state_dir, capsys, monkeyp
     assert run(capsys, "--root", str(root), "digest", ITEM)[0] == 0
     after = {p: p.stat().st_mtime_ns for p in list(root.rglob("*")) + list(state_dir.rglob("*"))}
     assert before == after
+
+
+# ---------------------------------------------------------------- review hardening
+
+
+def test_parse_time_refuses_out_of_range_and_non_ascii():
+    for text in ("0001-01-01T00:00:00+01:00", "9999-12-31T23:59:59-01:00", "２０２６-01-01T00:00:00Z", "2026-02-30T00:00:00Z"):
+        with pytest.raises(ValueError):
+            state.parse_time(text)
+    assert state.format_time(state.parse_time("0999-12-31T23:59:59Z")) == "0999-12-31T23:59:59Z"
+
+
+@pytest.mark.parametrize("last_seen", ["0001-01-01T00:00:00+01:00", "9999-12-31T23:59:59-01:00"])
+def test_out_of_range_last_seen_is_an_invalid_record(root, state_dir, capsys, last_seen):
+    write_record(state_dir, last_seen=last_seen)
+    code, out, err = status(capsys, root, state_dir)
+    assert code == 1 and out == f"{ITEM}\tinvalid\t-\t-\t-\n" and "not a valid date and time" in err and "Traceback" not in err
+
+
+@pytest.mark.parametrize("now", ["0001-01-01T00:00:00+01:00", "２０２６-01-01T00:00:00Z"])
+def test_out_of_range_or_non_ascii_now_is_a_usage_error(root, capsys, now):
+    code, out, err = run(capsys, "--root", str(root), "status", "--now", now, "--json")
+    assert code == 2 and out == "" and "is not an RFC 3339 timestamp" in err
+
+
+needs_permissions = pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root reads everything")
+
+
+@needs_permissions
+def test_unreadable_rendered_file_is_an_item_error(root, state_dir, capsys):
+    target = root / ITEM / "rendered" / "user-data"
+    os.chmod(target, 0)
+    try:
+        code, out, err = status(capsys, root, state_dir)
+        assert code == 1 and out == f"{ITEM}\tplanned\t-\t-\t-\n" and "cannot read user-data" in err
+        code, out, err = run(capsys, "--root", str(root), "plan", ITEM)
+        assert code == 0 and "# render digest: none (" in out
+        assert run(capsys, "--root", str(root), "digest", ITEM)[0] == 2
+    finally:
+        os.chmod(target, 0o644)
+
+
+@needs_permissions
+def test_unlistable_rendered_directory_has_no_digest(root, capsys):
+    sub = root / ITEM / "rendered" / "sub"
+    sub.mkdir()
+    (sub / "f").write_text("x\n")
+    os.chmod(sub, 0)
+    try:
+        code, out, err = run(capsys, "--root", str(root), "digest", ITEM)
+        assert code == 2 and out == "" and "cannot read" in err
+    finally:
+        os.chmod(sub, 0o755)
+
+
+def test_item_with_invalid_toml_gets_an_invalid_row(root, state_dir, capsys):
+    bad = root / "os-install" / "broken"
+    bad.mkdir()
+    (bad / "spec.toml").write_text("api_version = \n")
+    code, out, err = status(capsys, root, state_dir)
+    assert code == 1 and "os-install/broken\tinvalid\t-\t-\t-\n" in out and f"{ITEM}\tplanned" in out
+    assert err.count("os-install/broken") == 1  # reported once, by the scan
+    code, doc = status_json(capsys, root, state_dir)
+    assert [i["ref"] for i in doc["items"]] == ["os-install/broken", ITEM] and doc["items"][0]["lifecycle"] == "invalid"
+
+
+def test_pending_wins_over_unknown_drift(root, state_dir, capsys):
+    write_record(state_dir, render_digest="sha256:" + "0" * 64, drift={"status": "unknown"})
+    assert status(capsys, root, state_dir)[1].split("\t")[2] == "pending"
+
+
+def test_invalid_record_wins_over_decommissioned(root, state_dir, capsys):
+    spec = root / ITEM / "spec.toml"
+    spec.write_text(spec.read_text() + "\n[state]\ndecommissioned = true\n")
+    write_record(state_dir, ref="os-install/other")
+    code, out, _ = status(capsys, root, state_dir)
+    assert code == 1 and out.split("\t")[1] == "invalid"
+
+
+def test_empty_state_dir_argument_means_no_records(root, state_dir, capsys, monkeypatch):
+    write_record(state_dir)
+    monkeypatch.setenv("PROV_STATE_DIR", str(state_dir))
+    code, out, _ = run(capsys, "--root", str(root), "status", "--state-dir", "", "--now", NOW)
+    assert code == 0 and out.split("\t")[1] == "planned"
