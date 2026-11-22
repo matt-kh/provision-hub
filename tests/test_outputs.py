@@ -101,8 +101,8 @@ def test_outputs_get_the_validated_spec_with_defaults(install, capsys):
     seen.clear()
     assert run(capsys, "--root", root, "validate", REF, "--json")[0] == 0
     assert seen == [
-        {"api_version": "example.org/v1alpha1", "kind": KIND, "backend": BACKEND, "hostname": "hub.example.org", "replicas": 1, BACKEND: {"port": 5001}}
-    ]
+        {"api_version": "example.org/v1alpha1", "kind": KIND, "backend": BACKEND, "hostname": "hub.example.org", "replicas": 1}
+    ]  # the backend's table is never passed: outputs stay tool-neutral
 
 
 def test_same_spec_gives_equal_outputs(install, capsys):
@@ -400,3 +400,13 @@ def test_kinds_json_shows_the_outputs_schema(extra_kinds, capsys):
     assert not hasattr(kinds.get("os-install"), "OUTPUTS") and not hasattr(kinds.get("os-install"), "outputs")
     code, text, _ = run(capsys, "kinds")
     assert code == 0 and "outputs" not in text.lower()  # text output unchanged
+
+
+def test_outputs_do_not_depend_on_the_backend_table():
+    """neutral_spec keeps the envelope and core keys only; unknown keys and backend tables are dropped."""
+    kind = outputs_kind()
+    spec = {"api_version": "example.org/v1alpha1", "kind": KIND, "backend": BACKEND, "hostname": "hub.example.org", "replicas": 1, BACKEND: {"port": 5001}}
+    neutral = kinds.neutral_spec(kind, spec)
+    assert BACKEND not in neutral and neutral["hostname"] == "hub.example.org"
+    neutral["hostname"] = "changed"
+    assert spec["hostname"] == "hub.example.org"

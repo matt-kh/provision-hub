@@ -92,7 +92,7 @@ may change incompatibly; every such change has a Migration paragraph. See
   unchanged. Shapes and the stability promise: "Machine-readable output" in `docs/kinds.md`.
 - Kind outputs: a kind may declare `OUTPUTS` (an object-schema fragment with
   `"additionalProperties": false`, under the backend `SCHEMA` rules) together with
-  `outputs(spec)`, a pure, deterministic function of the validated spec that returns plain
+  `outputs(spec)`, a pure, deterministic function of the tool-neutral part of the validated spec (envelope and core keys, never the backend's table) that returns plain
   JSON data (exact types, 64-bit integers, no control characters in strings or keys) valid
   against `OUTPUTS`. Declaring only one, an `OUTPUTS` or `PROPERTIES` that is not plain JSON
   data, or an output name that looks like a secret value is refused at load; the same

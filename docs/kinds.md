@@ -120,8 +120,10 @@ def outputs(spec):
   name is declared. Like `PROPERTIES`, it must be plain JSON data itself (no bytes, sets,
   tuples, objects or NaN in a `default`, `enum` or `const`). It is public API, versioned
   with the kind.
-- **`outputs(spec)`** gets the validated spec with defaults applied (envelope and backend
-  table included), the spec only: no item name, no file, no other item. It must be a **pure,
+- **`outputs(spec)`** gets the tool-neutral part of the validated spec with defaults
+  applied: the envelope and the kind's core keys, **never the backend's table**, so an
+  item's outputs mean the same whichever backend renders it, and switching backends never
+  changes what referring items render. The spec only: no item name, no file, no other item. It must be a **pure,
   deterministic** function of that spec: the same spec gives equal outputs on every run,
   machine and Python version, with no clock, randomness, environment, files, network or
   subprocesses. It gets a copy of the spec, so changing it changes nothing.
