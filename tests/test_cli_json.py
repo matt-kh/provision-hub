@@ -277,7 +277,7 @@ def test_plan_json(root, capsys):
     code, out, err = run(capsys, "--root", str(root), "plan", ITEM, "--json")
     assert code == 0 and err == ""
     doc = document(out)
-    assert sorted(doc) == ["backend", "lines", "ref", "rendered_dir"]
+    assert sorted(doc) == ["backend", "lines", "ref", "render_digest", "rendered_dir"]
     assert doc["ref"] == ITEM and doc["backend"] == "ubuntu-autoinstall"
     assert doc["rendered_dir"] == str((root / ITEM / "rendered").resolve())
     assert "\n".join(doc["lines"]) + "\n" == text  # the same lines, nothing added or escaped

@@ -15,6 +15,7 @@ from prov.kinds.common import DEFS
 from prov.registry import Context, builtin, discover, for_kind
 from prov.schema import ConfigError, read_toml, schema_file_name, schema_json, spec_schema, tomllib
 from prov.spec import check_spec, load_spec
+from prov.state import STATE_SCHEMA_FILE
 from prov.validate import ERROR, schema_errors
 
 STARTER = tomllib.loads(ubuntu.starter("demo"))
@@ -41,7 +42,7 @@ def test_published_schema_matches_code(name):
 
 
 def test_no_stale_published_schemas():
-    expected = {schema_file_name(k) for k in kinds.builtin().values()}
+    expected = {schema_file_name(k) for k in kinds.builtin().values()} | {STATE_SCHEMA_FILE}
     assert {p.name for p in SCHEMA_DIR.glob("*.json")} == expected
 
 

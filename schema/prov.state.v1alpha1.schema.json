@@ -1,0 +1,77 @@
+{
+  "$id": "https://raw.githubusercontent.com/matt-kh/provision-hub/main/schema/prov.state.v1alpha1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Observed state of one item, written by a host agent to <state-dir>/<kind>/<name>.json and read by prov status.",
+  "properties": {
+    "agent_version": {
+      "description": "Version of the agent that wrote the record.",
+      "maxLength": 128,
+      "type": "string"
+    },
+    "api_version": {
+      "const": "prov.state/v1alpha1",
+      "description": "Record format version; required."
+    },
+    "applied_rev": {
+      "description": "Commit of the infrastructure repository the host last applied (lowercase hex).",
+      "pattern": "^[0-9a-f]{7,64}$",
+      "type": "string"
+    },
+    "drift": {
+      "additionalProperties": false,
+      "description": "Whether the running host still matches what it applied.",
+      "properties": {
+        "detail": {
+          "description": "Free text for a human; never parsed.",
+          "maxLength": 4096,
+          "type": "string"
+        },
+        "status": {
+          "description": "clean, drifted or unknown (the agent cannot tell).",
+          "enum": [
+            "clean",
+            "drifted",
+            "unknown"
+          ]
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "type": "object"
+    },
+    "facts": {
+      "description": "Backend-specific facts about the host (hardware, disks, network); free-form.",
+      "type": "object"
+    },
+    "generation": {
+      "description": "Backend-specific generation of the running system (e.g. a NixOS system generation).",
+      "maxLength": 128,
+      "type": "string"
+    },
+    "last_seen": {
+      "description": "When the agent last reported, RFC 3339 with a Z or a numeric offset.",
+      "pattern": "^(\\d{4})-(\\d{2})-(\\d{2})T(\\d{2}):(\\d{2}):(\\d{2})(\\.\\d{1,9})?(Z|[+-]\\d{2}:\\d{2})$",
+      "type": "string"
+    },
+    "ref": {
+      "description": "The item this record observes, <kind>/<name>; equals the record's path.",
+      "pattern": "^(([a-z][a-z0-9-]*|[a-z]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?){2,}))/[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$",
+      "type": "string"
+    },
+    "render_digest": {
+      "description": "prov digest of the rendered/ tree the host last applied.",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    }
+  },
+  "required": [
+    "api_version",
+    "ref",
+    "last_seen",
+    "drift"
+  ],
+  "title": "prov state record v1alpha1",
+  "type": "object"
+}

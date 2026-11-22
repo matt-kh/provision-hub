@@ -107,6 +107,12 @@ def _read(path: Path) -> str:
         return fh.read().decode("utf-8", errors="replace")
 
 
+def tree_entries(rendered_dir: Path) -> Tuple[List[Path], List[Path]]:
+    """(regular files, others) under ``rendered_dir``, sorted; "others" as in ``_walk`` (never read)."""
+    files, others, _ = _walk(rendered_dir)
+    return files, others
+
+
 def existing_files(rendered_dir: Path) -> Dict[str, str]:
     """Read every regular file under ``rendered_dir`` (relative POSIX path -> text)."""
     if rendered_dir.is_symlink() or not rendered_dir.is_dir():
