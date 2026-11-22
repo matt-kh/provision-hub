@@ -61,7 +61,8 @@ def registry_kind(calls=None):
     def outputs(spec):
         if calls is not None:
             calls.append(spec["hostname"])
-        return {"url": f"https://{spec['hostname']}:{spec[BACKEND]['port']}", "tags": ["a", "b"], "meta": {"n": spec["replicas"]}}
+        # Core keys only: outputs never see the backend's table (prov.kinds.neutral_spec).
+        return {"url": f"https://{spec['hostname']}:5001", "tags": ["a", "b"], "meta": {"n": spec["replicas"]}}
 
     return fake_kind(OUTPUTS=OUTPUTS, outputs=outputs)
 
@@ -162,9 +163,9 @@ def test_target_change_makes_the_consumer_out_of_date(setup, tmp_path, capsys):
     write(tmp_path, f"{MIRROR}/m1", mirror_toml("m1"))
     assert run(capsys, "--root", root, "render", f"{MIRROR}/m1")[0] == 0
     hub = tmp_path / HUB / "spec.toml"
-    hub.write_text(hub.read_text().replace("port = 5001", "port = 5002"))
+    hub.write_text(hub.read_text().replace('"hub.example.org"', '"hub2.example.org"'))
     code, out, _ = run(capsys, "--root", root, "diff", f"{MIRROR}/m1")
-    assert code == 1 and "+m1.example.org mirrors https://hub.example.org:5002" in out
+    assert code == 1 and "+m1.example.org mirrors https://hub2.example.org:5001" in out
     code, _, err = run(capsys, "--root", root, "validate", f"{MIRROR}/m1")
     assert code == 1 and "error: rendered: out of date with spec.toml" in err
 
