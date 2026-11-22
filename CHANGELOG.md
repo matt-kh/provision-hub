@@ -125,6 +125,24 @@ may change incompatibly; every such change has a Migration paragraph. See
   consumers' `rendered/` out of date, by design. `kinds --json` adds `"refs"` (the kind's
   `REFS`, defaults filled in), `validate --json` adds `"refs"` (`{alias: {"ref", "kind",
   "outputs"}}`, `null` while the spec is invalid); `format` stays `prov.cli/v1alpha1`. Docs: "References" in `docs/kinds.md`.
+- Conformance: a kind may declare `FIXTURES` (`{name: {"spec", "refs", "expect"}}`: core
+  keys, literal outputs per reference alias, and `expect` with `valid` (default true),
+  `outputs`, `contains`, `absent`; checked when the kind loads), and a backend `FIXTURES`
+  (its table per fixture) and `UNSUPPORTED_FIXTURES` (fixture -> reason; both checked against
+  the kind's fixture names when the backend is discovered). New verb
+  `prov conformance <backend> [--json]` (`prov.conformance`) composes each fixture into a
+  spec with synthetic refs (`<target kind>/<alias>`) and checks, static and rendered only:
+  literal refs outputs against the target kind's `OUTPUTS` (skipped when it is not
+  installed), the spec (negative fixtures must be rejected), outputs, two equal renders, a
+  write to a temporary `rendered/` that diffs clean and rewrites with 0 changes, the
+  backend's `validate`, `contains`/`absent`, and the plan's refusal checks. Lines
+  `ok|FAIL|skipped<TAB><fixture><TAB><check><TAB><detail>` and a summary; exit 0, 1 when a
+  fixture failed, 2 for an unknown backend or a kind without fixtures. It never runs a plan,
+  a test runner or a subprocess, and writes only to a temporary directory outside `--root`
+  that it removes. `kinds --json` adds `"fixtures"`, `backends --json` adds `"fixtures"` and
+  `"unsupported_fixtures"`; `format` stays `prov.cli/v1alpha1`. os-install ships no
+  fixtures yet. Docs: "Conformance fixtures" in `docs/kinds.md`, "Conformance" in
+  `docs/adding-a-backend.md`.
 
 ### Security
 

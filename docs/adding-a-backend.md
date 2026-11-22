@@ -27,6 +27,8 @@ party) exposes:
 | `starter` | no | `starter(name: str) -> str` | `spec.toml` text for `prov init <kind>/<name> --backend <NAME>`; without it `init` refuses. |
 | `PRESERVE` | no | `tuple[str, ...]` | Relative paths of files a human may create in `rendered/` that `render` must keep and `diff`/`validate` must not report as stale (e.g. `("flake.lock",)`), written normalised (no `./`, `//` or trailing `/`). Only regular files are kept; symlinks and special files are removed whatever their name. A listed name that `render` also returns, or that is a parent directory of a file it returns, is not preserved (render's output wins), so list only names that are never a file or a parent directory of a file `render` produces. |
 | `REFS` | no | `dict` | Reserved; must be empty (`{}`) if present. References are declared by the kind (its `REFS`) and reach your backend as `ctx.refs`. |
+| `FIXTURES` | no | `dict[str, dict]` | Your backend table for each conformance fixture of the kind (`{"basic": {"port": 8081}}`); see [Conformance](#6-conformance). |
+| `UNSUPPORTED_FIXTURES` | no | `dict[str, str]` | Fixtures of the kind your backend cannot express, each with a reason; `prov conformance` reports them as skipped. |
 | `artifacts` | no | `artifacts(spec: dict) -> ...` | Reserved for `prov build` (a later release). |
 | `build` + `BUILD_TOOLS` | no | `build(spec, ctx)`, `BUILD_TOOLS: tuple[str, ...]` | Reserved for `prov build`, which will write only under the item's `build/`. A backend that defines `build` must list the local tools it runs in `BUILD_TOOLS`. |
 
@@ -48,7 +50,8 @@ The registry (`prov.registry.discover`) rejects a backend that lacks a required 
 optional members are not callable, whose `PLUGIN_API` is not `1`, whose `KIND` is unknown,
 whose `NAME` is not an id, differs from its entry-point name, is already registered or
 collides with an envelope key (`refs` included) or a core property of its kind, whose `REFS` is not empty,
-that defines `build` without `BUILD_TOOLS`, whose `PRESERVE` is not a list of safe, normalised relative
+that defines `build` without `BUILD_TOOLS`, whose `FIXTURES` or `UNSUPPORTED_FIXTURES` name a fixture its kind does not
+declare (or name one in both, or are not a dict of tables / of non-empty reasons), whose `PRESERVE` is not a list of safe, normalised relative
 paths, or whose `SCHEMA` uses an unsupported keyword, an
 invalid keyword value or an invalid `pattern`. Every call into a backend goes through
 `prov.registry.call_plugin` (the same guarded call prov uses for kinds, `prov.plugin`): an exception escaping it, or a result of the wrong type (`render`
@@ -295,4 +298,31 @@ beyond its entry point.
 4. Document the backend in the README table.
 
 Checklist: `uv run pytest -q`, `uv run --python 3.10 pytest -q`,
-`uv run prov --root examples validate os-install/demo-talos-cp`, `pre-commit run --all-files`.
+`uv run prov --root examples validate os-install/demo-talos-cp`, `uv run prov conformance <NAME>`
+(once the kind ships fixtures), `pre-commit run --all-files`.
+
+## 6. Conformance
+
+A kind may ship conformance fixtures ([kinds.md](kinds.md#conformance-fixtures)): small
+specs and what every backend must make of them. `uv run prov conformance <NAME>` renders
+each one through your backend and checks it statically: the spec is valid (or, for a
+negative fixture, rejected), outputs match, two renders are equal, the files written to a
+temporary `rendered/` diff clean and rewrite with no change, your `validate` reports no
+error, expected strings are present or absent, and your plan passes the plan refusal
+checks. It writes only to a temporary directory outside `--root`, removed afterwards, and
+runs nothing.
+
+```python
+FIXTURES = {"basic": {"role": "controlplane"}}           # your table per fixture
+UNSUPPORTED_FIXTURES = {"two-disks": "talos installs to exactly one disk"}
+```
+
+- Give a table for each fixture that needs one; without a table prov uses `{}`, which only
+  works when your `SCHEMA` requires no keys (else the fixture fails with `no backend table
+  for fixture`).
+- List a fixture in `UNSUPPORTED_FIXTURES` only when your tool truly cannot express it, with
+  a reason a reader can check; never relax `validate` or `check` to make a fixture pass.
+- Behavioural tests (does the installed host answer on its port, are the disks laid out?)
+  are files you render, such as `goss.yaml`, and a command your `plan` prints for a human
+  (`goss --gossfile goss.yaml validate`). `prov conformance` and every other prov command
+  only check that the plan lines are printable; prov never runs them.
