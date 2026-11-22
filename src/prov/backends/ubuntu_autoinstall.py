@@ -7,6 +7,7 @@ explicit curtin storage actions, netplan v2 network, ssh-key identity through th
 
 from __future__ import annotations
 
+import copy
 import shlex
 import shutil
 import subprocess
@@ -56,7 +57,7 @@ SCHEMA: Dict[str, Any] = {
 # Tables for the os-install conformance fixtures (prov conformance ubuntu-autoinstall).
 _FIXTURE_TABLE: Dict[str, Any] = {"release": "24.04", "storage": {"layout": "lvm"}}
 FIXTURES: Dict[str, Any] = {
-    name: _FIXTURE_TABLE
+    name: copy.deepcopy(_FIXTURE_TABLE)  # one table per fixture, never shared
     for name in ("conf-uefi-static", "conf-uefi-dhcp", "conf-bios-dhcp", "conf-two-disks", "conf-bad-gateway-family", "conf-duplicate-user")
 }
 

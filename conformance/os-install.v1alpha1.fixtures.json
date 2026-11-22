@@ -24,8 +24,200 @@
           "state_version": "26.05"
         }
       },
+      "specs": {
+        "conf-bad-gateway-family": {
+          "api_version": "prov/v1alpha1",
+          "backend": "nixos-disko",
+          "hostname": "conf-bad-gateway-family",
+          "kind": "os-install",
+          "network": {
+            "interfaces": [
+              {
+                "addresses": [
+                  "192.0.2.10/24"
+                ],
+                "gateway4": "2001:db8::1",
+                "name": "enp1s0"
+              }
+            ]
+          },
+          "nixos-disko": {
+            "release": "nixos-26.05",
+            "state_version": "26.05"
+          },
+          "storage": {
+            "disks": [
+              "/dev/disk/by-id/virtio-EXAMPLE_DISK_SERIAL_0000"
+            ]
+          },
+          "users": [
+            {
+              "groups": [],
+              "name": "ops",
+              "ssh_authorized_keys": [
+                "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE ops@example.net"
+              ],
+              "sudo": true
+            }
+          ]
+        },
+        "conf-bios-dhcp": {
+          "api_version": "prov/v1alpha1",
+          "backend": "nixos-disko",
+          "firmware": "bios",
+          "hostname": "conf-bios-dhcp",
+          "kind": "os-install",
+          "network": {
+            "interfaces": [
+              {
+                "dhcp4": true,
+                "name": "enp1s0"
+              }
+            ]
+          },
+          "nixos-disko": {
+            "release": "nixos-26.05",
+            "state_version": "26.05"
+          },
+          "storage": {
+            "disks": [
+              "/dev/disk/by-id/virtio-EXAMPLE_DISK_SERIAL_0000"
+            ]
+          },
+          "users": [
+            {
+              "groups": [],
+              "name": "ops",
+              "ssh_authorized_keys": [
+                "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE ops@example.net"
+              ],
+              "sudo": true
+            }
+          ]
+        },
+        "conf-duplicate-user": {
+          "api_version": "prov/v1alpha1",
+          "backend": "nixos-disko",
+          "hostname": "conf-duplicate-user",
+          "kind": "os-install",
+          "network": {
+            "interfaces": [
+              {
+                "dhcp4": true,
+                "name": "enp1s0"
+              }
+            ]
+          },
+          "nixos-disko": {
+            "release": "nixos-26.05",
+            "state_version": "26.05"
+          },
+          "storage": {
+            "disks": [
+              "/dev/disk/by-id/virtio-EXAMPLE_DISK_SERIAL_0000"
+            ]
+          },
+          "users": [
+            {
+              "groups": [],
+              "name": "ops",
+              "ssh_authorized_keys": [
+                "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE ops@example.net"
+              ],
+              "sudo": true
+            },
+            {
+              "groups": [],
+              "name": "ops",
+              "ssh_authorized_keys": [
+                "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE ops@example.net"
+              ],
+              "sudo": true
+            }
+          ]
+        },
+        "conf-uefi-dhcp": {
+          "api_version": "prov/v1alpha1",
+          "backend": "nixos-disko",
+          "hostname": "conf-uefi-dhcp",
+          "kind": "os-install",
+          "network": {
+            "interfaces": [
+              {
+                "dhcp4": true,
+                "name": "enp1s0"
+              }
+            ]
+          },
+          "nixos-disko": {
+            "release": "nixos-26.05",
+            "state_version": "26.05"
+          },
+          "storage": {
+            "disks": [
+              "/dev/disk/by-id/virtio-EXAMPLE_DISK_SERIAL_0000"
+            ]
+          },
+          "users": [
+            {
+              "groups": [],
+              "name": "ops",
+              "ssh_authorized_keys": [
+                "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE ops@example.net"
+              ],
+              "sudo": true
+            }
+          ]
+        },
+        "conf-uefi-static": {
+          "api_version": "prov/v1alpha1",
+          "backend": "nixos-disko",
+          "domain": "example.com",
+          "firmware": "uefi",
+          "hostname": "conf-uefi-static",
+          "kind": "os-install",
+          "network": {
+            "dns": {
+              "nameservers": [
+                "192.0.2.53"
+              ],
+              "search": [
+                "example.org"
+              ]
+            },
+            "interfaces": [
+              {
+                "addresses": [
+                  "192.0.2.10/24"
+                ],
+                "gateway4": "192.0.2.254",
+                "name": "enp1s0"
+              }
+            ]
+          },
+          "nixos-disko": {
+            "release": "nixos-26.05",
+            "state_version": "26.05"
+          },
+          "storage": {
+            "disks": [
+              "/dev/disk/by-id/virtio-EXAMPLE_DISK_SERIAL_0000"
+            ]
+          },
+          "users": [
+            {
+              "groups": [],
+              "name": "ops",
+              "ssh_authorized_keys": [
+                "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE ops@example.net"
+              ],
+              "sudo": true
+            }
+          ]
+        }
+      },
       "unsupported": {
-        "conf-two-disks": "layouts ext4 and ext4-luks install to exactly one disk (check refuses storage.disks with more than one)"
+        "conf-two-disks": "layouts ext4 and ext4-luks install to exactly one disk; a spec with more than one disk in storage.disks is refused"
       }
     },
     "ubuntu-autoinstall": {
@@ -67,6 +259,244 @@
           }
         }
       },
+      "specs": {
+        "conf-bad-gateway-family": {
+          "api_version": "prov/v1alpha1",
+          "backend": "ubuntu-autoinstall",
+          "hostname": "conf-bad-gateway-family",
+          "kind": "os-install",
+          "network": {
+            "interfaces": [
+              {
+                "addresses": [
+                  "192.0.2.10/24"
+                ],
+                "gateway4": "2001:db8::1",
+                "name": "enp1s0"
+              }
+            ]
+          },
+          "storage": {
+            "disks": [
+              "/dev/disk/by-id/virtio-EXAMPLE_DISK_SERIAL_0000"
+            ]
+          },
+          "ubuntu-autoinstall": {
+            "release": "24.04",
+            "storage": {
+              "layout": "lvm"
+            }
+          },
+          "users": [
+            {
+              "groups": [],
+              "name": "ops",
+              "ssh_authorized_keys": [
+                "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE ops@example.net"
+              ],
+              "sudo": true
+            }
+          ]
+        },
+        "conf-bios-dhcp": {
+          "api_version": "prov/v1alpha1",
+          "backend": "ubuntu-autoinstall",
+          "firmware": "bios",
+          "hostname": "conf-bios-dhcp",
+          "kind": "os-install",
+          "network": {
+            "interfaces": [
+              {
+                "dhcp4": true,
+                "name": "enp1s0"
+              }
+            ]
+          },
+          "storage": {
+            "disks": [
+              "/dev/disk/by-id/virtio-EXAMPLE_DISK_SERIAL_0000"
+            ]
+          },
+          "ubuntu-autoinstall": {
+            "release": "24.04",
+            "storage": {
+              "layout": "lvm"
+            }
+          },
+          "users": [
+            {
+              "groups": [],
+              "name": "ops",
+              "ssh_authorized_keys": [
+                "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE ops@example.net"
+              ],
+              "sudo": true
+            }
+          ]
+        },
+        "conf-duplicate-user": {
+          "api_version": "prov/v1alpha1",
+          "backend": "ubuntu-autoinstall",
+          "hostname": "conf-duplicate-user",
+          "kind": "os-install",
+          "network": {
+            "interfaces": [
+              {
+                "dhcp4": true,
+                "name": "enp1s0"
+              }
+            ]
+          },
+          "storage": {
+            "disks": [
+              "/dev/disk/by-id/virtio-EXAMPLE_DISK_SERIAL_0000"
+            ]
+          },
+          "ubuntu-autoinstall": {
+            "release": "24.04",
+            "storage": {
+              "layout": "lvm"
+            }
+          },
+          "users": [
+            {
+              "groups": [],
+              "name": "ops",
+              "ssh_authorized_keys": [
+                "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE ops@example.net"
+              ],
+              "sudo": true
+            },
+            {
+              "groups": [],
+              "name": "ops",
+              "ssh_authorized_keys": [
+                "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE ops@example.net"
+              ],
+              "sudo": true
+            }
+          ]
+        },
+        "conf-two-disks": {
+          "api_version": "prov/v1alpha1",
+          "backend": "ubuntu-autoinstall",
+          "hostname": "conf-two-disks",
+          "kind": "os-install",
+          "network": {
+            "interfaces": [
+              {
+                "dhcp4": true,
+                "name": "enp1s0"
+              }
+            ]
+          },
+          "storage": {
+            "disks": [
+              "/dev/disk/by-id/virtio-EXAMPLE_DISK_SERIAL_0000",
+              "/dev/disk/by-id/virtio-EXAMPLE_DISK_SERIAL_0001"
+            ]
+          },
+          "ubuntu-autoinstall": {
+            "release": "24.04",
+            "storage": {
+              "layout": "lvm"
+            }
+          },
+          "users": [
+            {
+              "groups": [],
+              "name": "ops",
+              "ssh_authorized_keys": [
+                "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE ops@example.net"
+              ],
+              "sudo": true
+            }
+          ]
+        },
+        "conf-uefi-dhcp": {
+          "api_version": "prov/v1alpha1",
+          "backend": "ubuntu-autoinstall",
+          "hostname": "conf-uefi-dhcp",
+          "kind": "os-install",
+          "network": {
+            "interfaces": [
+              {
+                "dhcp4": true,
+                "name": "enp1s0"
+              }
+            ]
+          },
+          "storage": {
+            "disks": [
+              "/dev/disk/by-id/virtio-EXAMPLE_DISK_SERIAL_0000"
+            ]
+          },
+          "ubuntu-autoinstall": {
+            "release": "24.04",
+            "storage": {
+              "layout": "lvm"
+            }
+          },
+          "users": [
+            {
+              "groups": [],
+              "name": "ops",
+              "ssh_authorized_keys": [
+                "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE ops@example.net"
+              ],
+              "sudo": true
+            }
+          ]
+        },
+        "conf-uefi-static": {
+          "api_version": "prov/v1alpha1",
+          "backend": "ubuntu-autoinstall",
+          "domain": "example.com",
+          "firmware": "uefi",
+          "hostname": "conf-uefi-static",
+          "kind": "os-install",
+          "network": {
+            "dns": {
+              "nameservers": [
+                "192.0.2.53"
+              ],
+              "search": [
+                "example.org"
+              ]
+            },
+            "interfaces": [
+              {
+                "addresses": [
+                  "192.0.2.10/24"
+                ],
+                "gateway4": "192.0.2.254",
+                "name": "enp1s0"
+              }
+            ]
+          },
+          "storage": {
+            "disks": [
+              "/dev/disk/by-id/virtio-EXAMPLE_DISK_SERIAL_0000"
+            ]
+          },
+          "ubuntu-autoinstall": {
+            "release": "24.04",
+            "storage": {
+              "layout": "lvm"
+            }
+          },
+          "users": [
+            {
+              "groups": [],
+              "name": "ops",
+              "ssh_authorized_keys": [
+                "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE ops@example.net"
+              ],
+              "sudo": true
+            }
+          ]
+        }
+      },
       "unsupported": {}
     }
   },
@@ -97,12 +527,10 @@
         },
         "users": [
           {
-            "groups": [
-              "wheel"
-            ],
+            "groups": [],
             "name": "ops",
             "ssh_authorized_keys": [
-              "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE ops@example.com"
+              "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE ops@example.net"
             ],
             "sudo": true
           }
@@ -114,7 +542,7 @@
         "contains": [
           "conf-bios-dhcp",
           "/dev/disk/by-id/virtio-EXAMPLE_DISK_SERIAL_0000",
-          "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE ops@example.com"
+          "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE ops@example.net"
         ],
         "valid": true
       },
@@ -137,12 +565,10 @@
         },
         "users": [
           {
-            "groups": [
-              "wheel"
-            ],
+            "groups": [],
             "name": "ops",
             "ssh_authorized_keys": [
-              "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE ops@example.com"
+              "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE ops@example.net"
             ],
             "sudo": true
           }
@@ -172,22 +598,18 @@
         },
         "users": [
           {
-            "groups": [
-              "wheel"
-            ],
+            "groups": [],
             "name": "ops",
             "ssh_authorized_keys": [
-              "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE ops@example.com"
+              "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE ops@example.net"
             ],
             "sudo": true
           },
           {
-            "groups": [
-              "wheel"
-            ],
+            "groups": [],
             "name": "ops",
             "ssh_authorized_keys": [
-              "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE ops@example.com"
+              "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE ops@example.net"
             ],
             "sudo": true
           }
@@ -222,12 +644,10 @@
         },
         "users": [
           {
-            "groups": [
-              "wheel"
-            ],
+            "groups": [],
             "name": "ops",
             "ssh_authorized_keys": [
-              "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE ops@example.com"
+              "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE ops@example.net"
             ],
             "sudo": true
           }
@@ -242,7 +662,7 @@
         "contains": [
           "conf-uefi-dhcp",
           "/dev/disk/by-id/virtio-EXAMPLE_DISK_SERIAL_0000",
-          "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE ops@example.com"
+          "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE ops@example.net"
         ],
         "valid": true
       },
@@ -264,12 +684,10 @@
         },
         "users": [
           {
-            "groups": [
-              "wheel"
-            ],
+            "groups": [],
             "name": "ops",
             "ssh_authorized_keys": [
-              "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE ops@example.com"
+              "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE ops@example.net"
             ],
             "sudo": true
           }
@@ -280,11 +698,13 @@
       "expect": {
         "contains": [
           "conf-uefi-static",
+          "example.com",
+          "example.org",
           "/dev/disk/by-id/virtio-EXAMPLE_DISK_SERIAL_0000",
           "192.0.2.10",
           "192.0.2.254",
           "192.0.2.53",
-          "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE ops@example.com"
+          "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE ops@example.net"
         ],
         "valid": true
       },
@@ -299,7 +719,7 @@
               "192.0.2.53"
             ],
             "search": [
-              "example.com"
+              "example.org"
             ]
           },
           "interfaces": [
@@ -319,12 +739,10 @@
         },
         "users": [
           {
-            "groups": [
-              "wheel"
-            ],
+            "groups": [],
             "name": "ops",
             "ssh_authorized_keys": [
-              "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE ops@example.com"
+              "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE ops@example.net"
             ],
             "sudo": true
           }

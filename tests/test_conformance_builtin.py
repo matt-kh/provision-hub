@@ -14,9 +14,11 @@ from conftest import CONFORMANCE_DIR, SCHEMA_DIR, UPDATE_GOLDENS
 
 from prov import kinds, registry
 from prov.cli import main
-from prov.conformance import EXPORT_FORMAT, export_fixtures, fixtures_file_name
+from prov.conformance import EXPORT_FORMAT, compose_spec, export_fixtures, fixture_refs, fixtures_file_name
 from prov.schema import api_versions, schema_file_name
+from prov.spec import check_raw
 from prov.text import json_text
+from prov.validate import ERROR
 
 BUILTIN_BACKENDS = registry.builtin()
 KINDS_WITH_FIXTURES = {name: kind for name, kind in kinds.builtin().items() if getattr(kind, "FIXTURES", None)}
@@ -79,6 +81,8 @@ def test_exported_fixtures_match_code(name):
 
 def test_no_stale_exported_fixtures():
     expected = {fixtures_file_name(k) for k in KINDS_WITH_FIXTURES.values()}
+    stale = sorted(p.name for p in CONFORMANCE_DIR.glob("*") if p.name not in expected)
+    assert not stale, f"stale exported fixtures (no built-in kind with fixtures writes them): delete conformance/{', conformance/'.join(stale)} by hand"
     assert {p.name for p in CONFORMANCE_DIR.glob("*")} == expected
 
 
@@ -90,17 +94,31 @@ def test_exported_header_and_backends(name):
     assert (doc["format"], doc["kind"], doc["api_version"]) == (EXPORT_FORMAT, kind.NAME, api_versions(kind)[-1])
     assert sorted(doc["backends"]) == sorted(n for n, b in BUILTIN_BACKENDS.items() if b.KIND == kind.NAME)
     for entry in doc["backends"].values():
-        assert sorted(entry) == ["fixtures", "unsupported"]
+        assert sorted(entry) == ["fixtures", "specs", "unsupported"]
         assert not set(entry["fixtures"]) & set(entry["unsupported"])
         assert set(entry["fixtures"]) | set(entry["unsupported"]) <= set(doc["fixtures"])
+        assert set(entry["specs"]) == set(doc["fixtures"]) - set(entry["unsupported"])
 
 
 @pytest.mark.parametrize("name", sorted(KINDS_WITH_FIXTURES))
-def test_exported_cases_compose_as_a_non_python_reader_would(name):
-    """Envelope + fixture spec + backend table: positive cases validate against the published schema.
+def test_exported_specs_are_what_conformance_checks(name):
+    """Each exported spec is compose_spec's result, the path prov conformance takes."""
+    kind = KINDS_WITH_FIXTURES[name]
+    doc = exported(kind)
+    for backend, entry in doc["backends"].items():
+        plugin = BUILTIN_BACKENDS[backend]
+        for fixture_name, raw in entry["specs"].items():
+            fixture = doc["fixtures"][fixture_name]
+            assert raw == compose_spec(kind, plugin, fixture, entry["fixtures"].get(fixture_name, {}), fixture_refs(kind, fixture))
+            assert (raw["api_version"], raw["kind"], raw["backend"]) == (doc["api_version"], doc["kind"], backend)
 
-    What an implementation in another language does with the file (docs/kinds.md "Exported
-    fixtures"); semantic rules (the negative fixtures) are beyond JSON Schema.
+
+@pytest.mark.parametrize("name", sorted(KINDS_WITH_FIXTURES))
+def test_exported_specs_validate_against_the_published_schema(name):
+    """What an implementation in another language does with the file (docs/kinds.md "Exported fixtures").
+
+    Every composed spec is schema-valid, negative fixtures included: they test semantic rules
+    (the kind's ``semantic`` or a backend's ``check``), which JSON Schema cannot express.
     """
     kind = KINDS_WITH_FIXTURES[name]
     doc = exported(kind)
@@ -108,13 +126,24 @@ def test_exported_cases_compose_as_a_non_python_reader_would(name):
     validator = jsonschema.Draft202012Validator(schema)
     checked = 0
     for backend, entry in doc["backends"].items():
-        for fixture_name, fixture in doc["fixtures"].items():
-            if fixture_name in entry["unsupported"] or fixture["refs"]:
-                continue
-            raw = {"api_version": doc["api_version"], "kind": doc["kind"], "backend": backend, **fixture["spec"]}
-            raw[backend] = entry["fixtures"].get(fixture_name, {})
-            errors = [e.message for e in validator.iter_errors(raw)]
-            if fixture["expect"]["valid"]:
-                assert errors == [], (backend, fixture_name)
-                checked += 1
+        for fixture_name, raw in entry["specs"].items():
+            assert [e.message for e in validator.iter_errors(raw)] == [], (backend, fixture_name)
+            checked += 1
     assert checked
+
+
+@pytest.mark.parametrize("name", sorted(BUILTIN_BACKENDS))
+def test_unsupported_fixtures_are_really_refused(name):
+    """An UNSUPPORTED_FIXTURES entry is true: composed with a valid table of the backend, the spec has an error."""
+    plugin = BUILTIN_BACKENDS[name]
+    kind = kinds.builtin()[plugin.KIND]
+    fixtures = kinds.fixtures(kind)
+    valid_table = next(iter(plugin.FIXTURES.values()))
+    for fixture_name in getattr(plugin, "UNSUPPORTED_FIXTURES", {}):
+        fixture = fixtures[fixture_name]
+        raw = compose_spec(kind, plugin, fixture, valid_table, fixture_refs(kind, fixture))
+        _, findings, _ = check_raw(raw, kind.NAME, fixture_name, registry.discover(), lambda *a: ({}, []))
+        errors = [f for f in findings if f.level == ERROR]
+        assert errors, (name, fixture_name)
+        if name == "nixos-disko" and fixture_name == "conf-two-disks":
+            assert [str(f.where) for f in errors] == ["storage.disks"]

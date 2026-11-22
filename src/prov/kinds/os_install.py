@@ -124,52 +124,78 @@ def semantic(spec: Dict[str, Any]) -> List[Finding]:
 # Synthetic intent specs every os-install backend should render (or say it cannot): the
 # expectations are tool-neutral strings any backend's files must contain. Static checks only;
 # none of these has been installed. Exported to conformance/os-install.v1alpha1.fixtures.json.
+#
+# Each hostname equals its fixture name: prov conformance uses the fixture name as the item
+# name, and os-install's NAME_KEY warns when they differ. Every entry is built by its own
+# function call, so no dict or list is shared between fixtures (or between users).
+#
+# Limits, stated because they are not checked: firmware handling is not checked by content
+# (there is no tool-neutral marker for BIOS against UEFI), and neither is the rule that the
+# first disk is the boot disk; the fixtures check only that the hostname, the disks and the
+# network values reach the rendered files.
 
-_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE ops@example.com"
-_OPS = {"name": "ops", "groups": ["wheel"], "sudo": True, "ssh_authorized_keys": [_KEY]}
-_DHCP = {"interfaces": [{"name": "enp1s0", "dhcp4": True}]}
+_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE ops@example.net"
 _DISK0 = "/dev/disk/by-id/virtio-EXAMPLE_DISK_SERIAL_0000"
 _DISK1 = "/dev/disk/by-id/virtio-EXAMPLE_DISK_SERIAL_0001"
-_STATIC = {
-    "interfaces": [{"name": "enp1s0", "addresses": ["192.0.2.10/24"], "gateway4": "192.0.2.254"}],
-    "dns": {"nameservers": ["192.0.2.53"], "search": ["example.com"]},
-}
+
+
+def _ops() -> Dict[str, Any]:
+    """One sudo user with a fake key; no groups (sudo = true carries the intent, group names differ per OS)."""
+    return {"name": "ops", "groups": [], "sudo": True, "ssh_authorized_keys": [_KEY]}
+
+
+def _dhcp() -> Dict[str, Any]:
+    return {"interfaces": [{"name": "enp1s0", "dhcp4": True}]}
+
+
+def _spec(hostname: str, network: Dict[str, Any], disks: List[str], **extra: Any) -> Dict[str, Any]:
+    return {"hostname": hostname, "users": [_ops()], "network": network, "storage": {"disks": list(disks)}, **extra}
+
 
 FIXTURES: Dict[str, Any] = {
     "conf-uefi-static": {
-        "spec": {
-            "hostname": "conf-uefi-static",
-            "domain": "example.com",
-            "firmware": "uefi",
-            "users": [_OPS],
-            "network": _STATIC,
-            "storage": {"disks": [_DISK0]},
-        },
-        "expect": {"contains": ["conf-uefi-static", _DISK0, "192.0.2.10", "192.0.2.254", "192.0.2.53", _KEY]},
+        "spec": _spec(
+            "conf-uefi-static",
+            {
+                "interfaces": [{"name": "enp1s0", "addresses": ["192.0.2.10/24"], "gateway4": "192.0.2.254"}],
+                "dns": {"nameservers": ["192.0.2.53"], "search": ["example.org"]},
+            },
+            [_DISK0],
+            domain="example.com",
+            firmware="uefi",
+        ),
+        # The domain (example.com), the search domain (example.org) and the key comment
+        # (example.net) differ, so each string is found only where that value is rendered.
+        # "192.0.2.10" without its prefix length: backends spell the address differently
+        # (192.0.2.10/24, or address + prefixLength); the gateway is .254 so that it is not
+        # a substring of the address.
+        "expect": {"contains": ["conf-uefi-static", "example.com", "example.org", _DISK0, "192.0.2.10", "192.0.2.254", "192.0.2.53", _KEY]},
     },
     "conf-uefi-dhcp": {
-        "spec": {"hostname": "conf-uefi-dhcp", "users": [_OPS], "network": _DHCP, "storage": {"disks": [_DISK0]}},
+        "spec": _spec("conf-uefi-dhcp", _dhcp(), [_DISK0]),
         "expect": {"contains": ["conf-uefi-dhcp", _DISK0, _KEY], "absent": ["192.0.2."]},
     },
+    # Firmware is not checked by content (no tool-neutral marker): this fixture proves only that
+    # a backend accepts and renders firmware = "bios" with the same hostname, disk and key.
     "conf-bios-dhcp": {
-        "spec": {"hostname": "conf-bios-dhcp", "firmware": "bios", "users": [_OPS], "network": _DHCP, "storage": {"disks": [_DISK0]}},
+        "spec": _spec("conf-bios-dhcp", _dhcp(), [_DISK0], firmware="bios"),
         "expect": {"contains": ["conf-bios-dhcp", _DISK0, _KEY]},
     },
+    # Both disks must appear; which one boots is not checked by content.
     "conf-two-disks": {
-        "spec": {"hostname": "conf-two-disks", "users": [_OPS], "network": _DHCP, "storage": {"disks": [_DISK0, _DISK1]}},
+        "spec": _spec("conf-two-disks", _dhcp(), [_DISK0, _DISK1]),
         "expect": {"contains": ["conf-two-disks", _DISK0, _DISK1]},
     },
     "conf-bad-gateway-family": {
-        "spec": {
-            "hostname": "conf-bad-gateway-family",
-            "users": [_OPS],
-            "network": {"interfaces": [{"name": "enp1s0", "addresses": ["192.0.2.10/24"], "gateway4": "2001:db8::1"}]},
-            "storage": {"disks": [_DISK0]},
-        },
+        "spec": _spec(
+            "conf-bad-gateway-family",
+            {"interfaces": [{"name": "enp1s0", "addresses": ["192.0.2.10/24"], "gateway4": "2001:db8::1"}]},
+            [_DISK0],
+        ),
         "expect": {"valid": False, "error": "network.interfaces[0].gateway4: 2001:db8::1 is not an IPv4 address"},
     },
     "conf-duplicate-user": {
-        "spec": {"hostname": "conf-duplicate-user", "users": [_OPS, _OPS], "network": _DHCP, "storage": {"disks": [_DISK0]}},
+        "spec": {**_spec("conf-duplicate-user", _dhcp(), [_DISK0]), "users": [_ops(), _ops()]},
         "expect": {"valid": False, "error": "users: user 'ops' defined more than once"},
     },
 }
