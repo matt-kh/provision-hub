@@ -161,5 +161,5 @@ def test_name_warning_caps_the_value():
     from prov.spec import name_findings
     from prov import kinds
 
-    findings = name_findings(kinds.KINDS["os-install"], {"hostname": "h" * 500}, "demo")
+    findings = name_findings(kinds.get("os-install"), {"hostname": "h" * 500}, "demo")
     assert len(findings) == 1 and len(str(findings[0])) < 200

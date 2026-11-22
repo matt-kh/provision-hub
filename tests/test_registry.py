@@ -229,7 +229,7 @@ def test_composed_schema_passes_its_own_check():
     from prov.schema import spec_schema
     from prov.validate import check_schema_fragment
 
-    for name, kind in kinds.KINDS.items():
+    for name, kind in kinds.builtin().items():
         composed = spec_schema(kind, for_kind(builtin(), name), DEFS)
         check_schema_fragment(composed, f"<{name}>", defs=composed["$defs"])
 

@@ -15,6 +15,7 @@ from ..validate import ERROR, WARNING, Finding
 from .common import string, string_list
 
 NAME = "os-install"
+PLUGIN_API = 1
 VERSIONS = ("v1alpha1",)
 
 # The core property that should equal the item directory name; a mismatch is a warning.

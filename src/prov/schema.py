@@ -32,9 +32,17 @@ DRAFT = "https://json-schema.org/draft/2020-12/schema"
 SCHEMA_BASE_URL = "https://raw.githubusercontent.com/matt-kh/provision-hub/main/schema/"
 SPEC_FILE = "spec.toml"
 
-# Item names keep the host-name shape (one DNS label); kind and backend names are ids.
+# Item names keep the host-name shape (one DNS label); backend names and prov's own kind
+# names are ids.
 NAME_PATTERN = "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$"
 ID_PATTERN = "^[a-z][a-z0-9-]*$"
+# Kind names: a bare id (reserved for kinds of the provision-hub distribution), or a dotted
+# third-party name ``<label>.<group>`` (``registry.example.org``) whose group is a dotted DNS
+# name (Kubernetes CRD style: ``example.org``, never just ``org``) and the kind's api group
+# (``example.org/v1alpha1``). At most KIND_MAX_LENGTH characters.
+_LABEL = "[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?"
+KIND_PATTERN = f"^([a-z][a-z0-9-]*|[a-z]([a-z0-9-]{{0,61}}[a-z0-9])?(\\.{_LABEL}){{2,}})$"
+KIND_MAX_LENGTH = 253
 
 ENVELOPE_KEYS = ("api_version", "kind", "backend")
 # Top-level keys of the pre-v1alpha1 host.toml format; reserved, and answered with a migration hint.
@@ -47,9 +55,35 @@ class ConfigError(Exception):
     """A usage or configuration error (exit code 2)."""
 
 
+def kind_group(name: str) -> str:
+    """The api group of a kind name: ``prov`` for a bare name, the domain part of a dotted one.
+
+    ``os-install`` -> ``prov``; ``registry.example.org`` -> ``example.org``.
+    """
+    _, dot, domain = name.partition(".")
+    return domain if dot else API_GROUP
+
+
 def api_versions(kind: Any) -> List[str]:
-    """The ``api_version`` values a kind accepts, oldest first (``prov/v1alpha1``)."""
-    return [f"{API_GROUP}/{v}" for v in kind.VERSIONS]
+    """The ``api_version`` values a kind accepts, oldest first (``prov/v1alpha1``, ``example.org/v1alpha1``)."""
+    group = kind_group(kind.NAME)
+    return [f"{group}/{v}" for v in kind.VERSIONS]
+
+
+def schema_id(kind: Any) -> str:
+    """The ``$id`` of a kind's composed schema.
+
+    A kind's ``SCHEMA_URL`` is a base URL (``https://.../``) to which the file name
+    ``<NAME>.<version>.schema.json`` is appended, like ``SCHEMA_BASE_URL`` for the published
+    files of provision-hub's bare kinds; a dotted kind without one gets
+    ``urn:prov:schema:<NAME>:<version>``.
+    """
+    base = getattr(kind, "SCHEMA_URL", None)
+    if base is not None:
+        return base + schema_file_name(kind)
+    if "." not in kind.NAME:
+        return SCHEMA_BASE_URL + schema_file_name(kind)
+    return f"urn:prov:schema:{kind.NAME}:{kind.VERSIONS[-1]}"
 
 
 def schema_file_name(kind: Any) -> str:
@@ -79,7 +113,7 @@ def spec_schema(kind: Any, backends: Mapping[str, Any], defs: Mapping[str, Any])
     doc = (getattr(kind, "__doc__", None) or "").strip().splitlines()
     return {
         "$schema": DRAFT,
-        "$id": SCHEMA_BASE_URL + schema_file_name(kind),
+        "$id": schema_id(kind),
         "title": f"prov {kind.NAME} {version}",
         "description": doc[0] if doc else f"prov {kind.NAME} spec.",
         "type": "object",

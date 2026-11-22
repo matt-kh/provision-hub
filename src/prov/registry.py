@@ -2,9 +2,12 @@
 
 A backend is a module (or any object) exposing the contract in ``docs/adding-a-backend.md``:
 ``NAME``, ``KIND``, ``SCHEMA``, ``render(spec, ctx)``, ``validate(rendered_dir)``,
-``plan(spec, ctx)``, and optionally ``check(spec, ctx)``, ``starter(name)``, ``PRESERVE``, ``REFS``,
-``artifacts(spec)`` and ``build(spec, ctx)`` with ``BUILD_TOOLS`` (build and references are
-reserved: checked here, not called yet).
+``plan(spec, ctx)``, and optionally ``PLUGIN_API`` (default 1), ``check(spec, ctx)``,
+``starter(name)``, ``PRESERVE``, ``REFS``, ``artifacts(spec)`` and ``build(spec, ctx)`` with
+``BUILD_TOOLS`` (build and references are reserved: checked here, not called yet).
+
+prov's own backends register the same way as third-party ones; ``builtin()`` is the set the
+provision-hub distribution registers, and core never imports a backend module.
 
 Backends are looked up by (KIND, NAME); NAME is globally unique, so it is the dict key.
 Every call into a backend goes through ``call_plugin``, which turns exceptions and wrongly
@@ -21,6 +24,7 @@ from types import MappingProxyType, ModuleType
 from typing import Any, Callable, Dict, Mapping, Tuple
 
 from . import kinds
+from . import plugin as plugins
 from .kinds.common import DEFS
 from .render import check_paths
 from .schema import ID_PATTERN, ConfigError
@@ -53,12 +57,14 @@ def check_contract(plugin: Backend, origin: str) -> None:
     if not isinstance(plugin.NAME, str) or not isinstance(plugin.KIND, str) or not isinstance(plugin.SCHEMA, dict):
         raise ConfigError(f"backend plugin {origin}: NAME and KIND must be str and SCHEMA a dict")
     if not re.fullmatch(ID_PATTERN.strip("^$"), plugin.NAME):
-        raise ConfigError(f"backend plugin {origin}: NAME {plugin.NAME!r} must match {ID_PATTERN}")
-    if plugin.KIND not in kinds.KINDS:
-        raise ConfigError(f"backend plugin {origin}: unknown KIND {plugin.KIND!r} (known kinds: {', '.join(sorted(kinds.KINDS)) or 'none'})")
-    owner = kinds.core_keys().get(plugin.NAME)
+        raise ConfigError(f"backend plugin {origin}: NAME {short_repr(plugin.NAME)} must match {ID_PATTERN}")
+    plugins.check_api(plugin, f"backend plugin {origin}", required=False)
+    known = kinds.discover()
+    if plugin.KIND not in known:
+        raise ConfigError(f"backend plugin {origin}: unknown KIND {short_repr(plugin.KIND)} (known kinds: {kinds.unknown_hint(known)})")
+    owner = kinds.core_keys(plugin.KIND).get(plugin.NAME)
     if owner is not None:
-        raise ConfigError(f"backend plugin {origin}: NAME {plugin.NAME!r} collides with a core property of {owner}")
+        raise ConfigError(f"backend plugin {origin}: NAME {short_repr(plugin.NAME)} collides with a core property of {owner}")
     if hasattr(plugin, "PRESERVE"):
         keep = plugin.PRESERVE
         if not (isinstance(keep, (tuple, list)) and all(isinstance(p, str) for p in keep)):
@@ -88,16 +94,13 @@ def discover() -> Dict[str, Backend]:
     """Load every registered backend, keyed by NAME, ordered by (KIND, NAME)."""
     found: Dict[str, Backend] = {}
     for ep in entry_points(group=ENTRY_POINT_GROUP):
-        origin = esc(f"{ep.name} = {ep.value}")
-        try:
-            plugin = ep.load()
-        except (Exception, SystemExit) as exc:  # a broken plugin must not hide the others' errors; KeyboardInterrupt still stops prov
-            raise ConfigError(f"cannot load backend plugin {origin}: {esc(str(exc))}") from exc
+        origin = plugins.origin(ep)
+        plugin = plugins.load(ep, "backend")
         check_contract(plugin, origin)
         if plugin.NAME != ep.name:
-            raise ConfigError(f"backend plugin {origin}: entry-point name differs from NAME {plugin.NAME!r}")
+            raise ConfigError(f"backend plugin {origin}: entry-point name differs from NAME {short_repr(plugin.NAME)}")
         if plugin.NAME in found:
-            raise ConfigError(f"backend {plugin.NAME!r} is registered twice")
+            raise ConfigError(f"backend {short_repr(plugin.NAME)} is registered twice")
         found[plugin.NAME] = plugin
     return dict(sorted(found.items(), key=lambda item: (item[1].KIND, item[0])))
 
@@ -124,10 +127,16 @@ def lookup(backends: Mapping[str, Backend], kind: str, name: Any) -> Backend:
 
 
 def builtin() -> Dict[str, ModuleType]:
-    """The backends shipped with prov; the published JSON Schemas are generated from these."""
-    from .backends import nixos_disko, ubuntu_autoinstall
+    """The backends the provision-hub distribution registers; the published JSON Schemas are generated from these.
 
-    return {nixos_disko.NAME: nixos_disko, ubuntu_autoinstall.NAME: ubuntu_autoinstall}
+    Read from the entry points (never imported by name), so third-party plugins, broken or
+    not, do not change the published files.
+    """
+    found: Dict[str, ModuleType] = {}
+    for ep in entry_points(group=ENTRY_POINT_GROUP):
+        if plugins.from_distribution(ep):
+            found[ep.name] = plugins.load(ep, "backend")
+    return dict(sorted(found.items()))
 
 
 def _utf8(text: str) -> bool:
@@ -168,14 +177,5 @@ def call_plugin(plugin: Backend, method: str, *args: Any) -> Any:
     Plugin text in the message (exception text, a plugin's own ConfigError) is escaped with
     ``prov.text.esc``, so it is always one printable line.
     """
-    name = short_repr(getattr(plugin, "NAME", "?"))
-    try:
-        result = getattr(plugin, method)(*args)
-    except ConfigError as exc:  # a plugin's own error: keep its text, escaped, and name the plugin
-        raise ConfigError(f"backend {name} failed in {method}: {esc(str(exc))}") from exc
-    except (Exception, SystemExit) as exc:  # a plugin calling sys.exit is a plugin failure too
-        raise ConfigError(f"backend {name} failed in {method}: {esc(type(exc).__name__)}: {esc(str(exc))}") from exc
     check, expected = RETURN_CHECKS.get(method, (lambda v: True, ""))
-    if not check(result):
-        raise ConfigError(f"backend {name} failed in {method}: returned {esc(type(result).__name__)}, expected {expected}")
-    return result
+    return plugins.guarded_call(f"backend {short_repr(getattr(plugin, 'NAME', '?'))}", plugin, method, args, check, expected)

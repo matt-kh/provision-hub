@@ -29,9 +29,43 @@ def _no_external_tools(monkeypatch):
     monkeypatch.setattr(nixos_disko.shutil, "which", lambda name: None)
 
 
-def fake_entry_point(plugin, name=None, value="tests.fake"):
-    """An entry point whose load() returns ``plugin``."""
-    return types.SimpleNamespace(name=name or plugin.NAME, value=value, load=lambda: plugin)
+# The distribution whose entry points are prov's built-ins; only its kinds may use bare names.
+PROVISION_HUB = "provision-hub"
+
+
+def fake_entry_point(plugin, name=None, value="tests.fake", dist=None):
+    """An entry point whose load() returns ``plugin``; ``dist`` names the distribution that registers it.
+
+    Without ``dist`` the plugin is a third-party one; ``dist=PROVISION_HUB`` makes it look
+    built-in (a bare test kind such as ``widget`` needs that).
+    """
+    return types.SimpleNamespace(
+        name=name or plugin.NAME, value=value, load=lambda: plugin, dist=types.SimpleNamespace(name=dist) if dist else None
+    )
+
+
+@pytest.fixture(autouse=True)
+def _fresh_kinds():
+    """Kinds are discovered once per process; every test starts and ends with a fresh lookup."""
+    from prov import kinds
+
+    kinds.reset()
+    yield
+    kinds.reset()
+
+
+@pytest.fixture
+def extra_kinds(monkeypatch):
+    """Register additional kinds next to the installed ones: extra_kinds(ep, ...)."""
+    import prov.kinds as kinds
+
+    real = list(entry_points(group=kinds.ENTRY_POINT_GROUP))
+
+    def install(*eps):
+        monkeypatch.setattr(kinds, "entry_points", lambda group: real + list(eps))
+        kinds.reset()
+
+    return install
 
 
 @pytest.fixture

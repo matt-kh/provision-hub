@@ -6,7 +6,7 @@ Render, validate and plan reusable provisioning artefacts (OS installs, OS image
 
 - Kind: cli
 - Languages: python (uv)
-- Notes: prov CLI: versioned spec.toml per item (`<kind>/<name>`), core kinds plus backend plugins (render/validate/plan), never applies; synthetic examples only (RFC 5737/3849 IPs, example.com); Python 3.10+ with uv.
+- Notes: prov CLI: versioned spec.toml per item (`<kind>/<name>`), kind and backend plugins (render/validate/plan), never applies; synthetic examples only (RFC 5737/3849 IPs, example.com); Python 3.10+ with uv.
 
 `prov` turns one versioned `spec.toml` per item into the artefacts its backend produces,
 checks them, and prints the steps a human runs to apply them. It never applies anything: no
@@ -23,8 +23,9 @@ and OS images (`image`, planned). See [docs/kinds.md](docs/kinds.md).
 | `os-install` | `ubuntu-autoinstall` (22.04, 24.04) | NoCloud seed: autoinstall `user-data`, `meta-data`, `kernel-cmdline` | storage layouts `lvm`, `zfs`, `mdraid` |
 | `os-install` | `nixos-disko` (nixpkgs `nixos-YY.MM`) | pinned flake: `flake.nix`, `configuration.nix`, `disko.nix`, `installer.nix` (offline USB installer ISO) | layouts `ext4`, `ext4-luks` (LVM on LUKS); systemd-networkd or NetworkManager, optional GNOME desktop; see [docs/backends/nixos-disko.md](docs/backends/nixos-disko.md) |
 
-New backends follow [docs/adding-a-backend.md](docs/adding-a-backend.md); new kinds are a
-core change ([docs/kinds.md](docs/kinds.md)). Same spec and pinned inputs, same rendered
+New backends follow [docs/adding-a-backend.md](docs/adding-a-backend.md); new kinds are
+plugins too, dotted for third parties (`registry.example.org`,
+[docs/kinds.md](docs/kinds.md#kind-plugins)). Same spec and pinned inputs, same rendered
 bytes: [docs/determinism.md](docs/determinism.md).
 
 ## Usage
@@ -43,9 +44,9 @@ uv run prov list                                              # every item under
 
 | Command | Does | Exit codes |
 |---|---|---|
-| `prov kinds` | list the kinds and their api versions | 0 |
+| `prov kinds` | list the installed kinds (plugins) and their api versions | 0, 2 (broken kind plugin) |
 | `prov backends [--kind K]` | list registered backends (name, kind) | 0, 2 |
-| `prov list` | list every item under the root (ref, backend) | 0, 1 findings (symlinked, unreadable or invalidly named entries), 2 missing root |
+| `prov list` | list every item under the root (ref, backend); findings on stderr | 0 (also with warnings, e.g. a dotted directory whose kind is not installed), 1 findings (symlinked, unreadable or invalidly named entries), 2 missing root |
 | `prov schema <kind> [--backend B]` | print the JSON Schema of a kind | 0, 2 |
 | `prov init <ref> --backend B [--force]` | write a starter `<kind>/<name>/spec.toml` | 0, 2 |
 | `prov render <ref>` | make `<kind>/<name>/rendered/` hold exactly the rendered files | 0, 2 |

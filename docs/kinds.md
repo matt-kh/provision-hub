@@ -20,16 +20,18 @@ argument (`prov render os-install/demo`) and the syntax future cross-references 
 | Part | Owned by | Defined in |
 |---|---|---|
 | Envelope: `api_version`, `kind`, `backend` | prov core | `src/prov/schema.py`, `src/prov/spec.py` |
-| Core keys of the kind (`hostname`, `storage`, ...) | the kind | `src/prov/kinds/<kind>.py` |
+| Core keys of the kind (`hostname`, `storage`, ...) | the kind | the kind plugin's module (`src/prov/kinds/os_install.py`) |
 | Backend table (`[ubuntu-autoinstall]`) | the backend | its module's `SCHEMA` |
 | Shared definitions (`#/$defs/user`, `#/$defs/interface`) | prov core | `src/prov/kinds/common.py` |
 
-Kinds are part of prov core and **not pluggable**: all backends of a kind read its core keys,
-so a kind is a shared public format and changes to it are reviewed here. Backends are
-plugins ([adding-a-backend.md](adding-a-backend.md)) and anyone can add one for an existing
-kind without touching core code. provision-hub ships backends but champions none: the core
-keys of a kind describe the item, not one tool's input format. Kinds and backends alike
-render deterministically ([determinism.md](determinism.md)).
+Kinds and backends are both **plugins**, registered through entry points: prov's own
+`os-install` the same way as a third-party kind (see [Kind plugins](#kind-plugins)), and
+backends as in [adding-a-backend.md](adding-a-backend.md). Core never imports a particular
+kind or backend. All backends of a kind read its core keys, so a kind is a shared public
+format: changes to it are reviewed where the kind lives (this repository for provision-hub's
+own kinds). provision-hub ships kinds and backends but champions none: the core keys of a
+kind describe the item, not one tool's input format. Kinds and backends alike, built-in or
+third-party, render deterministically ([determinism.md](determinism.md)).
 
 ## Item directories
 
@@ -40,7 +42,7 @@ render deterministically ([determinism.md](determinism.md)).
 <root>/<kind>/<name>/build/        # reserved for a later `prov build`; gitignored
 ```
 
-The kind directory must be a kind prov knows (`prov kinds`), the name one DNS label
+The kind directory must be an installed kind (`prov kinds`), the name one DNS label
 (`[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?`). `<kind>/`, `<name>/`, `rendered/` and `build/` may
 not be symlinks.
 
@@ -66,17 +68,94 @@ A kind module exposes:
 
 | Member | Meaning |
 |---|---|
-| `NAME` | kind id, `[a-z][a-z0-9-]*`; the directory `<root>/<NAME>/` |
-| `VERSIONS` | accepted versions, oldest first: `("v1alpha1",)` → `api_version = "prov/v1alpha1"` |
+| `NAME` | kind id; the directory `<root>/<NAME>/` and the entry-point name. Bare (`[a-z][a-z0-9-]*`) only for provision-hub's own kinds; third-party kinds are dotted (see [Kind plugins](#kind-plugins)) |
+| `PLUGIN_API` | the kind contract version the module implements; required, `1` today |
+| `VERSIONS` | accepted versions, oldest first: `("v1alpha1",)` → `api_version = "<group>/v1alpha1"` (`prov/v1alpha1` for `os-install`) |
 | `PROPERTIES` | JSON Schema of the core keys; may `$ref` `#/$defs/<name>` from `common.DEFS` |
 | `REQUIRED` | required core keys |
 | `semantic(spec)` | `list[Finding]` for rules JSON Schema cannot express |
 | `REFS` | cross-spec references; reserved, empty for now |
 | `NAME_KEY` | optional: the core key that should equal the item name (a mismatch is a warning) |
+| `SCHEMA_URL` | optional: an `https://` base URL ending in `/`; the composed schema's `$id` is `SCHEMA_URL` + `<NAME>.<version>.schema.json` |
+
+The module docstring's first line is shown by `prov kinds`. Every call into a kind
+(`semantic`) goes through a guarded call: an exception, or a result that is not a
+`list[Finding]`, is reported as `kind '<NAME>' failed in semantic: ...` with exit code 2,
+its text escaped like a backend's.
 
 Core composes `envelope + PROPERTIES + every backend table` into one JSON Schema per kind
-(`prov schema <kind>`); the published file is `schema/<kind>.<version>.schema.json`, and a
-test keeps it equal to the code.
+(`prov schema <kind>`); for provision-hub's own kinds the published file is
+`schema/<kind>.<version>.schema.json` (composed over the built-in backends), and a test keeps
+it equal to the code.
+
+## Kind plugins
+
+A kind is a module registered under the `prov.kinds` entry-point group; the entry-point name
+equals `NAME`. provision-hub registers its own kinds this way in its `pyproject.toml`:
+
+```toml
+[project.entry-points."prov.kinds"]
+os-install = "prov.kinds.os_install"
+```
+
+A third-party package does the same in its own `pyproject.toml` (then `uv add` it next to
+prov and run `uv sync`; `uv run prov kinds` should list it):
+
+```toml
+[project.entry-points."prov.kinds"]
+"registry.example.org" = "prov_registry.kind"
+```
+
+**Names.** Bare names (`os-install`) are reserved for kinds the `provision-hub`
+distribution registers. Every other kind is **dotted**, Kubernetes CRD style:
+`<label>.<group>`, one lowercase DNS label followed by a dotted domain you control
+(`registry.example.org`), at most 253 characters. The group needs a dot itself, so
+`registry.example` (group `example`) is refused. The name is still one path segment, a
+directory name on Linux/POSIX file systems (prov runs on POSIX systems only):
+
+```text
+<root>/registry.example.org/<name>/spec.toml     # ref: registry.example.org/<name>
+```
+
+**api group.** The domain part is the kind's api group: `api_version =
+"example.org/v1alpha1"` for `registry.example.org`. Bare kinds use the group `prov`
+(`prov/v1alpha1`); a dotted kind's group always contains a dot, so it can never be `prov`,
+and a spec of a dotted kind with `api_version = "prov/v1alpha1"` is rejected like any
+other unsupported version.
+
+**Schema `$id`.** `SCHEMA_URL`, when a kind sets it, is a base URL: `https://`, printable
+ASCII without spaces, ending in `/`. prov appends the file name, just as it does for
+provision-hub's published files: `SCHEMA_URL = "https://schemas.example.org/prov/"` gives
+`$id` `https://schemas.example.org/prov/registry.example.org.v1alpha1.schema.json`. A dotted
+kind without one gets `urn:prov:schema:<NAME>:<version>`
+(`urn:prov:schema:registry.example.org:v1alpha1`). provision-hub's kinds keep the URL of
+their published file.
+
+**`PLUGIN_API`.** Each kind declares the contract version it implements, `PLUGIN_API = 1`;
+a kind without it, or with another value, is refused. Backends may declare it too (optional,
+default 1). The number changes only when the contract changes incompatibly.
+
+**Discovery.** prov loads every kind once per run. It refuses, with exit code 2 and one
+line naming the entry point (both, for a duplicate), a kind that cannot be imported, breaks
+the contract above, whose entry-point name differs from `NAME`, that is registered twice,
+or that uses a bare name without coming from the `provision-hub` distribution.
+`prov.kinds.builtin()` reads only that distribution's entry points, so a broken third-party
+kind never changes the published schemas.
+
+The distribution check is a **naming rule, not a security boundary**: installed plugins
+are trusted code, imported and run by prov like any other dependency, and a package can
+claim any distribution name. It keeps third-party kinds out of the bare namespace by
+convention; a fork that wants to own bare names must keep the distribution name
+`provision-hub`.
+
+`prov list` warns about a dotted directory under the root that holds items but whose kind
+is not installed, and about a symlinked dotted directory (never followed). Its warnings go
+to stderr, like its errors, so stdout stays the `<ref>\t<backend>` listing; warnings alone
+exit 0.
+
+**Backends of a plugin kind** follow [adding-a-backend.md](adding-a-backend.md) with
+`KIND = "registry.example.org"`. A backend `NAME` may not equal an envelope key or one of
+its own kind's core properties; other kinds' properties do not matter.
 
 ## os-install (v1alpha1)
 
@@ -126,7 +205,8 @@ Cross-spec references (`REFS`, `ctx.refs`), `prov graph` and `prov build` (artef
 
 ## Versioning policy
 
-- `api_version` is `prov/<version>`; each kind lists the versions it accepts in `VERSIONS`.
+- `api_version` is `<group>/<version>` (`prov/<version>` for provision-hub's own kinds);
+  each kind lists the versions it accepts in `VERSIONS`.
 - **`v1alpha*` may break.** While a kind is alpha, keys may be renamed, removed or tightened;
   every breaking change carries a migration note in [CHANGELOG.md](../CHANGELOG.md), and the
   version moves on (`v1alpha2`) when existing files stop validating.
