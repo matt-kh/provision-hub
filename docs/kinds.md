@@ -16,11 +16,13 @@ hostname = "demo"
 
 The ref `<kind>/<name>` (`os-install/demo`) is the item's path below the root, the CLI
 argument (`prov render os-install/demo`) and the value of a reference in the optional
-`[refs]` table (see [References](#references)).
+`[refs]` table (see [References](#references)). The optional `[state]` table holds the
+item's lifecycle intent (`decommissioned = true`) for `prov status`; every kind accepts it
+and no render reads it ([state.md](state.md)).
 
 | Part | Owned by | Defined in |
 |---|---|---|
-| Envelope: `api_version`, `kind`, `backend`; optional `[refs]` | prov core | `src/prov/schema.py`, `src/prov/spec.py` |
+| Envelope: `api_version`, `kind`, `backend`; optional `[refs]` and `[state]` | prov core | `src/prov/schema.py`, `src/prov/spec.py` |
 | Core keys of the kind (`hostname`, `storage`, ...) | the kind | the kind plugin's module (`src/prov/kinds/os_install.py`) |
 | Backend table (`[ubuntu-autoinstall]`) | the backend | its module's `SCHEMA` |
 | Shared definitions (`#/$defs/user`, `#/$defs/interface`) | prov core | `src/prov/kinds/common.py` |
@@ -58,8 +60,8 @@ All of these fail with a clear message and exit code 2:
 - `kind` missing or different from the directory kind;
 - `backend` missing, not registered, or registered for another kind.
 
-`refs` is reserved as well: a kind may not define a core property and a backend may not be
-named `refs`.
+`refs` and `state` are reserved as well: a kind may not define a core property and a backend
+may not be named `refs` or `state`.
 
 Values echoed in these messages are shown as a repr capped at 80 characters.
 
@@ -540,7 +542,7 @@ its own kind's core properties; other kinds' properties do not matter.
 
 ## Machine-readable output
 
-`prov kinds`, `backends`, `schema`, `validate`, `plan` and `conformance` take `--json` and then print
+`prov kinds`, `backends`, `schema`, `validate`, `plan`, `conformance`, `digest` and `status` take `--json` and then print
 exactly one JSON document on stdout: keys sorted, indented by 2, ASCII only (any other
 character, controls and bidi marks included, is a `\uNNNN` escape), one trailing newline.
 Plugin-supplied fields (summaries, `OUTPUTS` schemas, outputs, plugin findings' `where` and `message`) are raw, as the
@@ -567,7 +569,15 @@ prov validate <ref> --json                           # exit 0 ok, 1 findings
 {"format", "ref", "backend", "ok", "outputs", "refs", "findings": [{"level", "where", "message"}, ...]}
 
 prov plan <ref> --json
-{"format", "ref", "backend", "rendered_dir", "lines": [...]}
+{"format", "ref", "backend", "rendered_dir", "render_digest", "lines": [...]}   # render_digest null when not rendered
+
+prov digest <ref> --json
+{"format", "ref", "digest"}
+
+prov status [ref ...] --json                         # exit 0, 1 an invalid spec or record (docs/state.md)
+{"format", "now", "stale_after_seconds", "state_dir",
+ "items": [{"ref", "backend", "lifecycle", "sync", "desired_digest", "decommissioned", "record"}, ...],
+ "findings": [{"level", "where", "message"}, ...]}
 
 prov conformance <backend> --json                    # exit 0 ok, 1 a fixture failed
 {"format", "backend", "kind", "ok", "skipped_checks", "fixtures": [{"name", "status", "checks": [{"check", "status", "detail"}, ...]}, ...]}
