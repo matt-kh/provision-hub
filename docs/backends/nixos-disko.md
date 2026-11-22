@@ -556,7 +556,8 @@ emulation.
 `uv run prov conformance nixos-disko` renders the os-install fixtures
 ([kinds.md](../kinds.md#os-install-v1alpha1)) with the table
 `release = "nixos-26.05"`, `state_version = "26.05"`. `conf-two-disks` is skipped
-(`UNSUPPORTED_FIXTURES`): the layouts install to exactly one disk. The other fixtures
+(`UNSUPPORTED_FIXTURES`): the layouts install to exactly one disk, and a spec with more
+than one disk is refused (`storage.disks`). The other fixtures
 render without a `flake.lock` (only the ISO build needs one; `validate` checks it only when
 present), and `validate` reports `skipped: nix not installed` where nix is missing. Static
 checks only: nothing is locked, evaluated, built or installed.

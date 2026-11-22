@@ -42,6 +42,7 @@ uv run prov plan os-install/demo                              # prints the seed-
 uv run prov list                                              # every item under the root
 uv run prov validate os-install/demo --json                   # one JSON document (kinds, backends, schema, validate, plan, conformance)
 uv run prov conformance <backend>                             # render the kind's fixtures through a backend; static checks only
+uv run prov conformance --export os-install out/              # write out/os-install.v1alpha1.fixtures.json (fixtures, tables, composed specs)
 ```
 
 | Command | Does | Exit codes |
@@ -56,6 +57,7 @@ uv run prov conformance <backend>                             # render the kind'
 | `prov diff <ref>` | unified diff from `rendered/` to a fresh render | 0, 1 diff, 2 |
 | `prov plan <ref> [--json]` | print the apply steps for a human | 0, 2 |
 | `prov conformance <backend> [--json]` | render each conformance fixture of the backend's kind through it and check the result statically (spec, outputs, deterministic render, clean rewrite, `validate`, expected strings, plan refusal checks); writes only to a fresh temporary directory from `$TMPDIR` that it removes, never the item tree, and runs nothing | 0 all ok or skipped, 1 a fixture failed, 2 unknown backend, kind without fixtures or temporary directory left behind |
+| `prov conformance --export <kind> DIR` | write `<kind>.<version>.fixtures.json` (the kind's fixtures, its installed backends' tables, unsupported reasons and composed specs) into the existing real directory DIR, outside `<root>/<kind>/`; atomic, never through a symlink | 0, 2 unknown kind, kind without fixtures, refused directory or target |
 
 A ref is `<kind>/<name>`, e.g. `os-install/demo`. Exit code 2 means a usage or configuration
 error (missing item, unknown kind or backend, bad envelope, invalid `spec.toml`).

@@ -418,7 +418,8 @@ no file.
   "backends": {
     "<backend>": {
       "fixtures": {"<fixture>": {"...": "the backend table"}},
-      "unsupported": {"<fixture>": "why the backend cannot express it"}
+      "unsupported": {"<fixture>": "why the backend cannot express it"},
+      "specs": {"<fixture>": {"api_version": "...", "kind": "...", "backend": "<backend>", "...": "core keys", "<backend>": {"...": "the table"}}}
     }
   },
   "fixtures": {
@@ -435,13 +436,20 @@ no file.
   (`{}` without) and `expect` with `valid` filled in; `error`, `outputs`, `contains` and
   `absent` only when given. The meaning of each key is the one above.
 - `backends` holds the built-in backends of the kind, each with `fixtures` (its table per
-  fixture) and `unsupported` (fixture -> reason); a fixture in neither uses `{}` as its table.
+  fixture), `unsupported` (fixture -> reason; a fixture in neither uses `{}` as its table)
+  and `specs`: for every fixture the backend does not mark unsupported, negative ones
+  included, the fully composed spec exactly as `prov conformance` checks it (one composition
+  path, `prov.conformance.compose_spec`): the envelope (`api_version`, `kind`, `backend`),
+  the fixture's core keys, `refs` with the synthetic refs when the fixture has literals, and
+  the backend table under the backend's name. Every composed spec is valid against
+  `schema/<kind>.<version>.schema.json` (negative fixtures break semantic rules only; a test
+  checks it).
 
 **Running the same cases in another implementation** (a port of a backend, or a different
-renderer reading prov specs): for each backend and each fixture not in `unsupported`,
-compose the spec `{"api_version", "kind", "backend": <backend>, ...spec, <backend>: <table>}`
-(plus a `refs` table of synthetic refs and the literal outputs when `refs` is not empty, as
-described above), then apply the checks of the table above that your tool can express:
+renderer reading prov specs): for each backend, take each spec in `specs` as the item's
+`spec.toml` content (the item name is the fixture name; with `refs`, the resolved
+`ctx.refs[alias].outputs` is the fixture's literal), then apply the checks of the table
+above that your tool can express:
 schema (`schema/<kind>.<version>.schema.json`) and your semantic rules, rejection for
 `valid = false` (with `error` contained in `<where>: <message>` of an error outside the
 backend table), deterministic render, the `contains` / `absent` strings in the rendered
@@ -449,6 +457,17 @@ files, and your own static validator. These are **static** checks of rendered fi
 passing them says nothing about whether an install works. The format is
 `prov.conformance/v1alpha1`: while alpha it changes only with a CHANGELOG entry, and new
 keys are additions that readers ignore.
+
+**Exporting a third-party kind.** `prov conformance --export <kind> DIR` writes
+`<kind>.<version>.fixtures.json` for any installed kind with fixtures and its installed
+backends (all of them, not only the built-in ones) into `DIR`, in the same format, and prints
+`wrote <path>`. `DIR` must be given, exist and be a real directory (not a symlink), and must
+not lie inside the item tree `<root>/<kind>/` (both resolved; the root is `--root`, else
+`$PROV_ROOT`, else the current directory). An existing target file is replaced atomically;
+a symlink or other non-regular file in its place is refused, never written through. Exit 0,
+or 2 for an unknown kind, a kind without fixtures, or a refused directory or target;
+`--export` takes no backend and no `--json`. The repository's own `conformance/` files are
+generated from the built-in kinds and backends only, by the test suite.
 
 ## Kind plugins
 
@@ -607,15 +626,16 @@ network checks only when `[network]` is present).
 
 Conformance fixtures (`prov conformance <backend>`; exported to
 [conformance/os-install.v1alpha1.fixtures.json](../conformance/os-install.v1alpha1.fixtures.json)),
-synthetic data only; each positive fixture expects its hostname and every disk path in the
-rendered files:
+synthetic data only; each hostname equals its fixture name (the item name conformance
+uses), and each positive fixture expects its hostname and every disk path in the rendered
+files:
 
 | Fixture | Case | Expected |
 |---|---|---|
-| `conf-uefi-static` | UEFI, one by-id disk, one interface with a static 192.0.2.10/24 address, gateway and DNS, one sudo user with an `EXAMPLE` ssh key | valid; hostname, disk, address, gateway, nameserver and key rendered |
+| `conf-uefi-static` | UEFI, domain example.com, one by-id disk, one interface with a static 192.0.2.10/24 address, gateway 192.0.2.254, nameserver and search domain example.org, one sudo user with an `EXAMPLE` ssh key | valid; hostname, domain, search domain, disk, address (without prefix length), gateway, nameserver and key rendered |
 | `conf-uefi-dhcp` | UEFI, one disk, one DHCP interface, the same user | valid; hostname, disk and key rendered; no 192.0.2. address |
-| `conf-bios-dhcp` | as `conf-uefi-dhcp` with `firmware = "bios"` | valid; hostname, disk and key rendered |
-| `conf-two-disks` | two disks (the first is the boot disk), DHCP | valid; hostname and both disks rendered |
+| `conf-bios-dhcp` | as `conf-uefi-dhcp` with `firmware = "bios"` | valid; hostname, disk and key rendered (firmware handling is not checked by content: no tool-neutral marker) |
+| `conf-two-disks` | two disks, DHCP | valid; hostname and both disks rendered (that the first one is the boot disk is not checked) |
 | `conf-bad-gateway-family` | an IPv6 address as `gateway4` | rejected: `network.interfaces[0].gateway4: 2001:db8::1 is not an IPv4 address` |
 | `conf-duplicate-user` | the same user twice | rejected: `users: user 'ops' defined more than once` |
 

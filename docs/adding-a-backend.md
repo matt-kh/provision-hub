@@ -335,6 +335,10 @@ UNSUPPORTED_FIXTURES = {"two-disks": "talos installs to exactly one disk"}
   exported with the kind's fixtures to `conformance/<kind>.<version>.fixtures.json`
   ([Exported fixtures](kinds.md#exported-fixtures)); regenerate it with
   `PROV_UPDATE_GOLDENS=1 uv run pytest -q` after changing them.
+- A third-party backend (or kind) can publish the same file for its users:
+  `uv run prov conformance --export <kind> DIR` writes `<kind>.<version>.fixtures.json`
+  for the kind and every installed backend of it, composed specs included, into an existing
+  directory outside the item tree ([Exported fixtures](kinds.md#exported-fixtures)).
 - Conformance is static: it proves the rendered files are consistent, never that an install
   works.
 - Behavioural tests (does the installed host answer on its port, are the disks laid out?)
