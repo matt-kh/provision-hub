@@ -134,10 +134,10 @@ may change incompatibly; every such change has a Migration paragraph. See
   `prov conformance <backend> [--json]` (`prov.conformance`) composes each fixture into a
   spec with synthetic refs (`<target kind>/<alias>`) and checks, static and rendered only:
   literal refs outputs against the target kind's `OUTPUTS` (skipped when it is not
-  installed), the spec (a negative fixture gets no backend table, is checked without the
-  backend's `SCHEMA` and must be rejected by an error outside the backend table, containing
-  the optional `expect.error`), outputs, two equal renders, a write to a temporary
-  `rendered/` that diffs clean and rewrites with 0 changes, the backend's `validate`,
+  installed), the spec (a negative fixture is composed with the backend's real table,
+  like a valid one, and must be rejected by an error outside that table, containing the
+  optional `expect.error`), outputs, two equal renders, a write to a temporary `rendered/`
+  that diffs clean and rewrites with 0 changes, the backend's `validate`,
   `contains`/`absent`, and the plan's refusal checks. Lines
   `ok|FAIL|skipped<TAB><fixture><TAB><check><TAB><detail>` and a summary line with the
   number of skipped checks (a skipped check leaves its fixture ok); exit 0, 1 when a

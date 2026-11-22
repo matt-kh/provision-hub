@@ -27,7 +27,7 @@ party) exposes:
 | `starter` | no | `starter(name: str) -> str` | `spec.toml` text for `prov init <kind>/<name> --backend <NAME>`; without it `init` refuses. |
 | `PRESERVE` | no | `tuple[str, ...]` | Relative paths of files a human may create in `rendered/` that `render` must keep and `diff`/`validate` must not report as stale (e.g. `("flake.lock",)`), written normalised (no `./`, `//` or trailing `/`). Only regular files are kept; symlinks and special files are removed whatever their name. A listed name that `render` also returns, or that is a parent directory of a file it returns, is not preserved (render's output wins), so list only names that are never a file or a parent directory of a file `render` produces. |
 | `REFS` | no | `dict` | Reserved; must be empty (`{}`) if present. References are declared by the kind (its `REFS`) and reach your backend as `ctx.refs`. |
-| `FIXTURES` | no | `dict[str, dict]` | Your backend table for each valid conformance fixture of the kind (`{"basic": {"port": 8081}}`), never for one expected to be invalid; see [Conformance](#6-conformance). |
+| `FIXTURES` | no | `dict[str, dict]` | Your backend table for each conformance fixture of the kind (`{"basic": {"port": 8081}}`), negative ones (`expect.valid = false`) included; see [Conformance](#6-conformance). |
 | `UNSUPPORTED_FIXTURES` | no | `dict[str, str]` | Fixtures of the kind your backend cannot express, each with a reason; `prov conformance` reports them as skipped. |
 | `artifacts` | no | `artifacts(spec: dict) -> ...` | Reserved for `prov build` (a later release). |
 | `build` + `BUILD_TOOLS` | no | `build(spec, ctx)`, `BUILD_TOOLS: tuple[str, ...]` | Reserved for `prov build`, which will write only under the item's `build/`. A backend that defines `build` must list the local tools it runs in `BUILD_TOOLS`. |
@@ -318,11 +318,11 @@ FIXTURES = {"basic": {"role": "controlplane"}}           # your table per fixtur
 UNSUPPORTED_FIXTURES = {"two-disks": "talos installs to exactly one disk"}
 ```
 
-- Give a table for each valid fixture that needs one; without a table prov uses `{}`, which
-  only works when your `SCHEMA` requires no keys (else the fixture fails with `no backend
-  table for fixture`). Give none for a fixture with `expect.valid = false`: it is checked
-  with an empty table your `SCHEMA` is not applied to, and must be rejected by an error
-  outside your table (the kind's rules, or your `check` about core keys).
+- Give a table for each fixture that needs one, negative fixtures (`expect.valid = false`)
+  included; without a table prov uses `{}`, which only works when your `SCHEMA` requires no
+  keys (else the fixture fails with `no backend table for fixture`). A negative fixture's
+  table must be valid: the fixture must be rejected by an error outside your table (the
+  kind's rules, or your `check` about core keys); an error in your table does not count.
 - A name in `FIXTURES` or `UNSUPPORTED_FIXTURES` that the kind does not have (it renamed or
   dropped a fixture) fails `prov conformance` but does not stop your backend loading.
 - List a fixture in `UNSUPPORTED_FIXTURES` only when your tool truly cannot express it, with

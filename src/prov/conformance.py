@@ -8,15 +8,15 @@ only checks that the plan lines pass the refusal checks of ``prov.plan``.
 Per fixture of the backend's kind (``prov.kinds.fixtures``), in name order:
 
 ``supported``  the backend lists the fixture in ``UNSUPPORTED_FIXTURES``: skipped, with its reason
-``table``      the backend has no table for a valid fixture although its ``SCHEMA`` requires
-               keys, or a table for a fixture expected to be invalid (not allowed)
+``table``      the backend has no table for the fixture although its ``SCHEMA`` requires keys
 ``refs``       each literal ``refs`` entry matches its target kind's ``OUTPUTS`` (skipped
                when that kind is not installed: then checked as JSON data only)
 ``spec``       envelope + fixture spec + backend table (+ ``[refs]``) checked like a spec file
                (``prov.spec.check_raw``) with ``ctx.refs`` from the literals; a fixture with
                ``expect.valid = false`` must be rejected, and stops here: it is composed with
-               an empty backend table that the backend's ``SCHEMA`` is not applied to, and
-               only errors outside that table count (one containing ``expect.error``, if given)
+               the backend's real table (like a valid one) and checked through the real
+               backend, and only errors outside that table count (one containing
+               ``expect.error``, if given)
 ``outputs``    the kind's outputs; equal to ``expect.outputs`` when given
 ``render``     two renders give equal file maps
 ``write``      written to a fresh temporary ``<tmp>/<kind>/<fixture>/rendered/``: then
@@ -143,18 +143,6 @@ def _in_table(finding: Finding, table: str) -> bool:
     return text == table or text.startswith((table + ".", table + "["))
 
 
-class _Relaxed:
-    """A backend whose SCHEMA accepts any table: negative fixtures are checked without the backend's table rules."""
-
-    SCHEMA = {"type": "object"}
-
-    def __init__(self, plugin: Any) -> None:
-        self._plugin = plugin
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._plugin, name)
-
-
 def _os_error(exc: OSError) -> str:
     name = f"{show(os.fsdecode(exc.filename))}: " if exc.filename is not None else ""
     return f"{name}{esc(str(exc.strerror or exc))}"
@@ -205,10 +193,6 @@ class _Run:
 
     def _table(self) -> Dict[str, Any]:
         tables = getattr(self.plugin, "FIXTURES", {})
-        if not self.fixture["expect"]["valid"]:
-            if self.name in tables:
-                self.stop("table", f"a backend table is not allowed for a fixture expected to be invalid (expect.valid = false); remove FIXTURES[{self.name!r}]: negative fixtures are checked with an empty table")
-            return {}
         if self.name in tables:
             return copy.deepcopy(tables[self.name])
         if not self.plugin.SCHEMA.get("required"):
@@ -261,9 +245,8 @@ class _Run:
             return MappingProxyType(resolved), []
 
         expect = self.fixture["expect"]
-        backends = self.backends if expect["valid"] else {**self.backends, plugin.NAME: _Relaxed(plugin)}
         try:
-            spec, findings, resolved = check_raw(raw, kind.NAME, name, backends, resolver)
+            spec, findings, resolved = check_raw(raw, kind.NAME, name, self.backends, resolver)
         except ConfigError as exc:
             self.stop("spec", str(exc))
         rejected = any(f.level == ERROR for f in findings)

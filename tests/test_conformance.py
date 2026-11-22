@@ -596,28 +596,31 @@ def test_keyboard_interrupt_propagates_and_cleans_up(install, capsys, monkeypatc
 REQUIRED_PORT = {"type": "object", "additionalProperties": False, "required": ["port"], "properties": {"port": {"type": "integer"}}}
 
 
-def test_negative_fixture_may_not_have_a_backend_table(install, capsys):
-    install(backend=site_backend(FIXTURES={"basic": {"port": 8081}, "even-replicas": {"port": "eighty"}}))
-    code, out, _ = run(capsys, "conformance", BACKEND)
-    assert code == 1
-    assert any(line.startswith("FAIL\teven-replicas\ttable\ta backend table is not allowed for a fixture expected to be invalid") for line in out.splitlines())
-
-
-def test_negative_fixture_is_rejected_by_the_kind_despite_a_required_backend_table(install, capsys):
-    """The backend SCHEMA requires port, but a negative fixture's empty table is not checked against it."""
-    tables = {name: {"port": 8081} for name in ("basic", "cached", "with-registry")}
+def test_negative_fixture_with_a_valid_backend_table_is_rejected_by_the_kind(install, capsys):
+    """The backend SCHEMA requires port; the negative fixture's real table is valid, so the kind's semantic decides."""
+    tables = {name: {"port": 8081} for name in fixtures()}
     install(backend=site_backend(SCHEMA=REQUIRED_PORT, FIXTURES=tables))
     code, out, _ = run(capsys, "conformance", BACKEND)
     assert code == 0 and "ok\teven-replicas\tspec\trejected as expected: error: replicas: replicas must be odd" in out.splitlines()
 
 
 def test_negative_fixture_not_passed_by_a_backend_table_error(install, capsys):
-    """The review's case: a broken semantic accepts even replicas; the backend's table rules must not hide it."""
-    tables = {name: {"port": 8081} for name in ("basic", "cached", "with-registry")}
+    """The review's case: the negative fixture's table is invalid and the kind's semantic would accept; the table error does not count."""
+    tables = {**{name: {"port": 8081} for name in fixtures()}, "even-replicas": {"port": "eighty"}}
     install(kind=site_kind(semantic=lambda spec: []), backend=site_backend(SCHEMA=REQUIRED_PORT, FIXTURES=tables))
     code, out, _ = run(capsys, "conformance", BACKEND)
     assert code == 1
-    assert "FAIL\teven-replicas\tspec\taccepted, but the fixture expects it to be rejected (expect.valid = false)" in out.splitlines()
+    assert f"FAIL\teven-replicas\tspec\trejected only inside the backend table '{BACKEND}', which does not count: error: {BACKEND}.port: expected integer" in [
+        line[: line.index("integer") + 7] for line in out.splitlines() if "integer" in line
+    ]
+
+
+def test_negative_fixture_without_a_table_needs_one_when_the_schema_requires_keys(install, capsys):
+    tables = {name: {"port": 8081} for name in ("basic", "cached", "with-registry")}
+    install(backend=site_backend(SCHEMA=REQUIRED_PORT, FIXTURES=tables))
+    code, out, _ = run(capsys, "conformance", BACKEND)
+    assert code == 1
+    assert any(line.startswith("FAIL\teven-replicas\ttable\tno backend table for fixture; the backend's SCHEMA requires port") for line in out.splitlines())
 
 
 def test_negative_fixture_rejected_only_inside_the_table(install, capsys):

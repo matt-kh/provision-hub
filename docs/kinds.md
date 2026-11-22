@@ -329,13 +329,16 @@ with the keys `spec` (required), `refs` and `expect` (optional), checked when th
   with `valid = false`, a non-empty string. A fixture with `valid = false` takes no other
   `expect` key: it must be rejected, and stops there.
 
-**Negative fixtures** (`valid = false`) test the kind's rules, not the backend's table. The
-backend may not give a table for one (a `FAIL` of `table`); the spec is composed with an
-empty backend table that the backend's `SCHEMA` is not applied to, so a backend whose
-`SCHEMA` requires keys does not reject it for that. The fixture passes when the spec has an
-error **outside the backend table** (a finding whose `where`, or a schema error whose
-message, does not start with the backend's `NAME`): from the schema of the core keys or
-`[refs]`, the kind's `semantic`, or the backend's `check` about core keys. With
+**Negative fixtures** (`valid = false`) test the kind's rules, not the backend's table. They
+are composed like valid ones, with the backend's own table for the fixture (required, as
+for a valid fixture, when the backend's `SCHEMA` requires keys; else `{}` without one), and
+checked through the real backend. Give a **valid** table: the fixture passes only when the
+spec has an error **outside the backend table** (a finding whose `where`, or a schema error
+whose message, does not start with the backend's `NAME`): from the schema of the core keys
+or `[refs]`, the kind's `semantic`, or the backend's `check` about core keys. An error
+inside the table does not count (`rejected only inside the backend table ...` is a `FAIL`),
+and as schema errors stop the check before `semantic` runs, an invalid table also hides
+the kind's rule. With
 `expect.error`, one of those errors must contain that string (matched against
 `<where>: <message>`); use it to pin the rule the fixture is about.
 
@@ -352,9 +355,9 @@ valid fixture without a table uses `{}` when the backend's `SCHEMA` requires no 
 | Check | Passes when |
 |---|---|
 | `supported` | (only for a fixture in the backend's `UNSUPPORTED_FIXTURES`) always `skipped`, with the reason; nothing else runs |
-| `table` | (only on failure) the backend has no table for a valid fixture although its `SCHEMA` requires keys, has a table for a negative fixture, or names a fixture the kind does not have |
+| `table` | (only on failure) the backend has no table for the fixture although its `SCHEMA` requires keys, or names a fixture the kind does not have |
 | `refs` | (only with `refs`) every literal matches its target kind's `OUTPUTS`; `skipped` when a target kind is not installed |
-| `spec` | the composed spec (envelope with the kind's current `api_version`, the fixture spec, the backend table, `[refs]`) passes the schema, semantic and backend `check` like a `spec.toml`; for `valid = false`: it is rejected by an error outside the backend table (containing `expect.error` when given) |
+| `spec` | the composed spec (envelope with the kind's current `api_version`, the fixture spec, the backend table, `[refs]`) passes the schema, semantic and backend `check` like a `spec.toml`; for `valid = false`: with the backend's real table, it is rejected by an error outside that table (containing `expect.error` when given) |
 | `outputs` | the kind's outputs compute, and equal `expect.outputs` when given |
 | `render` | two renders return equal file maps (deterministic) |
 | `write` | the files are written to a fresh temporary `<tmp>/<kind>/<fixture>/rendered/`, after which `prov diff`'s comparison is empty and a second write changes nothing; an OS error (disk full) is a `FAIL` here |
