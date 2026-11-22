@@ -4,7 +4,8 @@ Every item is ``<root>/<kind>/<name>/spec.toml``. A spec starts with the envelop
 (``api_version``, ``kind``, ``backend``), then the kind's core keys (``src/prov/kinds/``),
 then one table named after the backend (``[ubuntu-autoinstall]``) whose JSON Schema fragment
 the backend contributes through its ``SCHEMA``, and, for a kind that declares ``REFS``, the
-optional envelope table ``[refs]`` (alias -> ``"<kind>/<name>"``, ``prov.refs``).
+optional envelope table ``[refs]`` (alias -> ``"<kind>/<name>"``, ``prov.refs``), and the
+optional envelope table ``[state]`` (lifecycle intent, ``prov.state``) in every kind.
 ``spec_schema()`` composes them. The
 published file ``schema/<kind>.<version>.schema.json`` is ``spec_schema()`` over the
 built-in backends of that kind, and a test keeps the two identical.
@@ -49,9 +50,22 @@ KIND_MAX_LENGTH = 253
 
 ENVELOPE_KEYS = ("api_version", "kind", "backend")
 # Optional envelope tables: ``[refs]`` (alias -> "<kind>/<name>"), present in a kind's schema
-# only when the kind declares REFS. Reserved like the envelope keys: no kind property and no
-# backend NAME may use them.
-OPTIONAL_ENVELOPE_KEYS = ("refs",)
+# only when the kind declares REFS, and ``[state]`` (the item's lifecycle intent, read by
+# ``prov status``; docs/state.md), present in every kind's schema. Reserved like the envelope
+# keys: no kind property and no backend NAME may use them.
+OPTIONAL_ENVELOPE_KEYS = ("refs", "state")
+# The ``[state]`` envelope table. Kind-neutral and optional; prov's renders never read it.
+STATE_TABLE: Dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "description": "Lifecycle intent of the item, read by prov status (docs/state.md).",
+    "properties": {
+        "decommissioned": {
+            "type": "boolean",
+            "description": "The item is retired: prov status shows it as decommissioned whatever its host still reports.",
+        },
+    },
+}
 # A reference alias (a key of ``[refs]`` and of a kind's REFS): a lowercase id that may hold
 # ``_`` as well as ``-``, at most 63 characters.
 ALIAS_PATTERN = "^[a-z][a-z0-9_-]{0,62}$"
@@ -123,6 +137,7 @@ def spec_schema(kind: Any, backends: Mapping[str, Any], defs: Mapping[str, Any])
         properties["refs"] = refs
         if refs.get("required"):
             required.append("refs")
+    properties["state"] = copy.deepcopy(STATE_TABLE)
     for name in names:
         properties[name] = copy.deepcopy(backends[name].SCHEMA)
     version = kind.VERSIONS[-1]

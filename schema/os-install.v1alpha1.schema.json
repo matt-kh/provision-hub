@@ -386,6 +386,17 @@
       ],
       "type": "object"
     },
+    "state": {
+      "additionalProperties": false,
+      "description": "Lifecycle intent of the item, read by prov status (docs/state.md).",
+      "properties": {
+        "decommissioned": {
+          "description": "The item is retired: prov status shows it as decommissioned whatever its host still reports.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
     "storage": {
       "additionalProperties": false,
       "properties": {
