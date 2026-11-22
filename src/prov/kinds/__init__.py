@@ -20,6 +20,8 @@ module. Each kind module exposes (see docs/kinds.md):
 ``OUTPUTS``     optional, with ``outputs``: object-schema fragment of what an item exports
 ``outputs``     optional, with ``OUTPUTS``: ``outputs(spec) -> dict``, a pure function of the
                 validated spec with defaults (``item_outputs`` calls it)
+``FIXTURES``    optional: conformance fixtures ``{name: {"spec", "refs"?, "expect"?}}``
+                that ``prov conformance <backend>`` renders through each backend
 
 The api group (``prov/v1alpha1``, ``example.org/v1alpha1``) follows from NAME
 (``prov.schema.kind_group``); the group ``prov`` belongs to provision-hub's bare kinds, and
@@ -36,7 +38,7 @@ from types import ModuleType
 from typing import Any, Dict, Iterator, List, Mapping, Optional, Set, Tuple
 
 from .. import plugin as plugins
-from ..schema import ALIAS_PATTERN, ENVELOPE_KEYS, ID_PATTERN, KIND_MAX_LENGTH, KIND_PATTERN, LEGACY_KEYS, OPTIONAL_ENVELOPE_KEYS, ConfigError
+from ..schema import ALIAS_PATTERN, ENVELOPE_KEYS, ID_PATTERN, KIND_MAX_LENGTH, KIND_PATTERN, LEGACY_KEYS, NAME_PATTERN, OPTIONAL_ENVELOPE_KEYS, ConfigError
 from ..text import esc, short_repr
 from .common import DEFS
 
@@ -99,6 +101,7 @@ def check_kind(kind: Kind, origin: Optional[str] = None) -> None:
     except ValueError as exc:
         raise ConfigError(f"{who}: invalid PROPERTIES: {esc(str(exc))}") from None
     _check_outputs(kind, who)
+    _check_fixtures(kind, who)
 
 
 REF_FIELDS = ("description", "kind", "required")
@@ -209,6 +212,97 @@ def _check_outputs(kind: Kind, who: str) -> None:
     for prop in _property_names(schema, set()):
         if secret_looking(prop):
             raise ConfigError(f"{who}: OUTPUTS property {_secret_message(prop)}")
+
+
+FIXTURE_FIELDS = ("expect", "refs", "spec")
+EXPECT_FIELDS = ("absent", "contains", "outputs", "valid")
+
+
+def fixtures(kind: Kind) -> Dict[str, Dict[str, Any]]:
+    """A (checked) kind's conformance ``FIXTURES``, ordered by name, ``expect`` defaults filled in.
+
+    Each value is ``{"spec": {...}, "refs": {alias: {outputs}}, "expect": {"valid": bool, ...}}``
+    (``refs`` ``{}`` without; ``outputs``, ``contains`` and ``absent`` only when given). A
+    deep copy: the caller may change it.
+    """
+    out: Dict[str, Dict[str, Any]] = {}
+    for name, fixture in sorted(getattr(kind, "FIXTURES", {}).items()):
+        expect = {"valid": True, **fixture.get("expect", {})}
+        out[name] = copy.deepcopy({"spec": fixture["spec"], "refs": fixture.get("refs", {}), "expect": expect})
+    return out
+
+
+def _check_fixtures(kind: Kind, who: str) -> None:
+    """``FIXTURES`` (optional): ``{name: {"spec": {core keys}, "refs"?: {alias: {outputs}}, "expect"?: {...}}}``.
+
+    Checked here: names (item names), plain JSON data, no envelope keys in ``spec``, ``refs``
+    aliases declared in ``REFS``, the ``expect`` keys and their types, and ``expect.outputs``
+    against the kind's own ``OUTPUTS``. Whether ``spec`` is valid, and whether a ``refs``
+    literal matches its target kind's ``OUTPUTS`` (that kind may load later, or not at all),
+    is for ``prov conformance`` (``prov.conformance``).
+    """
+    from ..validate import schema_errors
+
+    if not hasattr(kind, "FIXTURES"):
+        return
+    table = kind.FIXTURES
+    if type(table) is not dict:
+        raise ConfigError(f"{who}: FIXTURES must be a dict of fixture name -> {{spec, refs, expect}}")
+    reserved = set(ENVELOPE_KEYS + OPTIONAL_ENVELOPE_KEYS + LEGACY_KEYS)
+    for name, fixture in table.items():
+        if not (type(name) is str and _full(NAME_PATTERN, name)):
+            raise ConfigError(f"{who}: FIXTURES name {short_repr(name)} must match {NAME_PATTERN} (an item name)")
+        at = f"{who}: FIXTURES[{name!r}]"
+        if not (type(fixture) is dict and all(type(k) is str for k in fixture)):
+            raise ConfigError(f"{at} must be a dict with the key spec (and optionally refs, expect)")
+        unknown = sorted(set(fixture) - set(FIXTURE_FIELDS))
+        if unknown or "spec" not in fixture:
+            what = f"unknown key(s) {', '.join(short_repr(k) for k in unknown)}" if unknown else "no spec"
+            raise ConfigError(f"{at} has {what}; keys: spec (required), refs, expect")
+        spec = fixture["spec"]
+        if type(spec) is not dict:
+            raise ConfigError(f"{at}: spec must be a dict of core keys")
+        problem = _json_problem(spec, "spec", strict=False, max_depth=SCHEMA_MAX_DEPTH)
+        if problem:
+            raise ConfigError(f"{at} is not plain JSON data: {esc(problem)}")
+        clash = sorted(set(spec) & reserved)
+        if clash:
+            raise ConfigError(f"{at}: spec may not hold envelope keys {clash}; prov conformance composes the envelope (and refs from the fixture's refs)")
+        refs = fixture.get("refs", {})
+        if type(refs) is not dict:
+            raise ConfigError(f"{at}: refs must be a dict of alias -> literal outputs")
+        for alias, outputs in refs.items():
+            if alias not in kind.REFS:
+                raise ConfigError(f"{at}: refs alias {short_repr(alias)} is not declared in REFS (declared: {', '.join(sorted(kind.REFS)) or 'none'})")
+            if type(outputs) is not dict:
+                raise ConfigError(f"{at}: refs[{alias!r}] must be a dict: the target's outputs")
+            problem = _json_problem(outputs, f"refs.{alias}")
+            if problem:
+                raise ConfigError(f"{at} is not plain JSON outputs: {esc(problem)}")
+        expect = fixture.get("expect", {})
+        if not (type(expect) is dict and all(type(k) is str for k in expect)):
+            raise ConfigError(f"{at}: expect must be a dict with the keys valid, outputs, contains, absent (all optional)")
+        unknown = sorted(set(expect) - set(EXPECT_FIELDS))
+        if unknown:
+            raise ConfigError(f"{at}: expect has unknown key(s) {', '.join(short_repr(k) for k in unknown)}; keys: valid, outputs, contains, absent")
+        valid = expect.get("valid", True)
+        if type(valid) is not bool:
+            raise ConfigError(f"{at}: expect.valid must be true or false")
+        if not valid and set(expect) - {"valid"}:
+            raise ConfigError(f"{at}: a fixture expected to be invalid stops at the spec check; drop expect.outputs, contains and absent")
+        for key in ("contains", "absent"):
+            texts = expect.get(key, [])
+            if not (type(texts) is list and all(type(t) is str and t for t in texts)):
+                raise ConfigError(f"{at}: expect.{key} must be a list of non-empty strings")
+        if "outputs" in expect:
+            outputs = expect["outputs"]
+            problem = _json_problem(outputs, "expect.outputs") if type(outputs) is dict else "expect.outputs: must be a dict"
+            if problem:
+                raise ConfigError(f"{at} is not plain JSON outputs: {esc(problem)}")
+            schema = getattr(kind, "OUTPUTS", None)
+            errors = schema_errors(outputs, {**schema, "$defs": DEFS}, None, "expect.outputs") if schema is not None else ([] if outputs == {} else ["the kind has no OUTPUTS, so its outputs are {}"])
+            if errors:
+                raise ConfigError(f"{at}: expect.outputs does not match OUTPUTS: {esc('; '.join(errors))}")
 
 
 def _load_one(ep: Any) -> Kind:
@@ -390,6 +484,9 @@ def _json_problem(value: Any, path: str, depth: int = 0, strict: bool = True, ma
                 return problem
         return None
     return f"{where}: {esc(kind.__name__)} is not a JSON value (str, int, float, bool, None, list, dict)"
+
+
+json_problem = _json_problem  # for core modules (registry: backend FIXTURES tables)
 
 
 def neutral_spec(kind: Kind, spec: Mapping[str, Any]) -> Dict[str, Any]:
