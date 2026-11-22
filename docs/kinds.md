@@ -28,7 +28,8 @@ Kinds are part of prov core and **not pluggable**: all backends of a kind read i
 so a kind is a shared public format and changes to it are reviewed here. Backends are
 plugins ([adding-a-backend.md](adding-a-backend.md)) and anyone can add one for an existing
 kind without touching core code. provision-hub ships backends but champions none: the core
-keys of a kind describe the item, not one tool's input format.
+keys of a kind describe the item, not one tool's input format. Kinds and backends alike
+render deterministically ([determinism.md](determinism.md)).
 
 ## Item directories
 
