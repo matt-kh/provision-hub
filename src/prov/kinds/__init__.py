@@ -393,12 +393,12 @@ def _json_problem(value: Any, path: str, depth: int = 0, strict: bool = True, ma
 
 
 def neutral_spec(kind: Kind, spec: Mapping[str, Any]) -> Dict[str, Any]:
-    """A deep copy of the tool-neutral part of ``spec``: envelope keys and ``kind``'s core keys.
+    """A deep copy of the tool-neutral part of ``spec``: ``api_version``, ``kind`` and the core keys.
 
-    The backend's table (and anything else) is left out, so a kind cannot make its outputs
-    depend on one backend's input format.
+    The backend's name and table (and anything else) are left out, so a kind cannot make
+    its outputs depend on which backend renders the item.
     """
-    keep = set(ENVELOPE_KEYS) | set(kind.PROPERTIES)
+    keep = {"api_version", "kind"} | set(kind.PROPERTIES)  # not the backend name either
     return copy.deepcopy({key: value for key, value in spec.items() if key in keep})
 
 
@@ -406,8 +406,8 @@ def item_outputs(kind: Kind, spec: Mapping[str, Any]) -> Dict[str, Any]:
     """What an item of ``kind`` exports: ``kind.outputs(spec)`` checked against ``kind.OUTPUTS``.
 
     ``spec`` is the validated spec with defaults (``prov.spec.check_spec``); the kind gets a
-    deep copy of its tool-neutral part only (``neutral_spec``: the envelope and the kind's
-    core keys, never the backend's table), so outputs mean the same whichever backend renders
+    deep copy of its tool-neutral part only (``neutral_spec``: ``api_version``, ``kind`` and
+    the core keys, never the backend's name or table), so outputs mean the same whichever backend renders
     the item, and it cannot change the caller's spec. A kind without OUTPUTS exports ``{}``. The
     result must be plain JSON data valid against OUTPUTS: strings and keys without control
     characters (like spec values), 64-bit integers, no key that looks like a secret value

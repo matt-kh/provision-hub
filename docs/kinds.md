@@ -125,7 +125,8 @@ def outputs(spec):
   tuples, objects or NaN in a `default`, `enum` or `const`). It is public API, versioned
   with the kind.
 - **`outputs(spec)`** gets the tool-neutral part of the validated spec with defaults
-  applied: the envelope and the kind's core keys, **never the backend's table**, so an
+  applied: `api_version`, `kind` and the kind's core keys, **never the backend's name or
+  table**, so an
   item's outputs mean the same whichever backend renders it, and switching backends never
   changes what referring items render. The spec only: no item name, no file, no other item. It must be a **pure,
   deterministic** function of that spec: the same spec gives equal outputs on every run,
