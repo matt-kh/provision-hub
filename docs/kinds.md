@@ -77,16 +77,92 @@ A kind module exposes:
 | `REFS` | cross-spec references; reserved, empty for now |
 | `NAME_KEY` | optional: the core key that should equal the item name (a mismatch is a warning) |
 | `SCHEMA_URL` | optional: an `https://` base URL ending in `/`; the composed schema's `$id` is `SCHEMA_URL` + `<NAME>.<version>.schema.json` |
+| `OUTPUTS` | optional, together with `outputs`: object-schema fragment of what an item exports (see [Outputs](#outputs)) |
+| `outputs(spec)` | optional, together with `OUTPUTS`: `dict`, a pure function of the validated spec with defaults |
 
 The module docstring's first line is shown by `prov kinds`. Every call into a kind
-(`semantic`) goes through a guarded call: an exception, or a result that is not a
-`list[Finding]`, is reported as `kind '<NAME>' failed in semantic: ...` with exit code 2,
-its text escaped like a backend's.
+(`semantic`, `outputs`) goes through a guarded call: an exception, or a result of the wrong
+type, is reported as `kind '<NAME>' failed in <method>: ...` with exit code 2, its text
+escaped like a backend's.
 
 Core composes `envelope + PROPERTIES + every backend table` into one JSON Schema per kind
 (`prov schema <kind>`); for provision-hub's own kinds the published file is
 `schema/<kind>.<version>.schema.json` (composed over the built-in backends), and a test keeps
 it equal to the code.
+
+## Outputs
+
+A kind may export a few values of each item, for other items to read: a registry's URL, a
+cluster's API endpoint, the name of the Secret that holds a CA. Cross-spec references
+(later) will hand them to the backends of the items that refer to it; today they are shown
+by `prov validate --json`. A kind declares both members or neither:
+
+```python
+OUTPUTS = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["url"],
+    "properties": {
+        "url": {"type": "string", "pattern": "^https://[a-z0-9.-]+$"},
+        "tls_secret_name": {"type": "string"},
+    },
+}
+
+
+def outputs(spec):
+    return {"url": f"https://{spec['hostname']}", "tls_secret_name": f"{spec['hostname']}-tls"}
+```
+
+- **`OUTPUTS`** is an object-schema fragment under the same rules as a backend `SCHEMA`
+  ([adding-a-backend.md](adding-a-backend.md), section 2): supported keywords only, no
+  `$defs` of its own, `$ref` only to the shared `#/$defs/<name>`. Its top level is
+  `"type": "object"` with `properties` and `"additionalProperties": false`, so every output
+  name is declared. Like `PROPERTIES`, it must be plain JSON data itself (no bytes, sets,
+  tuples, objects or NaN in a `default`, `enum` or `const`). It is public API, versioned
+  with the kind.
+- **`outputs(spec)`** gets the tool-neutral part of the validated spec with defaults
+  applied: the envelope and the kind's core keys, **never the backend's table**, so an
+  item's outputs mean the same whichever backend renders it, and switching backends never
+  changes what referring items render. The spec only: no item name, no file, no other item. It must be a **pure,
+  deterministic** function of that spec: the same spec gives equal outputs on every run,
+  machine and Python version, with no clock, randomness, environment, files, network or
+  subprocesses. It gets a copy of the spec, so changing it changes nothing.
+- The result must be plain JSON data: a `dict` with string keys whose values are `str`,
+  `int`, finite `float`, `bool`, `None`, `list` or `dict` (exact types: no subclasses such
+  as `IntEnum`; at most 32 levels deep), valid against `OUTPUTS`. Integers are 64-bit
+  (-2^63 to 2^63-1); strings and keys, like spec values, hold no control characters (C0,
+  DEL, C1, U+2028, U+2029); no key, at any depth, looks like a secret value (the lint
+  below), so an open nested object cannot return one either. prov checks it on every call
+  and returns a copy. An exception, another type,
+  a non-JSON value or a schema violation is exit code 2:
+  `kind '<NAME>' failed in outputs: ...`, escaped.
+- `prov validate` computes the outputs of a valid spec (so a broken `outputs` fails it with
+  exit 2, with or without `--json`); `render`, `diff` and `plan` do not need them yet.
+  A kind without `OUTPUTS` exports `{}`. os-install declares none.
+
+**Post-apply facts are references, never values.** prov never reads live state: no
+cluster, host, cloud API or secret store. Outputs are known before anything is applied,
+because they follow from the spec alone. A fact that exists only after the apply step (a
+generated join token, a kubeconfig, a certificate, an admin password) is exported only as a
+**reference the human writes in the spec**: a path where the human keeps it, or the name of
+the secret that holds it (`kubeconfig_path`, `ca_secret_name`), never the value.
+
+**The secret-name lint.** `check_kind` checks every `OUTPUTS` property name (at any depth,
+in `properties` and `required`, through `$ref` too), and `item_outputs` every key of the
+result. A name is split into words (camelCase first, then `_`, `-`, `.` and spaces;
+`sshPrivateKey` is `ssh private key`) and looks like a secret value when:
+
+- its last word is not `path`, `name`, `ref` or `file` (those make it a reference:
+  `admin_password_path`, `tls_secret_name`, `kubeconfig_file`), and
+- a word is `password`, `passwd`, `passphrase`, `pwd`, `secret`, `secrets`, `credential`,
+  `credentials` or `kubeconfig`; or two adjacent words are `private key`, `api key`,
+  `ssh key` or `tls key`; or the last word is `token` or `tokens`, not after `max` or `num`
+  (`join_token`, but not `max_tokens`, `token_count` or `tokenizer`).
+
+It is a lint, not a guarantee: it catches honest mistakes, not every secret (a kind can
+still export one under another name), and reviewers of a kind check what its outputs carry.
+It is not part of `PLUGIN_API`: its word lists may grow between releases, each time with a
+CHANGELOG entry.
 
 ## Kind plugins
 
@@ -162,7 +238,7 @@ its own kind's core properties; other kinds' properties do not matter.
 `prov kinds`, `backends`, `schema`, `validate` and `plan` take `--json` and then print
 exactly one JSON document on stdout: keys sorted, indented by 2, ASCII only (any other
 character, controls and bidi marks included, is a `\uNNNN` escape), one trailing newline.
-Plugin-supplied fields (summaries, plugin findings' `where` and `message`) are raw, as the
+Plugin-supplied fields (summaries, `OUTPUTS` schemas, outputs, plugin findings' `where` and `message`) are raw, as the
 plugin gave them, not escaped like the text output: decode the JSON and escape before
 showing a value to a human. prov's own messages are composed once for both outputs, so
 where core quotes a spec value or a file name (in a finding's `message` or `where`, e.g.
@@ -174,7 +250,7 @@ an invalid spec), and stdout stays empty. `prov list` has no `--json`.
 
 ```text
 prov kinds --json
-{"format", "kinds": [{"name", "group", "api_versions", "summary", "builtin"}, ...]}  # ordered by name
+{"format", "kinds": [{"name", "group", "api_versions", "summary", "builtin", "outputs"}, ...]}  # ordered by name
 
 prov backends [--kind K] --json
 {"format", "backends": [{"name", "kind", "summary", "builtin", "starter", "check", "preserve"}, ...]}
@@ -182,7 +258,7 @@ prov backends [--kind K] --json
 prov schema <kind> --json                            # the schema itself; --json changes nothing
 
 prov validate <ref> --json                           # exit 0 ok, 1 findings
-{"format", "ref", "backend", "ok", "findings": [{"level", "where", "message"}, ...]}
+{"format", "ref", "backend", "ok", "outputs", "findings": [{"level", "where", "message"}, ...]}
 
 prov plan <ref> --json
 {"format", "ref", "backend", "rendered_dir", "lines": [...]}
@@ -198,14 +274,16 @@ prov plan <ref> --json
 | `starter`, `check` | the backend implements `starter` (`prov init`) / `check` |
 | `preserve` | the backend's `PRESERVE` paths (`[]` without) |
 | `ref`, `backend` | the item ref and the spec's `backend` value, also when other keys fail validation; `null` only when it does not name a registered backend of the item's kind (in practice an exit-2 envelope error) |
+| `outputs` (kinds) | the kind's `OUTPUTS` schema, or `null` for a kind without outputs |
+| `outputs` (validate) | the item's outputs ([Outputs](#outputs)), raw like plugin text: `{}` for a kind without `OUTPUTS`; `null` while the spec is invalid (schema, semantic or backend `check` errors), so outputs were not computed. Computed even when `rendered/` is missing or out of date |
 | `ok` | no finding of level `error`; the exit code is 0 exactly when it is `true` |
 | `findings` | every finding, warnings and `skipped` ones included: errors first, then by `where`, `message`, as in the text output; `where` is `""` for the whole item |
 | `rendered_dir` | absolute path of the item's `rendered/` directory, the plan's `cd` target |
 | `lines` | exactly the lines the text output prints, in order, header comments and `cd` included (text = the lines joined by newlines); a line with an unsafe character is refused, never escaped |
 
 **Stability.** `format` is versioned on its own, independent of the spec `api_version`s.
-Adding a key to these objects (kind outputs, references, conformance fixtures come later)
-keeps `format` unchanged: consumers ignore keys they do not know. Removing or renaming a
+Adding a key to these objects (as `outputs` was; references and conformance fixtures
+come later) keeps `format` unchanged: consumers ignore keys they do not know. Removing or renaming a
 key, or changing a value's type or meaning, moves `format` on (`prov.cli/v1alpha2`, then
 `prov.cli/v1` with 1.0) and carries a CHANGELOG Migration paragraph; check `format` before
 reading a document. From `prov.cli/v1` on, changes are additive only, like the spec

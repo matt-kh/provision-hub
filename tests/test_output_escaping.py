@@ -187,6 +187,8 @@ def _hostile_kind():
     kind.PROPERTIES = {"size": {"type": "integer", "description": f"size {HOSTILE}"}}
     kind.REQUIRED = []
     kind.REFS = {}
+    kind.OUTPUTS = {"type": "object", "additionalProperties": False, "description": f"outputs {HOSTILE}", "properties": {"size": {"type": "integer"}}}
+    kind.outputs = lambda spec: {"size": spec["size"]}  # never reached: semantic raises first
 
     def semantic(spec):
         raise RuntimeError(HOSTILE)
@@ -289,6 +291,7 @@ def test_every_json_verb_writes_ascii_json(hostile_root, capsys):
     # raw values survive the round trip: escaping is JSON's, not prov.text's
     kind = next(k for k in docs[("kinds",)]["kinds"] if k["name"] == HOSTILE_KIND)
     assert kind["summary"] == "Hostile kind ev\x1b[2Jil" and kind["builtin"] is False
+    assert kind["outputs"]["description"] == f"outputs {HOSTILE}"
     stub = next(b for b in docs[("backends",)]["backends"] if b["name"] == "stub-findings")
     assert stub["summary"] == "Stub backend ev\x1b[2Jil"
     finder = docs[("validate", "os-install/finder")]

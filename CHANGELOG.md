@@ -90,6 +90,23 @@ may change incompatibly; every such change has a Migration paragraph. See
   on stderr (`prov: error: …`, possibly with indented continuation lines) with empty
   stdout, and `plan` still refuses unsafe lines. Text output without `--json` is
   unchanged. Shapes and the stability promise: "Machine-readable output" in `docs/kinds.md`.
+- Kind outputs: a kind may declare `OUTPUTS` (an object-schema fragment with
+  `"additionalProperties": false`, under the backend `SCHEMA` rules) together with
+  `outputs(spec)`, a pure, deterministic function of the tool-neutral part of the validated spec (envelope and core keys, never the backend's table) that returns plain
+  JSON data (exact types, 64-bit integers, no control characters in strings or keys) valid
+  against `OUTPUTS`. Declaring only one, an `OUTPUTS` or `PROPERTIES` that is not plain JSON
+  data, or an output name that looks like a secret value is refused at load; the same
+  secret-name lint runs over every key of the result. The lint splits a name into words and
+  flags `password`, `passwd`, `passphrase`, `pwd`, `secret(s)`, `credential(s)`,
+  `kubeconfig`, `private key`, `api key`, `ssh key`, `tls key` and a final `token(s)` (not
+  after `max`/`num`), unless the last word is `path`, `name`, `ref` or `file`; it is not
+  part of `PLUGIN_API` and may grow between releases. JSON output refuses NaN and infinities.
+  `prov validate` computes them (a raising or invalid `outputs` exits 2 naming the kind);
+  `validate --json` adds `"outputs"` (`{}` without `OUTPUTS`, `null` while the spec is
+  invalid) and `kinds --json` adds the `OUTPUTS` schema (`null` without); `format` stays
+  `prov.cli/v1alpha1`, text output is unchanged. Post-apply facts are exported only as a
+  path or secret-name reference the human writes in the spec, never a value; prov never
+  reads live state. os-install declares no outputs. Docs: "Outputs" in `docs/kinds.md`.
 
 ### Security
 

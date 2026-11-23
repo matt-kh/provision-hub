@@ -28,7 +28,7 @@ stay minimal (pyyaml; tomli on 3.10 only) — justify any new one in the PR.
 ## Layout
 
 - `src/prov/kinds/` — built-in kinds (`os_install.py`), discovery and the kind contract
-  (`__init__.py`: `discover`, `builtin`, `get`, `check_kind`, `call_kind`) and shared `$defs`
+  (`__init__.py`: `discover`, `builtin`, `get`, `check_kind`, `call_kind`, `item_outputs`) and shared `$defs`
   (`common.py`). Kinds are plugins registered through the `prov.kinds` entry-point group in
   `pyproject.toml` (entry-point name = `NAME`, `PLUGIN_API = 1`); bare names only for this
   distribution, third-party kinds are dotted (`registry.example.org`, api group

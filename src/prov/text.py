@@ -79,6 +79,7 @@ def json_text(value: Any) -> str:
     printing boundary, turning every non-ASCII character (controls, bidi marks, lone
     surrogates from non-UTF-8 names) into a JSON ``\\uNNNN`` escape, so the text is printable
     ASCII (every character outside space to ``~``, DEL included, is escaped) apart from its
-    newlines, and still decodes to the exact values.
+    newlines, and still decodes to the exact values. NaN and infinities are refused (ValueError),
+    never written as the non-JSON tokens ``NaN`` or ``Infinity``.
     """
-    return json.dumps(value, indent=2, sort_keys=True, ensure_ascii=True) + "\n"
+    return json.dumps(value, indent=2, sort_keys=True, ensure_ascii=True, allow_nan=False) + "\n"

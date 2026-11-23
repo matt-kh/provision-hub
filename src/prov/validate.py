@@ -58,12 +58,13 @@ _TYPES = {
     "string": lambda v: isinstance(v, str),
     "boolean": lambda v: isinstance(v, bool),
     # JSON Schema 2020-12: a number with a zero fractional part is an integer (1.0 is valid).
-    "integer": lambda v: _is_number(v) and float(v).is_integer(),
+    # Never float() an int: a huge int would overflow; bool is not an integer.
+    "integer": lambda v: (isinstance(v, int) and not isinstance(v, bool)) or (isinstance(v, float) and v.is_integer()),
     "number": _is_number,
 }
 
-# Spec values may not hold C0/C1 controls, DEL or the Unicode line/paragraph separators.
-_CONTROL = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029]")
+# Spec values (and kind outputs) may not hold C0/C1 controls, DEL or the Unicode line/paragraph separators.
+CONTROL = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029]")
 
 
 def json_equal(a: Any, b: Any) -> bool:
@@ -255,7 +256,7 @@ def schema_errors(instance: Any, schema: Mapping[str, Any], root: Mapping[str, A
         errors.append(f"{where}: {short_repr(instance)} is not one of {schema['enum']}")
 
     if isinstance(instance, str):
-        if _CONTROL.search(instance):
+        if CONTROL.search(instance):
             errors.append(f"{where}: control characters (newline, tab, ...) are not allowed")
         elif "pattern" in schema and not ecma_search(schema["pattern"], instance):
             errors.append(f"{where}: {short_repr(instance)} does not match {schema['pattern']}")
@@ -292,7 +293,7 @@ def schema_errors(instance: Any, schema: Mapping[str, Any], root: Mapping[str, A
         props = schema.get("properties", {})
         extra = schema.get("additionalProperties", True)
         for key in sorted(instance):
-            if _CONTROL.search(key):
+            if CONTROL.search(key):
                 errors.append(f"{where}: control characters in key {short_repr(key)}")
             elif key in props:
                 errors += schema_errors(instance[key], props[key], root, _join(path, key))

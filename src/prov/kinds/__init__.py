@@ -16,6 +16,9 @@ module. Each kind module exposes (see docs/kinds.md):
 ``REFS``        cross-spec references (reserved; empty for now)
 ``NAME_KEY``    optional: the core key that should equal the item name (warning otherwise)
 ``SCHEMA_URL``  optional: https base URL (ending in ``/``) of the composed schema's ``$id``
+``OUTPUTS``     optional, with ``outputs``: object-schema fragment of what an item exports
+``outputs``     optional, with ``OUTPUTS``: ``outputs(spec) -> dict``, a pure function of the
+                validated spec with defaults (``item_outputs`` calls it)
 
 The api group (``prov/v1alpha1``, ``example.org/v1alpha1``) follows from NAME
 (``prov.schema.kind_group``); the group ``prov`` belongs to provision-hub's bare kinds, and
@@ -24,10 +27,12 @@ a dotted kind's group always contains a dot, so it can never be ``prov``.
 
 from __future__ import annotations
 
+import copy
+import math
 import re
 from importlib.metadata import entry_points
 from types import ModuleType
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Mapping, Optional, Set, Tuple
 
 from .. import plugin as plugins
 from ..schema import ENVELOPE_KEYS, ID_PATTERN, KIND_MAX_LENGTH, KIND_PATTERN, LEGACY_KEYS, ConfigError
@@ -84,10 +89,94 @@ def check_kind(kind: Kind, origin: Optional[str] = None) -> None:
     url = getattr(kind, "SCHEMA_URL", None)
     if url is not None and not (isinstance(url, str) and re.fullmatch("https://[!-~]+/", url)):
         raise ConfigError(f"{who}: SCHEMA_URL must be an https base URL ending in '/' (printable ASCII, no spaces); prov appends <NAME>.<version>.schema.json")
+    problem = _json_problem(kind.PROPERTIES, "", strict=False, max_depth=SCHEMA_MAX_DEPTH)
+    if problem:
+        raise ConfigError(f"{who}: PROPERTIES is not plain JSON data: {esc(problem)}")
     try:
         check_schema_fragment({"type": "object", "properties": kind.PROPERTIES}, f"<kind {esc(str(name))}>", defs=DEFS, allow_defs=False)
     except ValueError as exc:
         raise ConfigError(f"{who}: invalid PROPERTIES: {esc(str(exc))}") from None
+    _check_outputs(kind, who)
+
+
+# The secret-name lint over output names (docs/kinds.md "Outputs"). A lint, not a guarantee,
+# and not part of PLUGIN_API: the lists may grow between releases (with a CHANGELOG entry).
+# A name is split into words (camelCase, then _ - . and spaces), lowercased.
+SECRET_WORDS = frozenset({"password", "passwd", "passphrase", "pwd", "secret", "secrets", "credential", "credentials", "kubeconfig"})
+SECRET_PAIRS = frozenset({("private", "key"), ("api", "key"), ("ssh", "key"), ("tls", "key")})
+TOKEN_WORDS = frozenset({"token", "tokens"})  # only as the last word, and not after a counter word
+COUNTER_WORDS = frozenset({"max", "num"})
+REFERENCE_WORDS = ("path", "name", "ref", "file")  # a last word that makes the name a reference
+
+
+def name_words(name: str) -> List[str]:
+    """``"sshPrivateKey_path"`` -> ``["ssh", "private", "key", "path"]``; ``"APIKey"`` -> ``["api", "key"]``."""
+    spaced = re.sub(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])", " ", name)
+    return [w.lower() for w in re.split(r"[_\-.\s]+", spaced) if w]
+
+
+def secret_looking(name: str) -> bool:
+    """True for an output name that looks like it carries a secret value (``admin_password``,
+    ``join_token``, ``sshPrivateKey``), False for a reference to one (``admin_password_path``,
+    ``tls_secret_name``) and for look-alikes (``max_tokens``, ``tokenizer``, ``secretary``)."""
+    words = name_words(name)
+    if not words or words[-1] in REFERENCE_WORDS:
+        return False
+    if any(w in SECRET_WORDS for w in words) or any(pair in SECRET_PAIRS for pair in zip(words, words[1:])):
+        return True
+    return words[-1] in TOKEN_WORDS and not (len(words) > 1 and words[-2] in COUNTER_WORDS)
+
+
+def _secret_message(name: str) -> str:
+    return (
+        f"{short_repr(name)} looks like a secret value; outputs never carry secrets: export where the human keeps it, "
+        f"as a name ending in {', '.join('_' + w for w in REFERENCE_WORDS)} (e.g. {short_repr(name + '_path')})"
+    )
+
+
+def _property_names(schema: Any, seen: Set[str]) -> Iterator[str]:
+    """Every property name declared in a (checked) schema fragment, following ``$ref`` into DEFS once."""
+    if not isinstance(schema, dict):
+        return
+    ref = schema.get("$ref")
+    if isinstance(ref, str) and ref.startswith("#/$defs/") and ref not in seen:
+        seen.add(ref)
+        yield from _property_names(DEFS.get(ref[len("#/$defs/"):]), seen)
+    for key in schema.get("required", []):
+        yield key
+    for key, child in schema.get("properties", {}).items():
+        yield key
+        yield from _property_names(child, seen)
+    for key in ("items", "if", "then", "additionalProperties"):
+        yield from _property_names(schema.get(key), seen)
+    for child in schema.get("allOf", []):
+        yield from _property_names(child, seen)
+
+
+def _check_outputs(kind: Kind, who: str) -> None:
+    """``OUTPUTS`` and ``outputs`` come together; OUTPUTS is an object fragment naming no secret value."""
+    from ..validate import check_schema_fragment
+
+    has_schema, has_fn = hasattr(kind, "OUTPUTS"), hasattr(kind, "outputs")
+    if has_schema != has_fn:
+        raise ConfigError(f"{who}: OUTPUTS and outputs come together; it defines {'OUTPUTS' if has_schema else 'outputs'} only")
+    if not has_schema:
+        return
+    if not callable(kind.outputs):
+        raise ConfigError(f"{who}: outputs is not callable")
+    schema = kind.OUTPUTS
+    problem = _json_problem(schema, "", strict=False, max_depth=SCHEMA_MAX_DEPTH)
+    if problem:
+        raise ConfigError(f"{who}: OUTPUTS is not plain JSON data: {esc(problem)}")
+    if not (isinstance(schema, dict) and schema.get("type") == "object" and isinstance(schema.get("properties"), dict) and schema.get("additionalProperties") is False):
+        raise ConfigError(f"{who}: OUTPUTS must be an object schema with properties and \"additionalProperties\": false")
+    try:
+        check_schema_fragment(schema, f"<outputs {esc(str(kind.NAME))}>", defs=DEFS, allow_defs=False)
+    except ValueError as exc:
+        raise ConfigError(f"{who}: invalid OUTPUTS: {esc(str(exc))}") from None
+    for prop in _property_names(schema, set()):
+        if secret_looking(prop):
+            raise ConfigError(f"{who}: OUTPUTS property {_secret_message(prop)}")
 
 
 def _load_one(ep: Any) -> Kind:
@@ -194,10 +283,110 @@ def _is_findings(value: Any) -> bool:
 
 
 # What each kind method must return; anything else is a plugin bug reported as exit 2.
-RETURN_CHECKS = {"semantic": (_is_findings, "a list of prov.validate.Finding")}
+RETURN_CHECKS = {
+    "semantic": (_is_findings, "a list of prov.validate.Finding"),
+    "outputs": (lambda value: type(value) is dict, "a dict"),
+}
 
 
 def call_kind(kind: Kind, method: str, *args: Any) -> Any:
     """Run a kind method through ``prov.plugin.guarded_call`` (exit 2 naming the kind on failure)."""
     check, expected = RETURN_CHECKS.get(method, (lambda value: True, ""))
     return plugins.guarded_call(f"kind {short_repr(getattr(kind, 'NAME', '?'))}", kind, method, args, check, expected)
+
+
+# How deep an outputs value may nest; deeper (or cyclic) values are refused, never recursed into.
+OUTPUTS_MAX_DEPTH = 32
+# The same guard for a kind's schemas (PROPERTIES, OUTPUTS), which nest two levels per property.
+SCHEMA_MAX_DEPTH = 128
+INT_MIN, INT_MAX = -(2**63), 2**63 - 1  # outputs integers are 64-bit, as most JSON readers expect
+
+_KEY = re.compile("[A-Za-z_][A-Za-z0-9_-]*")
+
+
+def _key_path(path: str, key: str) -> str:
+    """``a.b`` for a plain key, ``a['x y']`` for any other (a repr, so it is one printable line)."""
+    if _KEY.fullmatch(key):
+        return f"{path}.{key}" if path else key
+    return f"{path}[{short_repr(key)}]"
+
+
+def _json_problem(value: Any, path: str, depth: int = 0, strict: bool = True, max_depth: int = OUTPUTS_MAX_DEPTH) -> Optional[str]:
+    """Why ``value`` is not plain JSON data (None when it is): exact dict, list, str, int, finite float, bool, None.
+
+    ``strict`` (outputs) also refuses control characters in strings and keys, integers
+    outside 64 bits and keys that look like secret values; schemas are checked without it
+    (descriptions are plugin text, escaped by JSON). Unknown objects are named by their
+    type only, never ``repr``-ed: a plugin's ``__repr__`` could raise.
+    """
+    from ..validate import CONTROL
+
+    where = path or "<root>"
+    if depth > max_depth:
+        return f"{where}: nested deeper than {max_depth} levels (or cyclic)"
+    kind = type(value)
+    if value is None or kind is bool:
+        return None
+    if kind is str:
+        return f"{where}: control characters (newline, tab, ...) are not allowed" if strict and CONTROL.search(value) else None
+    if kind is int:
+        return f"{where}: integer out of range (64-bit)" if strict and not INT_MIN <= value <= INT_MAX else None
+    if kind is float:
+        return None if math.isfinite(value) else f"{where}: {short_repr(value)} is not a finite number"
+    if kind is list:
+        for n, item in enumerate(value):
+            problem = _json_problem(item, f"{path}[{n}]", depth + 1, strict, max_depth)
+            if problem:
+                return problem
+        return None
+    if kind is dict:
+        for key in value:
+            if type(key) is not str:
+                shown = short_repr(key) if type(key) is int else f"of type {esc(type(key).__name__)}"
+                return f"{where}: key {shown} is not a string"
+            if strict and CONTROL.search(key):
+                return f"{where}: control characters in key {short_repr(key)}"
+            if strict and secret_looking(key):
+                return f"{where}: key {_secret_message(key)}"
+            problem = _json_problem(value[key], _key_path(path, key), depth + 1, strict, max_depth)
+            if problem:
+                return problem
+        return None
+    return f"{where}: {esc(kind.__name__)} is not a JSON value (str, int, float, bool, None, list, dict)"
+
+
+def neutral_spec(kind: Kind, spec: Mapping[str, Any]) -> Dict[str, Any]:
+    """A deep copy of the tool-neutral part of ``spec``: envelope keys and ``kind``'s core keys.
+
+    The backend's table (and anything else) is left out, so a kind cannot make its outputs
+    depend on one backend's input format.
+    """
+    keep = set(ENVELOPE_KEYS) | set(kind.PROPERTIES)
+    return copy.deepcopy({key: value for key, value in spec.items() if key in keep})
+
+
+def item_outputs(kind: Kind, spec: Mapping[str, Any]) -> Dict[str, Any]:
+    """What an item of ``kind`` exports: ``kind.outputs(spec)`` checked against ``kind.OUTPUTS``.
+
+    ``spec`` is the validated spec with defaults (``prov.spec.check_spec``); the kind gets a
+    deep copy of its tool-neutral part only (``neutral_spec``: the envelope and the kind's
+    core keys, never the backend's table), so outputs mean the same whichever backend renders
+    the item, and it cannot change the caller's spec. A kind without OUTPUTS exports ``{}``. The
+    result must be plain JSON data valid against OUTPUTS: strings and keys without control
+    characters (like spec values), 64-bit integers, no key that looks like a secret value
+    (``secret_looking``, at any depth); anything else, or an exception in ``outputs``, is a
+    ConfigError (exit 2) naming the kind, with escaped text. Returns a deep copy.
+    """
+    from ..validate import schema_errors
+
+    if not hasattr(kind, "OUTPUTS"):
+        return {}
+    who = f"kind {short_repr(getattr(kind, 'NAME', '?'))}"
+    result = call_kind(kind, "outputs", neutral_spec(kind, spec))
+    problem = _json_problem(result, "")
+    if problem:
+        raise ConfigError(f"{who} failed in outputs: {esc(problem)}")
+    errors = schema_errors(result, {**kind.OUTPUTS, "$defs": DEFS})
+    if errors:
+        raise ConfigError(f"{who} failed in outputs: does not match OUTPUTS: {esc('; '.join(errors))}")
+    return copy.deepcopy(result)

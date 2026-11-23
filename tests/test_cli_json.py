@@ -53,6 +53,7 @@ def test_kinds_json_shape(capsys):
         "api_versions": ["prov/v1alpha1"],
         "summary": "One machine's operating-system install: host identity, users, network and whole disks.",
         "builtin": True,
+        "outputs": None,
     }
 
 
@@ -67,6 +68,7 @@ def test_kinds_json_third_party_kind(capsys, extra_kinds):
         "api_versions": ["example.org/v1alpha1"],
         "summary": "A test-only kind: a container registry.",
         "builtin": False,
+        "outputs": None,
     }
 
 
@@ -140,6 +142,7 @@ def test_validate_json_ok(root, capsys):
         "ref": ITEM,
         "backend": "ubuntu-autoinstall",
         "ok": True,
+        "outputs": {},
         "findings": [{"level": "skipped", "where": "", "message": "cloud-init not installed (cloud-init schema)"}],
     }
 
@@ -176,7 +179,9 @@ def test_validate_json_not_rendered(root, capsys):
     shutil.rmtree(root / ITEM / "rendered")
     code, out, err = run(capsys, "--root", str(root), "validate", ITEM, "--json")
     assert code == 1 and err == ""
-    assert {"level": "error", "where": "rendered", "message": f"not rendered yet; run prov render {ITEM}"} in document(out)["findings"]
+    doc = document(out)
+    assert {"level": "error", "where": "rendered", "message": f"not rendered yet; run prov render {ITEM}"} in doc["findings"]
+    assert doc["outputs"] == {}  # the spec is valid: outputs are computed even when rendered/ is missing
 
 
 def _break_hostname(root):
@@ -189,7 +194,7 @@ def test_validate_json_invalid_spec_echoes_backend(root, capsys):
     code, out, err = run(capsys, "--root", str(root), "validate", ITEM, "--json")
     assert code == 1 and err == ""
     doc = document(out)
-    assert doc["backend"] == "ubuntu-autoinstall" and doc["ok"] is False
+    assert doc["backend"] == "ubuntu-autoinstall" and doc["ok"] is False and doc["outputs"] is None
     assert any(f["level"] == "error" and "Not_A_Label" in f["message"] for f in doc["findings"]), doc
 
 
