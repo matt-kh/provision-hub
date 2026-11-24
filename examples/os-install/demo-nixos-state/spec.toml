@@ -1,0 +1,65 @@
+# NixOS on one disk with disko (ext4, UEFI, swap). Synthetic values only.
+api_version = "prov/v1alpha1"
+kind = "os-install"
+backend = "nixos-disko"
+hostname = "demo-nixos-state"
+domain = "example.com"
+arch = "amd64"
+firmware = "uefi"
+timezone = "Etc/UTC"
+locale = "en_US.UTF-8"
+keyboard = "us"
+
+[[users]]
+name = "ops"
+gecos = "Operator"
+sudo = true
+ssh_authorized_keys = [
+  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE ops@example.com",
+]
+
+[[users]]
+name = "alice"
+gecos = "Alice Example"
+groups = ["video"]
+shell = "/bin/zsh"
+password_hash = "$6$EXAMPLEsalt$EXAMPLEhashEXAMPLEhashEXAMPLEhashEXAMPLEhashEXAMPLEhashEXAMPLEhash0123456789"
+ssh_authorized_keys = [
+  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE alice@example.com",
+]
+
+[network.dns]
+nameservers = ["192.0.2.53", "2001:db8::53"]
+search = ["example.com"]
+
+[[network.interfaces]]
+name = "lan0"
+macaddress = "02:00:00:00:00:01"
+addresses = ["192.0.2.20/24", "2001:db8::20/64"]
+gateway4 = "192.0.2.1"
+gateway6 = "2001:db8::1"
+mtu = 1500
+
+[[network.interfaces]]
+name = "lan1"
+dhcp4 = true
+
+[storage]
+# The one disk disko-install wipes; an obviously fake by-id serial.
+disks = ["/dev/disk/by-id/nvme-EXAMPLE_SSD_SERIAL_0000000000"]
+
+[nixos-disko]
+release = "nixos-26.05"
+state_version = "26.05"
+layout = "ext4"
+swap_size = "8G"
+packages = ["git", "vim", "htop"]
+cpu_vendor = "intel"
+
+# The host reports its observed state to a separate state repository (docs/state.md).
+# The deploy key is created on the host (prov plan, step 8); only its path is here.
+[state.report]
+repo = "git@git.example.com:example/hosts-state.git"
+known_hosts = [
+  "git.example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE",
+]
