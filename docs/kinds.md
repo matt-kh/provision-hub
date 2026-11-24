@@ -36,6 +36,8 @@ own kinds). provision-hub ships kinds and backends but champions none: the core 
 kind describe the item, not one tool's input format. Kinds and backends alike, built-in or
 third-party, render deterministically ([determinism.md](determinism.md)).
 
+Why: [ADR 0003](adr/0003-kind-backend-split.md).
+
 ## Item directories
 
 ```text
@@ -173,6 +175,8 @@ still export one under another name), and reviewers of a kind check what its out
 It is not part of `PLUGIN_API`: its word lists may grow between releases, each time with a
 CHANGELOG entry.
 
+Why: [ADR 0012](adr/0012-outputs-pure-function-of-tool-neutral-spec.md).
+
 ## References
 
 An item may refer to other items, by ref, to use their [outputs](#outputs): a mirror names
@@ -283,6 +287,8 @@ prov read another file: the same exposure as for the item's own `spec.toml` toda
 file itself is opened with `O_NOFOLLOW`, never through a final symlink). Run prov on roots
 that only you write to.
 
+Why: [ADR 0013](adr/0013-refs-one-envelope-table-offline.md).
+
 ## Conformance fixtures
 
 A kind may ship fixtures: small specs, with what every backend must make of them.
@@ -291,7 +297,7 @@ backend and checks the result. The check is **static and rendered only**: prov n
 plan, a behavioural test runner, a subprocess for a printed command, ssh, a VM or anything
 on the network. A backend may render behavioural test files (a `goss.yaml`, a test script)
 among its files, and its `plan` prints the command that runs them, for a human
-([adding-a-backend.md](adding-a-backend.md#conformance)).
+([adding-a-backend.md](adding-a-backend.md#6-conformance)).
 
 ```python
 FIXTURES = {
@@ -402,6 +408,8 @@ never appears in the output: plugin text that names it, resolved through a symli
 `$TMPDIR` or not, reads `<tmp>`. The output is deterministic (the same plugins give
 byte-identical text and JSON).
 
+Why: [ADR 0014](adr/0014-static-conformance-exported-fixtures.md).
+
 ### Exported fixtures
 
 The fixtures of every kind prov ships, with each built-in backend's tables and reasons, are
@@ -471,6 +479,8 @@ or 2 for an unknown kind, a kind without fixtures, or a refused directory or tar
 `--export` takes no backend and no `--json`. The repository's own `conformance/` files are
 generated from the built-in kinds and backends only, by the test suite.
 
+Why: [ADR 0014](adr/0014-static-conformance-exported-fixtures.md).
+
 ## Kind plugins
 
 A kind is a module registered under the `prov.kinds` entry-point group; the entry-point name
@@ -539,6 +549,9 @@ exit 0.
 **Backends of a plugin kind** follow [adding-a-backend.md](adding-a-backend.md) with
 `KIND = "registry.example.org"`. A backend `NAME` may not equal an envelope key or one of
 its own kind's core properties; other kinds' properties do not matter.
+
+Why: [ADR 0007](adr/0007-uniform-entry-point-plugins.md),
+[ADR 0008](adr/0008-dotted-third-party-kind-names.md).
 
 ## Machine-readable output
 
@@ -612,6 +625,8 @@ key, or changing a value's type or meaning, moves `format` on (`prov.cli/v1alpha
 reading a document. From `prov.cli/v1` on, changes are additive only, like the spec
 formats.
 
+Why: [ADR 0011](adr/0011-json-documents-with-format-key.md).
+
 ## os-install (v1alpha1)
 
 One machine's operating-system install: host identity, users, network and whole disks.
@@ -661,18 +676,34 @@ files, Talos machine configs.
 
 ## Planned kinds (sketches, not implemented)
 
-These show the direction; their keys will change before they land.
+provision-hub is a layered catalog of tool-neutral infrastructure definitions; layers
+arrive one kind at a time, each with a schema, a verifier and an example before it is
+published ([ADR 0015](adr/0015-scope-and-non-goals.md), which also lists the non-goals).
+`os-install` is shipped (above). The roadmap, in order:
 
-- **image** — a reusable OS image: base distro and release, architecture, packages, users
-  baked in, output format (qcow2, raw, ISO). Backends could be cloud-image customisation
-  (cloud-image-nocloud), Packer with QEMU, or an image schematic service (talos-schematic).
-  This is the second kind of the first wave.
-- **vm** — one virtual machine: CPU, memory, disks, NICs, firmware, the image or
-  os-install item it boots (a reference such as `image/ubuntu-24-04`), the hypervisor it
-  targets. Backends render hypervisor definitions; prov still never creates the VM.
-- **cluster** — a Kubernetes cluster built from a distribution: distribution and version,
-  node pools referencing vm or os-install items, network ranges, add-ons. Backends per
-  distribution (Talos, k3s, RKE2, kubeadm), none preferred.
+- **os-image** — a reusable OS image: base distro and release, architecture, packages,
+  users baked in, output format (qcow2, raw, ISO). Backends could be cloud-image
+  customisation (cloud-image-nocloud), Packer with QEMU, or an image schematic service
+  (talos-schematic).
+- **profile** — host software: packages, services, fonts, shell and toolchains, as
+  per-backend native sections (each tool's own package names; there is no universal
+  package-name map).
+- **Layer-zero platform kinds**, bounded by "what must exist before GitOps can manage the
+  rest":
+  - **gitops-controller** — the GitOps controller that takes over from there (e.g. Argo CD
+    or Flux) and the repository it watches.
+  - **git-server** — the git server that holds the GitOps and infrastructure repositories.
+  - **registry** — the container or artefact registry the platform pulls from.
+
+Possible later layers, no issue yet:
+
+- **vm** — one virtual machine (CPU, memory, disks, NICs, the os-image or os-install item it
+  boots), rendered as a hypervisor definition; prov still never creates the VM.
+- **cluster** — a Kubernetes cluster from a distribution, node pools referring to vm or
+  os-install items; backends per distribution (Talos, k3s, RKE2, kubeadm), none preferred.
+
+Each roadmap kind gets its own issue before it is written. These are sketches only: none is
+implemented, and names and keys will change before they land.
 
 `prov graph` and `prov build` (artefacts under `build/`) come in later releases.
 

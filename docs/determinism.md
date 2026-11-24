@@ -5,6 +5,9 @@ always renders the same `rendered/` tree, byte for byte, on any machine and at a
 Reviewers read a diff of `spec.toml` and a diff of `rendered/`, and nothing else can change
 what gets installed.
 
+Why: [ADR 0002](adr/0002-deterministic-rendering-agents-as-authors.md),
+[ADR 0001](adr/0001-render-only-never-apply.md).
+
 ## The guarantee
 
 - `render` is a pure function of the spec and the backend's code: no I/O, no clock, no

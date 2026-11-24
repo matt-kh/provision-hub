@@ -3,8 +3,10 @@
 `prov` renders, validates and plans provisioning artefacts from
 `<root>/<kind>/<name>/spec.toml`. Every spec has a `kind` (plugin, e.g. `os-install`) and a
 `backend` (plugin, e.g. `ubuntu-autoinstall`). Public and organisation-neutral; private
-repos pin its releases, so the spec format is a public API. Generic across OS installs,
-images, VMs and Kubernetes distributions; it champions no backend.
+repos pin its releases, so the spec format is a public API. A layered catalog of
+tool-neutral infrastructure definitions: `os-install` today; `os-image`, `profile` and
+layer-zero platform kinds planned; it champions no backend. Application deployment, cloud
+resources and apply/reconcile are non-goals ([ADR 0015](docs/adr/0015-scope-and-non-goals.md)).
 
 ## Commands
 
@@ -29,6 +31,9 @@ stay minimal (pyyaml; tomli on 3.10 only) — justify any new one in the PR.
 
 ## Layout
 
+- `docs/architecture.md` — read first: how the parts fit together and where each rule lives.
+- `docs/adr/` — architecture decision records (the why; the reference docs hold the rules).
+  A new significant design decision gets an ADR (`docs/adr/README.md`, "Adding a record").
 - `src/prov/kinds/` — built-in kinds (`os_install.py`), discovery and the kind contract
   (`__init__.py`: `discover`, `builtin`, `get`, `check_kind`, `call_kind`, `item_outputs`) and shared `$defs`
   (`common.py`). Kinds are plugins registered through the `prov.kinds` entry-point group in
@@ -69,7 +74,8 @@ stay minimal (pyyaml; tomli on 3.10 only) — justify any new one in the PR.
   network or run the commands it prints. `plan` only returns text; `render` writes only
   under `<kind>/<name>/rendered/`; `build/` is reserved for a later `prov build`.
   `validate` may run read-only local validators (e.g. `cloud-init schema`) and reports a
-  missing tool as `skipped: <tool> not installed`. `tests/test_plan.py` enforces that plan
+  missing tool as a `skipped` finding (`skipped: cloud-init not installed (cloud-init
+  schema)`, `skipped: nix not installed (nix-instantiate --parse)`). `tests/test_plan.py` enforces that plan
   executes nothing. `conformance` is static + rendered only: it writes only to a fresh
   temporary directory from `$TMPDIR` (never the item tree) that it removes, and never runs
   a plan or a behavioural test (a backend may render e.g. `goss.yaml`; its plan prints the

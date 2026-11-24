@@ -33,6 +33,14 @@ may change incompatibly; every such change has a Migration paragraph. See
   render a byte-identical tree; specs and host-owned fragments (the nixos-disko `local.nix`
   pattern) are authored and reviewed, kinds and backends are reviewed code with goldens,
   and apply and behavioural tests stay outside prov.
+- Docs: `docs/architecture.md`, an architecture overview to read first (the parts, the data
+  flow and where each rule lives), and architecture decision records 0001-0016 in
+  `docs/adr/` (the reasons behind the render-only scope, determinism, the kind/backend
+  split, plugins, outputs, refs, conformance, the catalog scope and observed state), linked
+  from the reference docs with "Why:" lines. The planned kinds in `docs/kinds.md` follow
+  the ADR 0015 layers: `os-image` (formerly sketched as `image`), `profile`, then the
+  layer-zero `gitops-controller`, `git-server` and `registry`; `vm` and `cluster` are
+  possible later layers.
 - nixos-disko: `local_module = true` imports a hand-written `../local.nix` next to
   `spec.toml` (proprietary packages, services, `programs.*`, fonts), required once set and
   copied onto the installer stick like the hardware file; `[nixos-disko.inputs]` adds
