@@ -5,7 +5,7 @@ Every item is ``<root>/<kind>/<name>/spec.toml``. A spec starts with the envelop
 then one table named after the backend (``[ubuntu-autoinstall]``) whose JSON Schema fragment
 the backend contributes through its ``SCHEMA``, and, for a kind that declares ``REFS``, the
 optional envelope table ``[refs]`` (alias -> ``"<kind>/<name>"``, ``prov.refs``), and the
-optional envelope table ``[state]`` (lifecycle intent, ``prov.state``) in every kind.
+optional envelope table ``[state]`` (lifecycle intent and state reporting, ``prov.state``) in every kind.
 ``spec_schema()`` composes them. The
 published file ``schema/<kind>.<version>.schema.json`` is ``spec_schema()`` over the
 built-in backends of that kind, and a test keeps the two identical.
@@ -54,16 +54,83 @@ ENVELOPE_KEYS = ("api_version", "kind", "backend")
 # ``prov status``; docs/state.md), present in every kind's schema. Reserved like the envelope
 # keys: no kind property and no backend NAME may use them.
 OPTIONAL_ENVELOPE_KEYS = ("refs", "state")
-# The ``[state]`` envelope table. Kind-neutral and optional; prov's renders never read it.
+# A duration as ``prov.state.parse_duration`` and systemd read it: ``<n>s|m|h|d``.
+DURATION_PATTERN = "^[1-9][0-9]{0,5}[smhd]$"
+# A known_hosts line without a marker (``@cert-authority``/``@revoked``): host patterns, key
+# type, base64 key. No comment: a line is one key.
+KNOWN_HOSTS_PATTERN = (
+    "^[A-Za-z0-9.:,*?|=+/_\\[\\]-]+ "
+    "(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256|ecdsa-sha2-nistp384|ecdsa-sha2-nistp521|"
+    "sk-ssh-ed25519@openssh\\.com|sk-ecdsa-sha2-nistp256@openssh\\.com) [A-Za-z0-9+/]+={0,2}$"
+)
+# An ssh git URL: ``ssh://user@host[:port]/path`` or scp-like ``user@host:path``. No part may
+# start with ``-`` (it would become an ssh or git option), and nothing outside these
+# characters (no spaces, quotes or shell syntax).
+SSH_REPO_PATTERN = (
+    "^(ssh://[A-Za-z0-9_][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]{1,5})?/[A-Za-z0-9._~][A-Za-z0-9._~/-]*"
+    "|[A-Za-z0-9_][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9.-]*:[A-Za-z0-9._~][A-Za-z0-9._~/-]*)$"
+)
+# ``[state.report]``: the host reports its observed state (docs/state.md). Rendered by a
+# backend that declares ``STATE_AGENT = True``; core checks it (``prov.state.report_findings``).
+STATE_REPORT_TABLE: Dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["repo", "known_hosts"],
+    "description": "Render a report-only state agent: the host writes its state record to a state repository.",
+    "properties": {
+        "repo": {
+            "type": "string",
+            "pattern": SSH_REPO_PATTERN,
+            "maxLength": 512,
+            "description": "ssh git URL of the state repository (ssh://user@host/path or user@host:path); the host needs write access.",
+        },
+        "branch": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_]+([./-][A-Za-z0-9_]+)*$",
+            "maxLength": 100,
+            "default": "main",
+            "description": "Branch of the state repository the agent writes to.",
+        },
+        "interval": {
+            "type": "string",
+            "pattern": DURATION_PATTERN,
+            "default": "15m",
+            "description": "How often the agent checks (<n>s|m|h|d).",
+        },
+        "heartbeat": {
+            "type": "string",
+            "pattern": DURATION_PATTERN,
+            "default": "6h",
+            "description": "Push at least this often even when nothing but last_seen changed (<n>s|m|h|d).",
+        },
+        "identity_file": {
+            "type": "string",
+            "pattern": "^/[A-Za-z0-9._/-]+$",
+            "maxLength": 256,
+            "default": "/var/lib/prov-state/id_ed25519",
+            "description": "Path ON THE HOST of the ssh deploy key; a human places it there, prov never renders a key.",
+        },
+        "known_hosts": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 16,
+            "items": {"type": "string", "pattern": KNOWN_HOSTS_PATTERN, "maxLength": 2048},
+            "description": "known_hosts lines (public host keys) of the repository's ssh server; host-key checking stays on.",
+        },
+    },
+}
+# The ``[state]`` envelope table. Kind-neutral and optional. ``decommissioned`` never changes
+# a render; ``report`` does (the backend renders the agent).
 STATE_TABLE: Dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
-    "description": "Lifecycle intent of the item, read by prov status (docs/state.md).",
+    "description": "Lifecycle intent and state reporting of the item (docs/state.md).",
     "properties": {
         "decommissioned": {
             "type": "boolean",
             "description": "The item is retired: prov status shows it as decommissioned whatever its host still reports.",
         },
+        "report": STATE_REPORT_TABLE,
     },
 }
 # A reference alias (a key of ``[refs]`` and of a kind's REFS): a lowercase id that may hold

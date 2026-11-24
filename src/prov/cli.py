@@ -508,7 +508,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("refs", nargs="*", metavar="ref", help="items to show (default: every item under the root)")
     p.add_argument("--state-dir", help="directory of <kind>/<name>.json state records (default: $PROV_STATE_DIR; none: every item is planned)")
-    p.add_argument("--stale-after", default="72h", help="a host not seen for longer is stale: <n>s|m|h|d (default: 72h)")
+    p.add_argument("--stale-after", default=state.DEFAULT_STALE_AFTER, help=f"a host not seen for longer is stale: <n>s|m|h|d (default: {state.DEFAULT_STALE_AFTER})")
     p.add_argument("--now", help="evaluate at this RFC 3339 time instead of the clock (reproducible output)")
     p = add(
         "conformance",

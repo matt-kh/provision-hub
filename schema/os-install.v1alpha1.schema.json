@@ -388,11 +388,65 @@
     },
     "state": {
       "additionalProperties": false,
-      "description": "Lifecycle intent of the item, read by prov status (docs/state.md).",
+      "description": "Lifecycle intent and state reporting of the item (docs/state.md).",
       "properties": {
         "decommissioned": {
           "description": "The item is retired: prov status shows it as decommissioned whatever its host still reports.",
           "type": "boolean"
+        },
+        "report": {
+          "additionalProperties": false,
+          "description": "Render a report-only state agent: the host writes its state record to a state repository.",
+          "properties": {
+            "branch": {
+              "default": "main",
+              "description": "Branch of the state repository the agent writes to.",
+              "maxLength": 100,
+              "pattern": "^[A-Za-z0-9_]+([./-][A-Za-z0-9_]+)*$",
+              "type": "string"
+            },
+            "heartbeat": {
+              "default": "6h",
+              "description": "Push at least this often even when nothing but last_seen changed (<n>s|m|h|d).",
+              "pattern": "^[1-9][0-9]{0,5}[smhd]$",
+              "type": "string"
+            },
+            "identity_file": {
+              "default": "/var/lib/prov-state/id_ed25519",
+              "description": "Path ON THE HOST of the ssh deploy key; a human places it there, prov never renders a key.",
+              "maxLength": 256,
+              "pattern": "^/[A-Za-z0-9._/-]+$",
+              "type": "string"
+            },
+            "interval": {
+              "default": "15m",
+              "description": "How often the agent checks (<n>s|m|h|d).",
+              "pattern": "^[1-9][0-9]{0,5}[smhd]$",
+              "type": "string"
+            },
+            "known_hosts": {
+              "description": "known_hosts lines (public host keys) of the repository's ssh server; host-key checking stays on.",
+              "items": {
+                "maxLength": 2048,
+                "pattern": "^[A-Za-z0-9.:,*?|=+/_\\[\\]-]+ (ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256|ecdsa-sha2-nistp384|ecdsa-sha2-nistp521|sk-ssh-ed25519@openssh\\.com|sk-ecdsa-sha2-nistp256@openssh\\.com) [A-Za-z0-9+/]+={0,2}$",
+                "type": "string"
+              },
+              "maxItems": 16,
+              "minItems": 1,
+              "type": "array"
+            },
+            "repo": {
+              "description": "ssh git URL of the state repository (ssh://user@host/path or user@host:path); the host needs write access.",
+              "maxLength": 512,
+              "pattern": "^(ssh://[A-Za-z0-9_][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]{1,5})?/[A-Za-z0-9._~][A-Za-z0-9._~/-]*|[A-Za-z0-9_][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9.-]*:[A-Za-z0-9._~][A-Za-z0-9._~/-]*)$",
+              "type": "string"
+            }
+          },
+          "required": [
+            "repo",
+            "known_hosts"
+          ],
+          "type": "object"
         }
       },
       "type": "object"

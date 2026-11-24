@@ -22,6 +22,7 @@ from . import kinds
 from .kinds.common import DEFS
 from .registry import Context, call_plugin, for_kind, lookup
 from .render import safe_item_dir
+from .state import report_findings
 from .schema import KIND_PATTERN, LEGACY_KEYS, LEGACY_TABLES, NAME_PATTERN, SPEC_FILE, ConfigError, api_versions, read_toml, spec_schema
 from .text import show, short_repr
 from .validate import ERROR, WARNING, Finding, apply_defaults, has_errors, schema_errors
@@ -122,7 +123,7 @@ def check_raw(
     if findings:
         return None, findings, NO_REFS
     spec = apply_defaults(raw, schema)
-    findings = list(kinds.call_kind(kind, "semantic", spec))
+    findings = list(kinds.call_kind(kind, "semantic", spec)) + report_findings(spec, backend)
     refs, resolved = NO_REFS, not spec.get("refs")
     if resolver is not None:
         refs, ref_findings = resolver(kind_name, name, spec)

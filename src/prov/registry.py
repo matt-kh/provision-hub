@@ -3,7 +3,8 @@
 A backend is a module (or any object) exposing the contract in ``docs/adding-a-backend.md``:
 ``NAME``, ``KIND``, ``SCHEMA``, ``render(spec, ctx)``, ``validate(rendered_dir)``,
 ``plan(spec, ctx)``, and optionally ``PLUGIN_API`` (default 1), ``check(spec, ctx)``,
-``starter(name)``, ``PRESERVE``, ``REFS``, ``FIXTURES`` and ``UNSUPPORTED_FIXTURES``
+``starter(name)``, ``PRESERVE``, ``REFS``, ``STATE_AGENT`` (True: renders the agent of
+``[state.report]``, docs/state.md), ``FIXTURES`` and ``UNSUPPORTED_FIXTURES``
 (conformance: the backend table per kind fixture, and the fixtures it cannot express, with a
 reason; only their shape is checked at discovery), ``artifacts(spec)`` and ``build(spec, ctx)`` with
 ``BUILD_TOOLS`` (build is reserved: checked here, not called yet; a backend's ``REFS`` is
@@ -86,6 +87,8 @@ def check_contract(plugin: Backend, origin: str) -> None:
         for path in keep:
             if PurePosixPath(path).as_posix() != path:  # "./x", "a//b", "a/": never what render writes
                 raise ConfigError(f"backend plugin {origin}: PRESERVE: {short_repr(path)} is not a normalised relative path")
+    if hasattr(plugin, "STATE_AGENT") and not isinstance(plugin.STATE_AGENT, bool):
+        raise ConfigError(f"backend plugin {origin}: STATE_AGENT must be True or False")
     if hasattr(plugin, "REFS") and not isinstance(plugin.REFS, dict):
         raise ConfigError(f"backend plugin {origin}: REFS must be a dict")
     if getattr(plugin, "REFS", None):
