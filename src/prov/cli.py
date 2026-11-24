@@ -22,10 +22,11 @@ from typing import Any, List, Optional, Sequence, Tuple
 from . import __version__, kinds
 from .kinds.common import DEFS
 from .plan import plan_lines
-from .registry import Context, builtin_names, call_plugin, discover, for_kind, lookup, preserved
+from .registry import builtin_names, call_plugin, discover, for_kind, lookup, preserved
+from .refs import thaw
 from .render import atomic_write, diff_rendered, safe_item_dir, special_entries, write_rendered
 from .schema import ID_PATTERN, KIND_PATTERN, NAME_PATTERN, SPEC_FILE, ConfigError, api_versions, kind_group, read_toml, schema_json, spec_schema, tomllib
-from .spec import check_spec, load_spec, parse_ref
+from .spec import check_item, check_spec, load_item, parse_ref
 from .text import esc, json_text, short_repr, show
 from .validate import ERROR, WARNING, Finding, has_errors
 
@@ -55,10 +56,11 @@ def item_dir(root: Path, ref: str) -> Tuple[str, str, Path]:
 
 
 def _load(args: argparse.Namespace) -> tuple:
+    """(backend, spec, findings, item dir, ctx) of a valid item, its references resolved (exit 2 otherwise)."""
     backends = discover()
     kind, name, idir = item_dir(args.root, args.ref)
-    spec, findings = load_spec(idir / SPEC_FILE, kind, name, backends)
-    return backends[spec["backend"]], spec, findings, idir, Context(name)
+    plugin, spec, findings, ctx = load_item(args.root, kind, name, backends)
+    return plugin, spec, findings, idir, ctx
 
 
 def _sorted_findings(findings: List[Any]) -> List[Any]:
@@ -99,6 +101,7 @@ def cmd_kinds(args: argparse.Namespace) -> int:
                     "summary": _doc_line(kind),
                     "builtin": name in own,
                     "outputs": getattr(kind, "OUTPUTS", None),
+                    "refs": kinds.declared_refs(kind),
                 }
                 for name, kind in found.items()
             ]
@@ -287,16 +290,12 @@ def cmd_diff(args: argparse.Namespace) -> int:
 def cmd_validate(args: argparse.Namespace) -> int:
     backends = discover()
     kind, name, idir = item_dir(args.root, args.ref)
-    path = idir / SPEC_FILE
-    raw = read_toml(path)
-    try:
-        spec, findings = check_spec(raw, kind, name, backends)
-    except ConfigError as exc:
-        raise ConfigError(f"{show(str(path))}: {exc}") from None
-    outputs = None  # null in --json while the spec is invalid
+    raw, spec, findings, ctx = check_item(args.root, kind, name, backends)  # references resolved into ctx.refs
+    outputs = refs = None  # null in --json while the spec is invalid
     if spec is not None:
         outputs = kinds.item_outputs(kinds.get(kind), spec)  # a broken outputs is exit 2, like a broken semantic
-        plugin, ctx = backends[spec["backend"]], Context(name)
+        refs = {alias: {"ref": entry["ref"], "kind": entry["kind"], "outputs": thaw(entry["outputs"])} for alias, entry in ctx.refs.items()}
+        plugin = backends[spec["backend"]]
         rendered = idir / "rendered"
         if not rendered.is_dir():
             findings.append(Finding(ERROR, "not rendered yet; run prov render " + args.ref, "rendered"))
@@ -316,6 +315,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
             "backend": backend if isinstance(backend, str) and backend in for_kind(backends, kind) else None,
             "ok": not failed,
             "outputs": outputs,
+            "refs": refs,
             "findings": [{"level": str(f.level), "where": str(f.where), "message": str(f.message)} for f in _sorted_findings(findings)],
         })  # fmt: skip
         return EXIT_FINDINGS if failed else EXIT_OK

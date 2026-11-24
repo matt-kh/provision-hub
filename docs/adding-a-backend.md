@@ -26,7 +26,7 @@ party) exposes:
 | `check` | no | `check(spec: dict, ctx: Context) -> list[Finding]` | Cross-field rules JSON Schema cannot express. |
 | `starter` | no | `starter(name: str) -> str` | `spec.toml` text for `prov init <kind>/<name> --backend <NAME>`; without it `init` refuses. |
 | `PRESERVE` | no | `tuple[str, ...]` | Relative paths of files a human may create in `rendered/` that `render` must keep and `diff`/`validate` must not report as stale (e.g. `("flake.lock",)`), written normalised (no `./`, `//` or trailing `/`). Only regular files are kept; symlinks and special files are removed whatever their name. A listed name that `render` also returns, or that is a parent directory of a file it returns, is not preserved (render's output wins), so list only names that are never a file or a parent directory of a file `render` produces. |
-| `REFS` | no | `dict` | Reserved for cross-spec references (a later release). |
+| `REFS` | no | `dict` | Reserved; must be empty (`{}`) if present. References are declared by the kind (its `REFS`) and reach your backend as `ctx.refs`. |
 | `artifacts` | no | `artifacts(spec: dict) -> ...` | Reserved for `prov build` (a later release). |
 | `build` + `BUILD_TOOLS` | no | `build(spec, ctx)`, `BUILD_TOOLS: tuple[str, ...]` | Reserved for `prov build`, which will write only under the item's `build/`. A backend that defines `build` must list the local tools it runs in `BUILD_TOOLS`. |
 
@@ -47,7 +47,7 @@ make `prov validate` exit 1. Printed form: `error: storage.disks: needs one disk
 The registry (`prov.registry.discover`) rejects a backend that lacks a required member, whose
 optional members are not callable, whose `PLUGIN_API` is not `1`, whose `KIND` is unknown,
 whose `NAME` is not an id, differs from its entry-point name, is already registered or
-collides with an envelope key or a core property of its kind,
+collides with an envelope key (`refs` included) or a core property of its kind, whose `REFS` is not empty,
 that defines `build` without `BUILD_TOOLS`, whose `PRESERVE` is not a list of safe, normalised relative
 paths, or whose `SCHEMA` uses an unsupported keyword, an
 invalid keyword value or an invalid `pattern`. Every call into a backend goes through
@@ -68,7 +68,15 @@ a message. Plan lines are the exception: they are refused, not escaped (section 
 `ctx` is `prov.registry.Context`, a frozen dataclass:
 
 - `ctx.name` — the item name, i.e. the directory `<root>/<kind>/<name>/` (`"demo-cp"`).
-- `ctx.refs` — a read-only mapping of resolved references; always empty for now.
+- `ctx.refs` — the item's resolved references ([kinds.md](kinds.md#references)): a
+  read-only mapping from each alias present in the spec's `[refs]` table to
+  `{"ref": "registry.example.org/hub", "kind": "registry.example.org", "name": "hub",
+  "outputs": {...}}`, where `outputs` are the target's outputs (its kind's `OUTPUTS`, `{}`
+  for a kind without). Deeply read-only: mappings are `types.MappingProxyType`, arrays
+  tuples; copy before changing or serialising (`json.dumps(dict(...))` fails on a mapping
+  proxy). `check`, `render` and `plan` get it populated; they are called only when every
+  reference resolved. An optional alias the spec leaves out is absent: test with `in`.
+  Empty for a kind without references.
 
 Use `ctx.name` only where the item name is meant; values the user wrote (such as
 `hostname`) come from `spec`.
@@ -78,7 +86,9 @@ Use `ctx.name` only where the item name is meant; values the user wrote (such as
 `render`, `plan` and `check` receive the parsed `spec.toml` as a plain `dict` **after** the
 envelope check, the full JSON Schema and the kind's semantic checks, **with every schema
 `default` filled in** (core keys and your table). Keys without a default may be absent: test
-with `in`. The envelope keys are present too: `api_version`, `kind`, `backend` (your `NAME`).
+with `in`. The envelope keys are present too: `api_version`, `kind`, `backend` (your `NAME`). For a kind
+with references, `spec["refs"]` holds the raw `[refs]` table (alias to ref string) when the
+spec has one; use `ctx.refs` for the resolved targets.
 
 For the `os-install` kind (authoritative definition:
 `schema/os-install.v1alpha1.schema.json`, described in [kinds.md](kinds.md)):

@@ -15,11 +15,12 @@ hostname = "demo"
 ```
 
 The ref `<kind>/<name>` (`os-install/demo`) is the item's path below the root, the CLI
-argument (`prov render os-install/demo`) and the syntax future cross-references will use.
+argument (`prov render os-install/demo`) and the value of a reference in the optional
+`[refs]` table (see [References](#references)).
 
 | Part | Owned by | Defined in |
 |---|---|---|
-| Envelope: `api_version`, `kind`, `backend` | prov core | `src/prov/schema.py`, `src/prov/spec.py` |
+| Envelope: `api_version`, `kind`, `backend`; optional `[refs]` | prov core | `src/prov/schema.py`, `src/prov/spec.py` |
 | Core keys of the kind (`hostname`, `storage`, ...) | the kind | the kind plugin's module (`src/prov/kinds/os_install.py`) |
 | Backend table (`[ubuntu-autoinstall]`) | the backend | its module's `SCHEMA` |
 | Shared definitions (`#/$defs/user`, `#/$defs/interface`) | prov core | `src/prov/kinds/common.py` |
@@ -57,6 +58,9 @@ All of these fail with a clear message and exit code 2:
 - `kind` missing or different from the directory kind;
 - `backend` missing, not registered, or registered for another kind.
 
+`refs` is reserved as well: a kind may not define a core property and a backend may not be
+named `refs`.
+
 Values echoed in these messages are shown as a repr capped at 80 characters.
 
 Schema and semantic errors after the envelope are findings (`prov validate` exits 1;
@@ -74,7 +78,7 @@ A kind module exposes:
 | `PROPERTIES` | JSON Schema of the core keys; may `$ref` `#/$defs/<name>` from `common.DEFS` |
 | `REQUIRED` | required core keys |
 | `semantic(spec)` | `list[Finding]` for rules JSON Schema cannot express |
-| `REFS` | cross-spec references; reserved, empty for now |
+| `REFS` | the references an item may hold: `{alias: {"kind", "required", "description"}}` (`required` and `description` optional), `{}` for none (see [References](#references)) |
 | `NAME_KEY` | optional: the core key that should equal the item name (a mismatch is a warning) |
 | `SCHEMA_URL` | optional: an `https://` base URL ending in `/`; the composed schema's `$id` is `SCHEMA_URL` + `<NAME>.<version>.schema.json` |
 | `OUTPUTS` | optional, together with `outputs`: object-schema fragment of what an item exports (see [Outputs](#outputs)) |
@@ -93,9 +97,9 @@ it equal to the code.
 ## Outputs
 
 A kind may export a few values of each item, for other items to read: a registry's URL, a
-cluster's API endpoint, the name of the Secret that holds a CA. Cross-spec references
-(later) will hand them to the backends of the items that refer to it; today they are shown
-by `prov validate --json`. A kind declares both members or neither:
+cluster's API endpoint, the name of the Secret that holds a CA. [References](#references)
+hand them to the backends of the items that refer to it (`ctx.refs`), and `prov validate
+--json` shows them. A kind declares both members or neither:
 
 ```python
 OUTPUTS = {
@@ -121,7 +125,8 @@ def outputs(spec):
   tuples, objects or NaN in a `default`, `enum` or `const`). It is public API, versioned
   with the kind.
 - **`outputs(spec)`** gets the tool-neutral part of the validated spec with defaults
-  applied: the envelope and the kind's core keys, **never the backend's table**, so an
+  applied: `api_version`, `kind` and the kind's core keys, **never the backend's name or
+  table**, so an
   item's outputs mean the same whichever backend renders it, and switching backends never
   changes what referring items render. The spec only: no item name, no file, no other item. It must be a **pure,
   deterministic** function of that spec: the same spec gives equal outputs on every run,
@@ -137,7 +142,8 @@ def outputs(spec):
   a non-JSON value or a schema violation is exit code 2:
   `kind '<NAME>' failed in outputs: ...`, escaped.
 - `prov validate` computes the outputs of a valid spec (so a broken `outputs` fails it with
-  exit 2, with or without `--json`); `render`, `diff` and `plan` do not need them yet.
+  exit 2, with or without `--json`); `render`, `diff` and `plan` do not compute an item's
+  own outputs, only those of the items it refers to ([References](#references)).
   A kind without `OUTPUTS` exports `{}`. os-install declares none.
 
 **Post-apply facts are references, never values.** prov never reads live state: no
@@ -163,6 +169,116 @@ It is a lint, not a guarantee: it catches honest mistakes, not every secret (a k
 still export one under another name), and reviewers of a kind check what its outputs carry.
 It is not part of `PLUGIN_API`: its word lists may grow between releases, each time with a
 CHANGELOG entry.
+
+## References
+
+An item may refer to other items, by ref, to use their [outputs](#outputs): a mirror names
+the registry it pulls from, a VM the image it boots, a cluster the machines of its node
+pools. The kind declares which references its items may hold; the spec names the targets
+in one optional envelope table, `[refs]`:
+
+```toml
+api_version = "example.org/v1alpha1"
+kind = "mirror.example.org"
+backend = "example-mirror-text"
+hostname = "m1.example.org"
+
+[refs]
+upstream = "registry.example.org/hub"   # alias = "<kind>/<name>"
+
+[example-mirror-text]
+```
+
+```python
+REFS = {
+    "upstream": {"kind": "registry.example.org", "required": True, "description": "The registry this mirror pulls from."},
+    "peer": {"kind": "mirror.example.org"},  # optional, no description
+}
+```
+
+**Declaring.** `REFS` maps each alias to a dict with `kind`, the kind name of the target
+(bare or dotted; it need not be installed when the kind is loaded), and optionally
+`required` (`true` or `false`, default `false`) and `description` (a string, default
+`""`); any other key is refused. `prov kinds --json` shows every entry with all three keys,
+defaults filled in. An alias matches `^[a-z][a-z0-9_-]{0,62}$`: a lowercase letter, then
+up to 62 lowercase letters, digits, `_` or `-`. A kind with
+`REFS = {}` has no `[refs]` table: its schema does not contain one, and a spec that has one
+fails with `unknown key 'refs'`. For a kind with references, the composed schema
+(`prov schema <kind>`) has a `refs` object with one string property per alias whose
+`pattern` pins the target kind (`^registry\.example\.org/<item name>$`) and that carries
+the alias's `description` when it has one, no other aliases (`additionalProperties:
+false`), and the required aliases in its `required` (then `refs` itself is required too). os-install declares none, so its schema is unchanged.
+
+**Resolution.** `render`, `diff`, `plan` and `validate` resolve the references of the item
+against the root before calling its backend; the backend's `check`, `render` and `plan` get
+them as `ctx.refs` ([adding-a-backend.md](adding-a-backend.md)):
+
+```text
+ctx.refs["upstream"] == {"ref": "registry.example.org/hub", "kind": "registry.example.org",
+                         "name": "hub", "outputs": {"url": "https://hub.example.org:5001"}}
+```
+
+- A target is read from `<root>/<kind>/<name>/spec.toml` and **checked in full**: envelope,
+  schema, semantic checks, its backend's `check`, and its own references, so the whole
+  closure of references is valid; its outputs are then computed (`outputs(spec)`). The
+  consumer gets one hop: the outputs of its direct targets, not of theirs.
+- A target kind without `OUTPUTS` is allowed, by rule: its items can be referred to, and
+  their outputs are `{}` (the reference still records the dependency, and the target is
+  still checked).
+- Only aliases present in `[refs]` appear in `ctx.refs` (an optional one left out is
+  absent). The mapping is deeply read-only: mappings are `types.MappingProxyType`, arrays
+  tuples, so a backend cannot change what another call or another item sees; copy them
+  (`dict(...)`, `list(...)`) before changing or serialising them.
+- Each target is read and checked once per command, however many paths lead to it. Only
+  a target found invalid because a chain below it was too long *from where it was reached*
+  is checked again when a shorter path reaches it (the depth limit counts from the item
+  the command is about, not from the target).
+- Only `spec.toml` of a target is read: its `rendered/` and `build/` are not looked at, so
+  a target that cannot be rendered does not block the items that refer to it.
+- `prov init` checks the starter's `[refs]` by the schema only (the targets may not exist
+  yet) and then skips the backend's `check`.
+
+**Errors** are findings at `refs.<alias>` (`prov validate` exits 1; `render`, `diff` and
+`plan` exit 2 with the spec's error list, like any invalid spec):
+
+| Finding | Meaning |
+|---|---|
+| `refs.<alias>: '<value>' does not match ^...$` | the value is not a ref of the declared target kind (wrong kind, invalid name) |
+| `refs: unknown key '<alias>'` / `refs: missing required key '<alias>'` | an alias the kind does not declare / a required one is missing |
+| `<ref>: kind '<kind>' is not installed` | no plugin provides the target kind |
+| `invalid target: <ref>: no such item (...)` | no `spec.toml` at the target's path |
+| `invalid target: <ref>: <where>: <message>` | the target is invalid; its first error is shown (`run prov validate <ref>` for all) |
+| `invalid target: <a> -> <b>: ...` | an invalid item further down the chain of references, through the refs that lead to it |
+| `invalid target: <ref>: <ref>: is a symlink; refused` | the target's `<kind>/` or `<name>/` directory is a symlink (never followed); a symlinked `spec.toml` reads `spec.toml: not a regular file; ...` |
+| `<ref> refers to the item itself` | self-reference |
+| `reference cycle: <a> -> <b> -> <a>` | a cycle; every item on it is invalid |
+| `more than 32 references in a row (<a> -> ... -> <z>)` | a chain longer than 32 references from the item checked |
+
+Findings name targets by ref, never by absolute path. A chain longer than five refs is
+shortened to its first three and last two (`a -> b -> c -> ... -> y -> z`). A broken plugin
+of a target (an exception in its kind's `semantic` or `outputs` or its backend's `check`)
+is exit 2, as for the item itself, naming the target and the plugin:
+`reference target registry.example.org/hub: kind 'registry.example.org' failed in outputs: ...`.
+
+**Staleness.** A consumer's rendered files may depend on its targets' outputs, so editing a
+target's `spec.toml` can make the consumer's `rendered/` out of date: `prov diff` shows the
+change and `prov validate` reports `rendered: out of date with spec.toml` until the
+consumer is rendered again. This is intended: render the consumers of an item after
+changing it. The output stays deterministic ([determinism.md](determinism.md)): the same
+specs of the item and its targets render a byte-identical tree.
+
+**Security.** Resolution only reads `spec.toml` files of targets below the root: it never
+follows a symlink (a symlinked `<kind>/` or `<name>/` directory, or a `spec.toml` that is a
+symlink or special file, is an error, never read), never leaves the root (refs are a kind
+name and one DNS label: no `..`, no `/`), never writes, runs or connects to anything, and
+reads no `rendered/` or `build/` files. Values from target specs reach the consumer's
+backend only through the target kind's `outputs`.
+
+**Known limitations.** The symlink checks look at a path and then open it, so a process
+that swaps a target's directory for a symlink between the check and the read could make
+prov read another file: the same exposure as for the item's own `spec.toml` today (the
+file itself is opened with `O_NOFOLLOW`, never through a final symlink). Run prov on roots
+that only you write to.
 
 ## Kind plugins
 
@@ -250,7 +366,7 @@ an invalid spec), and stdout stays empty. `prov list` has no `--json`.
 
 ```text
 prov kinds --json
-{"format", "kinds": [{"name", "group", "api_versions", "summary", "builtin", "outputs"}, ...]}  # ordered by name
+{"format", "kinds": [{"name", "group", "api_versions", "summary", "builtin", "outputs", "refs"}, ...]}  # ordered by name
 
 prov backends [--kind K] --json
 {"format", "backends": [{"name", "kind", "summary", "builtin", "starter", "check", "preserve"}, ...]}
@@ -258,7 +374,7 @@ prov backends [--kind K] --json
 prov schema <kind> --json                            # the schema itself; --json changes nothing
 
 prov validate <ref> --json                           # exit 0 ok, 1 findings
-{"format", "ref", "backend", "ok", "outputs", "findings": [{"level", "where", "message"}, ...]}
+{"format", "ref", "backend", "ok", "outputs", "refs", "findings": [{"level", "where", "message"}, ...]}
 
 prov plan <ref> --json
 {"format", "ref", "backend", "rendered_dir", "lines": [...]}
@@ -276,13 +392,15 @@ prov plan <ref> --json
 | `ref`, `backend` | the item ref and the spec's `backend` value, also when other keys fail validation; `null` only when it does not name a registered backend of the item's kind (in practice an exit-2 envelope error) |
 | `outputs` (kinds) | the kind's `OUTPUTS` schema, or `null` for a kind without outputs |
 | `outputs` (validate) | the item's outputs ([Outputs](#outputs)), raw like plugin text: `{}` for a kind without `OUTPUTS`; `null` while the spec is invalid (schema, semantic or backend `check` errors), so outputs were not computed. Computed even when `rendered/` is missing or out of date |
+| `refs` (kinds) | the kind's `REFS`, defaults filled in: `{alias: {"kind", "required", "description"}}` (`{}` without references) |
+| `refs` (validate) | the item's resolved references, `{alias: {"ref", "kind", "outputs"}}` with the target's outputs, raw like plugin text (`{}` without references); `null` while the spec is invalid, including when a reference does not resolve |
 | `ok` | no finding of level `error`; the exit code is 0 exactly when it is `true` |
 | `findings` | every finding, warnings and `skipped` ones included: errors first, then by `where`, `message`, as in the text output; `where` is `""` for the whole item |
 | `rendered_dir` | absolute path of the item's `rendered/` directory, the plan's `cd` target |
 | `lines` | exactly the lines the text output prints, in order, header comments and `cd` included (text = the lines joined by newlines); a line with an unsafe character is refused, never escaped |
 
 **Stability.** `format` is versioned on its own, independent of the spec `api_version`s.
-Adding a key to these objects (as `outputs` was; references and conformance fixtures
+Adding a key to these objects (as `outputs` and `refs` were; conformance fixtures
 come later) keeps `format` unchanged: consumers ignore keys they do not know. Removing or renaming a
 key, or changing a value's type or meaning, moves `format` on (`prov.cli/v1alpha2`, then
 `prov.cli/v1` with 1.0) and carries a CHANGELOG Migration paragraph; check `format` before
@@ -332,8 +450,7 @@ These show the direction; their keys will change before they land.
   node pools referencing vm or os-install items, network ranges, add-ons. Backends per
   distribution (Talos, k3s, RKE2, kubeadm), none preferred.
 
-Cross-spec references (`REFS`, `ctx.refs`), `prov graph` and `prov build` (artefacts under
-`build/`) come in later releases.
+`prov graph` and `prov build` (artefacts under `build/`) come in later releases.
 
 ## Versioning policy
 

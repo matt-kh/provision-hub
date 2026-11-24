@@ -1,20 +1,28 @@
 """Items and specs: refs, the envelope check, and full spec validation.
 
 An item is ``<root>/<kind>/<name>/`` holding ``spec.toml``; its ref ``<kind>/<name>`` is the
-path, the CLI argument and the future cross-reference syntax. Nothing here is specific to a
+path, the CLI argument and the value of a ``[refs]`` entry. Nothing here is specific to a
 kind or a backend: both are looked up (``prov.kinds``, ``prov.registry``).
+
+References are resolved only against a root: ``check_item`` / ``load_item`` (and
+``check_spec`` / ``load_spec`` given ``root=``) resolve the spec's ``[refs]`` through
+``prov.refs`` and hand the backend a populated ``Context.refs``. Without a root, ``[refs]``
+is checked by the schema only, and the backend's ``check`` is skipped when the spec has
+references (its ``ctx.refs`` would be empty).
 """
 
 from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from types import MappingProxyType
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 from . import kinds
 from .kinds.common import DEFS
 from .registry import Context, call_plugin, for_kind, lookup
-from .schema import KIND_PATTERN, LEGACY_KEYS, LEGACY_TABLES, NAME_PATTERN, ConfigError, api_versions, read_toml, spec_schema
+from .render import safe_item_dir
+from .schema import KIND_PATTERN, LEGACY_KEYS, LEGACY_TABLES, NAME_PATTERN, SPEC_FILE, ConfigError, api_versions, read_toml, spec_schema
 from .text import show, short_repr
 from .validate import ERROR, WARNING, Finding, apply_defaults, has_errors, schema_errors
 
@@ -23,18 +31,24 @@ def _full(pattern: str, value: str) -> bool:
     return re.fullmatch(pattern.strip("^$"), value) is not None
 
 
-def parse_ref(ref: str) -> Tuple[str, str]:
-    """``"<kind>/<name>"`` -> (kind, name); ConfigError for anything else.
+def split_ref(ref: str) -> Tuple[str, str]:
+    """``"<kind>/<name>"`` -> (kind, name) by syntax alone; ConfigError for anything else.
 
-    The kind must be a known kind (bare, or dotted like ``registry.example.org``) and the
-    name one DNS label, so a ref can never escape the root (no ``..``, no extra ``/``, no
-    control characters).
+    The kind must have a kind name's shape (bare, or dotted like ``registry.example.org``)
+    and the name be one DNS label, so a ref can never escape the root (no ``..``, no extra
+    ``/``, no control characters). Whether the kind is installed is not checked.
     """
     kind, sep, name = ref.partition("/")
     if not sep or not _full(KIND_PATTERN, kind):
         raise ConfigError(f"invalid ref {short_repr(ref)}: expected <kind>/<name>, for example os-install/demo")
     if not _full(NAME_PATTERN, name):
         raise ConfigError(f"invalid name {short_repr(name)} in ref {short_repr(ref)} (lowercase letters, digits, '-'; one DNS label)")
+    return kind, name
+
+
+def parse_ref(ref: str) -> Tuple[str, str]:
+    """``"<kind>/<name>"`` -> (kind, name) of an installed kind; ConfigError for anything else (``split_ref``)."""
+    kind, name = split_ref(ref)
     kinds.get(kind)
     return kind, name
 
@@ -84,35 +98,104 @@ def name_findings(kind: Any, spec: Mapping[str, Any], name: str) -> List[Finding
     return []
 
 
-def check_spec(raw: Mapping[str, Any], kind_name: str, name: str, backends: Mapping[str, Any]) -> Tuple[Optional[Dict[str, Any]], List[Finding]]:
-    """Validate a parsed spec.toml. Returns (spec with defaults or None, findings).
+NO_REFS: Mapping[str, Any] = MappingProxyType({})
 
-    Envelope errors raise ConfigError; schema and semantic errors are findings.
+# resolver(kind_name, name, spec) -> (read-only alias mapping, findings); see prov.refs.Resolution.
+Resolver = Callable[[str, str, Dict[str, Any]], Tuple[Mapping[str, Any], List[Finding]]]
+
+
+def check_raw(
+    raw: Mapping[str, Any], kind_name: str, name: str, backends: Mapping[str, Any], resolver: Optional[Resolver]
+) -> Tuple[Optional[Dict[str, Any]], List[Finding], Mapping[str, Any]]:
+    """Validate a parsed spec.toml. Returns (spec with defaults or None, findings, resolved refs).
+
+    Envelope errors raise ConfigError; schema, semantic, reference and backend ``check``
+    errors are findings. With a ``resolver`` the spec's references are resolved and the
+    backend's ``check`` gets them in ``ctx.refs``; it is skipped when they did not resolve.
+    Without one, a spec with references skips the backend's ``check`` (``ctx.refs`` would be
+    empty). The refs are ``NO_REFS`` unless the spec is valid.
     """
     backend = resolve_backend(raw, kind_name, backends)
     kind = kinds.get(kind_name)
     schema = spec_schema(kind, for_kind(backends, kind_name), DEFS)
     findings = [Finding(ERROR, msg) for msg in schema_errors(raw, schema)]
     if findings:
-        return None, findings
+        return None, findings, NO_REFS
     spec = apply_defaults(raw, schema)
     findings = list(kinds.call_kind(kind, "semantic", spec))
-    if hasattr(backend, "check"):
-        findings += call_plugin(backend, "check", spec, Context(name))
+    refs, resolved = NO_REFS, not spec.get("refs")
+    if resolver is not None:
+        refs, ref_findings = resolver(kind_name, name, spec)
+        findings += ref_findings
+        resolved = not has_errors(ref_findings)
+    if resolved and hasattr(backend, "check"):
+        findings += call_plugin(backend, "check", spec, Context(name, refs))
     findings += name_findings(kind, spec, name)
     if has_errors(findings):
-        return None, findings
+        return None, findings, NO_REFS
+    return spec, findings, refs
+
+
+def _resolver(root: Optional[Path], backends: Mapping[str, Any]) -> Optional[Resolver]:
+    if root is None:
+        return None
+    from .refs import Resolution  # prov.refs reads target items through this module
+
+    return Resolution(root, backends)
+
+
+def check_spec(
+    raw: Mapping[str, Any], kind_name: str, name: str, backends: Mapping[str, Any], root: Optional[Path] = None
+) -> Tuple[Optional[Dict[str, Any]], List[Finding]]:
+    """Validate a parsed spec.toml. Returns (spec with defaults or None, findings).
+
+    Envelope errors raise ConfigError; schema and semantic errors are findings. With
+    ``root`` the spec's references are resolved against it (their errors are findings at
+    ``refs.<alias>``); without, ``[refs]`` is checked by the schema only (``check_raw``).
+    """
+    spec, findings, _ = check_raw(raw, kind_name, name, backends, _resolver(root, backends))
     return spec, findings
 
 
-def load_spec(path: Path, kind_name: str, name: str, backends: Mapping[str, Any]) -> Tuple[Dict[str, Any], List[Finding]]:
-    """Read and validate spec.toml; raise ConfigError listing every error."""
+def _invalid(path: Path, findings: List[Finding]) -> ConfigError:
+    lines = "\n".join(f"  {f}" for f in findings if f.level == ERROR)
+    return ConfigError(f"{show(str(path))}: invalid spec:\n{lines}")
+
+
+def load_spec(
+    path: Path, kind_name: str, name: str, backends: Mapping[str, Any], root: Optional[Path] = None
+) -> Tuple[Dict[str, Any], List[Finding]]:
+    """Read and validate spec.toml; raise ConfigError listing every error (``root``: see ``check_spec``)."""
     raw = read_toml(path)
     try:
-        spec, findings = check_spec(raw, kind_name, name, backends)
+        spec, findings = check_spec(raw, kind_name, name, backends, root=root)
     except ConfigError as exc:
         raise ConfigError(f"{show(str(path))}: {exc}") from None
     if spec is None:
-        lines = "\n".join(f"  {f}" for f in findings if f.level == ERROR)
-        raise ConfigError(f"{show(str(path))}: invalid spec:\n{lines}")
+        raise _invalid(path, findings)
     return spec, findings
+
+
+def check_item(
+    root: Path, kind_name: str, name: str, backends: Mapping[str, Any]
+) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]], List[Finding], Context]:
+    """Read ``<root>/<kind>/<name>/spec.toml`` and check it with its references resolved.
+
+    Returns (raw spec, spec with defaults or None, findings, Context with the resolved
+    refs). Envelope errors, unreadable files and plugin failures raise ConfigError (exit 2).
+    """
+    path = safe_item_dir(root, kind_name, name) / SPEC_FILE
+    raw = read_toml(path)
+    try:
+        spec, findings, refs = check_raw(raw, kind_name, name, backends, _resolver(root, backends))
+    except ConfigError as exc:
+        raise ConfigError(f"{show(str(path))}: {exc}") from None
+    return raw, spec, findings, Context(name, refs)
+
+
+def load_item(root: Path, kind_name: str, name: str, backends: Mapping[str, Any]) -> Tuple[Any, Dict[str, Any], List[Finding], Context]:
+    """(backend, spec, findings, ctx) of a valid item, references resolved; ConfigError (exit 2) otherwise."""
+    _, spec, findings, ctx = check_item(root, kind_name, name, backends)
+    if spec is None:
+        raise _invalid(safe_item_dir(root, kind_name, name) / SPEC_FILE, findings)
+    return backends[spec["backend"]], spec, findings, ctx

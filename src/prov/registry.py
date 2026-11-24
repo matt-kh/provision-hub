@@ -4,7 +4,9 @@ A backend is a module (or any object) exposing the contract in ``docs/adding-a-b
 ``NAME``, ``KIND``, ``SCHEMA``, ``render(spec, ctx)``, ``validate(rendered_dir)``,
 ``plan(spec, ctx)``, and optionally ``PLUGIN_API`` (default 1), ``check(spec, ctx)``,
 ``starter(name)``, ``PRESERVE``, ``REFS``, ``artifacts(spec)`` and ``build(spec, ctx)`` with
-``BUILD_TOOLS`` (build and references are reserved: checked here, not called yet).
+``BUILD_TOOLS`` (build is reserved: checked here, not called yet; a backend's ``REFS`` is
+reserved and must be empty, references are declared by the kind and reach the backend as
+``ctx.refs``).
 
 prov's own backends register the same way as third-party ones; ``builtin()`` is the set the
 provision-hub distribution registers, and core never imports a backend module.
@@ -40,7 +42,13 @@ Backend = Any  # a module or object implementing the contract
 
 @dataclass(frozen=True)
 class Context:
-    """What a backend gets besides the spec: the item name and resolved references (none yet)."""
+    """What a backend gets besides the spec: the item name and its resolved references.
+
+    ``refs`` maps each alias of the spec's ``[refs]`` table to a read-only mapping
+    ``{"ref", "kind", "name", "outputs"}`` (``prov.refs``): the target's outputs, deeply
+    read-only (mappings are ``MappingProxyType``, lists tuples). Empty for a spec without
+    references, and when no root was given to resolve them against.
+    """
 
     name: str
     refs: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
@@ -78,6 +86,11 @@ def check_contract(plugin: Backend, origin: str) -> None:
                 raise ConfigError(f"backend plugin {origin}: PRESERVE: {short_repr(path)} is not a normalised relative path")
     if hasattr(plugin, "REFS") and not isinstance(plugin.REFS, dict):
         raise ConfigError(f"backend plugin {origin}: REFS must be a dict")
+    if getattr(plugin, "REFS", None):
+        raise ConfigError(
+            f"backend plugin {origin}: REFS is reserved and must be empty; references are declared by the kind "
+            f"(REFS of kind {short_repr(plugin.KIND)}) and reach the backend as ctx.refs"
+        )
     if hasattr(plugin, "build"):
         tools = getattr(plugin, "BUILD_TOOLS", None)
         if not (isinstance(tools, (tuple, list)) and all(isinstance(t, str) for t in tools)):

@@ -42,12 +42,14 @@ stay minimal (pyyaml; tomli on 3.10 only) — justify any new one in the PR.
 - `src/prov/registry.py` — backend discovery, contract checks, `Context`, `call_plugin` (every
   call into a backend goes through it). `src/prov/plugin.py` — what kinds and backends share:
   entry-point loading, `PLUGIN_API`, the guarded call. `src/prov/spec.py` — refs and
-  envelope checks.
+  envelope checks, `check_item`/`load_item` (every verb that needs a valid item).
+  `src/prov/refs.py` — resolves a spec's `[refs]` into `Context.refs`: reads only targets'
+  `spec.toml` under the root, never through symlinks.
 - `src/prov/text.py` — the output-escaping predicate and helpers (`unsafe`, `esc`, `show`,
   `short_repr`) and `json_text`, the one JSON serialisation (schemas, every `--json`
   document; `ensure_ascii` is its printing boundary, values go in raw).
 - Core modules (`cli`, `spec`, `registry`, `render`, `plan`, `schema`, `validate`, `text`,
-  `util`, `plugin`, `kinds/__init__`) must stay kind- and backend-neutral and never import a
+  `util`, `plugin`, `refs`, `kinds/__init__`) must stay kind- and backend-neutral and never import a
   specific kind or backend module; `tests/test_kinds.py` and `tests/test_kind_plugins.py`
   prove it with fake kinds + backends (tests register them with the `extra_kinds` /
   `extra_backends` fixtures) and an import scan.

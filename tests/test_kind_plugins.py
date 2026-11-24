@@ -425,7 +425,7 @@ def test_list_with_the_kind_installed_lists_its_items(tmp_path, capsys, registry
 
 # --- core stays kind- and backend-neutral ---------------------------------------------------
 
-CORE_MODULES = ["cli", "spec", "registry", "render", "plan", "schema", "validate", "text", "util", "plugin", "kinds/__init__"]
+CORE_MODULES = ["cli", "spec", "registry", "render", "plan", "schema", "validate", "text", "util", "plugin", "refs", "kinds/__init__"]
 SPECIFIC = ("prov.backends", "prov.kinds.os_install")
 
 

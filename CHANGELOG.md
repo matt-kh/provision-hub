@@ -92,7 +92,7 @@ may change incompatibly; every such change has a Migration paragraph. See
   unchanged. Shapes and the stability promise: "Machine-readable output" in `docs/kinds.md`.
 - Kind outputs: a kind may declare `OUTPUTS` (an object-schema fragment with
   `"additionalProperties": false`, under the backend `SCHEMA` rules) together with
-  `outputs(spec)`, a pure, deterministic function of the tool-neutral part of the validated spec (envelope and core keys, never the backend's table) that returns plain
+  `outputs(spec)`, a pure, deterministic function of the tool-neutral part of the validated spec (`api_version`, `kind` and core keys, never the backend's name or table) that returns plain
   JSON data (exact types, 64-bit integers, no control characters in strings or keys) valid
   against `OUTPUTS`. Declaring only one, an `OUTPUTS` or `PROPERTIES` that is not plain JSON
   data, or an output name that looks like a secret value is refused at load; the same
@@ -107,6 +107,24 @@ may change incompatibly; every such change has a Migration paragraph. See
   `prov.cli/v1alpha1`, text output is unchanged. Post-apply facts are exported only as a
   path or secret-name reference the human writes in the spec, never a value; prov never
   reads live state. os-install declares no outputs. Docs: "Outputs" in `docs/kinds.md`.
+- References: a kind may declare `REFS` (`{alias: {"kind", "required", "description"}}`,
+  `required` defaulting to false and `description` to `""`; aliases match
+  `^[a-z][a-z0-9_-]{0,62}$`; checked when the kind is loaded) and its specs then name targets in one optional envelope
+  table, `[refs]` (`upstream = "registry.example.org/hub"`); the composed schema gains a
+  `refs` object only for such kinds (one pattern per alias pinning the target kind, required
+  aliases required), so `schema/os-install.v1alpha1.schema.json` is unchanged. `render`,
+  `diff`, `plan` and `validate` resolve the references against the root (new
+  `prov.refs`, `prov.spec.check_item` / `load_item`): only each target's `spec.toml` is
+  read, without following symlinks (its `rendered/` and `build/` do not matter), checked
+  in full with its own references, and its kind's outputs (`{}` for a kind without
+  `OUTPUTS`) reach the backend as the read-only `ctx.refs[alias]` =
+  `{"ref", "kind", "name", "outputs"}`. Missing, invalid or uninstalled targets,
+  self-references, cycles and chains of more than 32 references are findings at
+  `refs.<alias>` naming targets by ref (`validate` exits 1, the other verbs 2); a broken
+  target plugin is exit 2 naming the target. Editing a target makes its
+  consumers' `rendered/` out of date, by design. `kinds --json` adds `"refs"` (the kind's
+  `REFS`, defaults filled in), `validate --json` adds `"refs"` (`{alias: {"ref", "kind",
+  "outputs"}}`, `null` while the spec is invalid); `format` stays `prov.cli/v1alpha1`. Docs: "References" in `docs/kinds.md`.
 
 ### Security
 
@@ -156,6 +174,11 @@ may change incompatibly; every such change has a Migration paragraph. See
   kind's core properties; another kind's properties no longer block it. `prov.kinds.KINDS` is
   gone: look kinds up with `prov.kinds.discover()` / `get()`, and register test kinds through
   entry points (the test suite's `extra_kinds` fixture).
+- Plugin contracts: `refs` is reserved as an envelope key (no kind property, no backend
+  `NAME`), and a backend's `REFS`, reserved before, must now be empty. `Context.refs` is
+  populated for items with references; `prov.spec.check_spec` / `load_spec` take an
+  optional `root=` to resolve them (without it, `[refs]` is checked by the schema only and
+  the backend's `check` is skipped for a spec that has references).
 
 ### Known limitations
 

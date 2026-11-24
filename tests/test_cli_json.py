@@ -54,6 +54,7 @@ def test_kinds_json_shape(capsys):
         "summary": "One machine's operating-system install: host identity, users, network and whole disks.",
         "builtin": True,
         "outputs": None,
+        "refs": {},
     }
 
 
@@ -69,6 +70,7 @@ def test_kinds_json_third_party_kind(capsys, extra_kinds):
         "summary": "A test-only kind: a container registry.",
         "builtin": False,
         "outputs": None,
+        "refs": {},
     }
 
 
@@ -143,6 +145,7 @@ def test_validate_json_ok(root, capsys):
         "backend": "ubuntu-autoinstall",
         "ok": True,
         "outputs": {},
+        "refs": {},
         "findings": [{"level": "skipped", "where": "", "message": "cloud-init not installed (cloud-init schema)"}],
     }
 
@@ -212,7 +215,10 @@ def test_validate_json_backend_of_another_kind_is_null(root, capsys, monkeypatch
     code, out, err = run(capsys, "--root", str(root), "validate", ITEM, "--json")
     assert code == 2 and out == "" and err.startswith("prov: error: ")
     # should a kind ever accept it at finding level, the document still says null
-    monkeypatch.setattr(cli, "check_spec", lambda raw, kind, name, backends: (None, [Finding(ERROR, "e", "x")]))
+    from prov.registry import Context
+    from prov.schema import read_toml
+
+    monkeypatch.setattr(cli, "check_item", lambda root, kind, name, backends: (read_toml(spec), None, [Finding(ERROR, "e", "x")], Context(name)))
     code, out, err = run(capsys, "--root", str(root), "validate", ITEM, "--json")
     assert code == 1 and err == "" and document(out)["backend"] is None
 
