@@ -19,6 +19,7 @@ uv run prov --root <dir> render os-install/demo && uv run prov --root <dir> vali
 uv run prov --root <dir> plan os-install/demo && uv run prov --root <dir> list
 uv run prov --root examples validate os-install/demo-lvm
 uv run prov --root examples plan os-install/demo-nixos-ext4   # nixos-disko USB steps
+uv run prov conformance <backend>        # kind FIXTURES through one backend (os-install has none yet: exit 2)
 pre-commit run --all-files               # same hooks as the CI lint job
 ```
 
@@ -45,11 +46,13 @@ stay minimal (pyyaml; tomli on 3.10 only) — justify any new one in the PR.
   envelope checks, `check_item`/`load_item` (every verb that needs a valid item).
   `src/prov/refs.py` — resolves a spec's `[refs]` into `Context.refs`: reads only targets'
   `spec.toml` under the root, never through symlinks.
+  `src/prov/conformance.py` — `prov conformance <backend>`: kind `FIXTURES` (+ backend
+  `FIXTURES` / `UNSUPPORTED_FIXTURES`) composed, checked, rendered and validated statically.
 - `src/prov/text.py` — the output-escaping predicate and helpers (`unsafe`, `esc`, `show`,
   `short_repr`) and `json_text`, the one JSON serialisation (schemas, every `--json`
   document; `ensure_ascii` is its printing boundary, values go in raw).
 - Core modules (`cli`, `spec`, `registry`, `render`, `plan`, `schema`, `validate`, `text`,
-  `util`, `plugin`, `refs`, `kinds/__init__`) must stay kind- and backend-neutral and never import a
+  `util`, `plugin`, `refs`, `conformance`, `kinds/__init__`) must stay kind- and backend-neutral and never import a
   specific kind or backend module; `tests/test_kinds.py` and `tests/test_kind_plugins.py`
   prove it with fake kinds + backends (tests register them with the `extra_kinds` /
   `extra_backends` fixtures) and an import scan.
@@ -61,7 +64,10 @@ stay minimal (pyyaml; tomli on 3.10 only) — justify any new one in the PR.
   under `<kind>/<name>/rendered/`; `build/` is reserved for a later `prov build`.
   `validate` may run read-only local validators (e.g. `cloud-init schema`) and reports a
   missing tool as `skipped: <tool> not installed`. `tests/test_plan.py` enforces that plan
-  executes nothing.
+  executes nothing. `conformance` is static + rendered only: it writes only to a fresh
+  temporary directory from `$TMPDIR` (never the item tree) that it removes, and never runs
+  a plan or a behavioural test (a backend may render e.g. `goss.yaml`; its plan prints the
+  command for a human; `tests/test_conformance.py` guards it).
 - **Synthetic data only.** Examples, fixtures and tests use documentation addresses
   (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24, 2001:db8::/32), example.com/org/net and
   fake ssh keys containing `EXAMPLE`. `tests/test_synthetic_data.py` enforces it. Never

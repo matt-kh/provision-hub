@@ -1,6 +1,6 @@
 """prov command line. Exit codes: 0 ok, 1 findings or diff, 2 usage or configuration error.
 
-``--json`` (kinds, backends, schema, validate, plan) prints exactly one JSON document on
+``--json`` (kinds, backends, schema, validate, plan, conformance) prints exactly one JSON document on
 stdout through ``prov.text.json_text``; its shapes are documented in docs/kinds.md
 ("Machine-readable output"), and every document but ``schema``'s carries
 ``"format": JSON_FORMAT``. Exit codes do not change with it, and an exit-2 error stays text
@@ -19,7 +19,7 @@ import sys
 from pathlib import Path
 from typing import Any, List, Optional, Sequence, Tuple
 
-from . import __version__, kinds
+from . import __version__, conformance, kinds
 from .kinds.common import DEFS
 from .plan import plan_lines
 from .registry import builtin_names, call_plugin, discover, for_kind, lookup, preserved
@@ -102,6 +102,7 @@ def cmd_kinds(args: argparse.Namespace) -> int:
                     "builtin": name in own,
                     "outputs": getattr(kind, "OUTPUTS", None),
                     "refs": kinds.declared_refs(kind),
+                    "fixtures": list(kinds.fixtures(kind)),
                 }
                 for name, kind in found.items()
             ]
@@ -129,6 +130,8 @@ def cmd_backends(args: argparse.Namespace) -> int:
                     "starter": hasattr(plugin, "starter"),
                     "check": hasattr(plugin, "check"),
                     "preserve": list(preserved(plugin)),
+                    "fixtures": sorted(getattr(plugin, "FIXTURES", {})),
+                    "unsupported_fixtures": dict(sorted(getattr(plugin, "UNSUPPORTED_FIXTURES", {}).items())),
                 }
                 for name, plugin in backends.items()
             ]
@@ -337,6 +340,17 @@ def cmd_plan(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_conformance(args: argparse.Namespace) -> int:
+    """Static + rendered conformance of one backend against its kind's fixtures; writes only to a removed temp dir."""
+    result = conformance.run(args.backend)
+    if args.json:
+        _print_json(conformance.document(result))
+    else:
+        for line in conformance.text_lines(result):
+            print(line)
+    return EXIT_OK if result.ok else EXIT_FINDINGS
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = _Parser(
         prog="prov",
@@ -372,6 +386,14 @@ def build_parser() -> argparse.ArgumentParser:
     add("validate", cmd_validate, "validate spec.toml and the rendered artefacts", json_help=as_json + "; findings on stdout only")
     add("diff", cmd_diff, "diff a fresh render against <kind>/<name>/rendered/")
     add("plan", cmd_plan, "print the apply steps for a human (never runs them)", json_help=as_json)
+    p = add(
+        "conformance",
+        cmd_conformance,
+        "render the backend's kind fixtures and check them statically (never runs a plan or test)",
+        ref=False,
+        json_help=as_json,
+    )
+    p.add_argument("backend", help="backend NAME, e.g. ubuntu-autoinstall")
     return parser
 
 

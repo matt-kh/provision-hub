@@ -40,7 +40,8 @@ uv run prov validate os-install/demo                          # checks spec.toml
 uv run prov diff os-install/demo                              # fresh render vs. rendered/ on disk
 uv run prov plan os-install/demo                              # prints the seed-ISO and boot steps; runs nothing
 uv run prov list                                              # every item under the root
-uv run prov validate os-install/demo --json                   # one JSON document (kinds, backends, schema, validate, plan)
+uv run prov validate os-install/demo --json                   # one JSON document (kinds, backends, schema, validate, plan, conformance)
+uv run prov conformance <backend>                             # render the kind's fixtures through a backend; static checks only
 ```
 
 | Command | Does | Exit codes |
@@ -54,6 +55,7 @@ uv run prov validate os-install/demo --json                   # one JSON documen
 | `prov validate <ref> [--json]` | envelope, schema and semantic checks, rendered-file checks, staleness | 0, 1 findings, 2 |
 | `prov diff <ref>` | unified diff from `rendered/` to a fresh render | 0, 1 diff, 2 |
 | `prov plan <ref> [--json]` | print the apply steps for a human | 0, 2 |
+| `prov conformance <backend> [--json]` | render each conformance fixture of the backend's kind through it and check the result statically (spec, outputs, deterministic render, clean rewrite, `validate`, expected strings, plan refusal checks); writes only to a fresh temporary directory from `$TMPDIR` that it removes, never the item tree, and runs nothing | 0 all ok or skipped, 1 a fixture failed, 2 unknown backend, kind without fixtures or temporary directory left behind |
 
 A ref is `<kind>/<name>`, e.g. `os-install/demo`. Exit code 2 means a usage or configuration
 error (missing item, unknown kind or backend, bad envelope, invalid `spec.toml`).

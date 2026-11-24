@@ -83,6 +83,7 @@ A kind module exposes:
 | `SCHEMA_URL` | optional: an `https://` base URL ending in `/`; the composed schema's `$id` is `SCHEMA_URL` + `<NAME>.<version>.schema.json` |
 | `OUTPUTS` | optional, together with `outputs`: object-schema fragment of what an item exports (see [Outputs](#outputs)) |
 | `outputs(spec)` | optional, together with `OUTPUTS`: `dict`, a pure function of the validated spec with defaults |
+| `FIXTURES` | optional: conformance fixtures `{name: {"spec", "refs", "expect"}}` that `prov conformance <backend>` renders through each backend (see [Conformance fixtures](#conformance-fixtures)) |
 
 The module docstring's first line is shown by `prov kinds`. Every call into a kind
 (`semantic`, `outputs`) goes through a guarded call: an exception, or a result of the wrong
@@ -280,6 +281,125 @@ prov read another file: the same exposure as for the item's own `spec.toml` toda
 file itself is opened with `O_NOFOLLOW`, never through a final symlink). Run prov on roots
 that only you write to.
 
+## Conformance fixtures
+
+A kind may ship fixtures: small specs, with what every backend must make of them.
+`prov conformance <backend>` renders each fixture of the backend's kind through that
+backend and checks the result. The check is **static and rendered only**: prov never runs a
+plan, a behavioural test runner, a subprocess for a printed command, ssh, a VM or anything
+on the network. A backend may render behavioural test files (a `goss.yaml`, a test script)
+among its files, and its `plan` prints the command that runs them, for a human
+([adding-a-backend.md](adding-a-backend.md#conformance)).
+
+```python
+FIXTURES = {
+    "basic": {
+        "spec": {"hostname": "web.example.org"},          # core keys only
+        "expect": {
+            "outputs": {"url": "https://web.example.org"},  # optional: equal to the item's outputs
+            "contains": ["web.example.org"],              # optional: each in some rendered file
+            "absent": ["password"],                       # optional: in no rendered file
+        },
+    },
+    "even-replicas": {"spec": {"hostname": "x.example.org", "replicas": 2}, "expect": {"valid": False}},
+    "with-registry": {
+        "spec": {"hostname": "m.example.org"},
+        "refs": {"registry": {"url": "https://hub.example.org:5000"}},  # alias -> the target's outputs
+    },
+}
+```
+
+**Format.** A fixture name is an item name (one DNS label). Each fixture is plain JSON data
+with the keys `spec` (required), `refs` and `expect` (optional), checked when the kind loads
+(a bad one is exit 2, like any kind contract error):
+
+- `spec` holds the kind's core keys, never the envelope (`api_version`, `kind`, `backend`)
+  or `refs`: prov composes those.
+- `refs` maps aliases declared in `REFS` to literal outputs of the target (plain JSON outputs,
+  the same rules as [Outputs](#outputs)). No target item is read: the fixture's item gets a
+  `[refs]` table with one synthetic ref per alias, `<target kind>/<alias>` (each run of
+  characters other than `[a-z0-9]` becomes `-`; when two aliases of the same target kind
+  come out equal, the later one in alias order gets `-2`, `-3`, ...), and `ctx.refs[alias]` =
+  `{"ref", "kind", "name", "outputs"}` with the literal as `outputs`. Whether a literal
+  matches its target kind's `OUTPUTS` is checked by `prov conformance`, because that kind
+  may load after this one or not be installed at all: when it is not installed, the literal
+  is checked as JSON data only and the `refs` check is `skipped`, saying so.
+- `expect`: `valid` (default `true`); `outputs`, checked against the kind's own `OUTPUTS`
+  when the kind loads; `contains` and `absent`, lists of non-empty strings; `error`, only
+  with `valid = false`, a non-empty string. A fixture with `valid = false` takes no other
+  `expect` key: it must be rejected, and stops there.
+
+**Negative fixtures** (`valid = false`) test the kind's rules, not the backend's table. They
+are composed like valid ones, with the backend's own table for the fixture (required, as
+for a valid fixture, when the backend's `SCHEMA` requires keys; else `{}` without one), and
+checked through the real backend. Give a **valid** table: the fixture passes only when the
+spec has an error **outside the backend table** (a finding whose `where`, or a schema error
+whose message, does not start with the backend's `NAME`): from the schema of the core keys
+or `[refs]`, the kind's `semantic`, or the backend's `check` about core keys. An error
+inside the table does not count (`rejected only inside the backend table ...` is a `FAIL`),
+and as schema errors stop the check before `semantic` runs, an invalid table also hides
+the kind's rule. With
+`expect.error`, one of those errors must contain that string (matched against
+`<where>: <message>`); use it to pin the rule the fixture is about.
+
+A backend may give a table per fixture (`FIXTURES`) and name the fixtures it cannot
+express (`UNSUPPORTED_FIXTURES`, with a reason). When the backend is discovered only their
+shape is checked (str keys, plain JSON tables, non-empty reasons, no fixture in both; exit 2
+otherwise); a key that is not a fixture of the kind (one the kind renamed or removed) does
+not stop the backend loading, and `prov conformance` reports it as an extra entry after the
+kind's fixtures, `FAIL\t<name>\ttable\tFIXTURES names unknown fixture '<name>' (...)`. A
+valid fixture without a table uses `{}` when the backend's `SCHEMA` requires no keys.
+
+**Checks**, per fixture in name order, as `<status>\t<fixture>\t<check>\t<detail>` lines:
+
+| Check | Passes when |
+|---|---|
+| `supported` | (only for a fixture in the backend's `UNSUPPORTED_FIXTURES`) always `skipped`, with the reason; nothing else runs |
+| `table` | (only on failure) the backend has no table for the fixture although its `SCHEMA` requires keys, or names a fixture the kind does not have |
+| `refs` | (only with `refs`) every literal matches its target kind's `OUTPUTS`; `skipped` when a target kind is not installed |
+| `spec` | the composed spec (envelope with the kind's current `api_version`, the fixture spec, the backend table, `[refs]`) passes the schema, semantic and backend `check` like a `spec.toml`; for `valid = false`: with the backend's real table, it is rejected by an error outside that table (containing `expect.error` when given) |
+| `outputs` | the kind's outputs compute, and equal `expect.outputs` when given |
+| `render` | two renders return equal file maps (deterministic) |
+| `write` | the files are written to a fresh temporary `<tmp>/<kind>/<fixture>/rendered/`, after which `prov diff`'s comparison is empty and a second write changes nothing; an OS error (disk full) is a `FAIL` here |
+| `validate` | the backend's `validate` on that directory reports no error; `skipped` when it reports skipped findings (an external tool not installed), listed in the detail |
+| `contains` / `absent` | (only when given) each string appears in some rendered file / in none |
+| `plan` | the plan lines pass the refusal checks of `prov plan` (no line break or unsafe character); prov never runs them, and conformance does not print them for a human to run |
+
+A failure in `table`, `refs`, `spec`, `render` or `write` ends the fixture (later checks
+depend on it). A plugin failure (an exception or a wrongly typed result) is a `FAIL` of the
+check it happened in, with escaped text. A fixture's status is `FAIL` when any check failed,
+`skipped` when the backend does not support it, else `ok`: a `skipped` check inside a
+fixture that ran (`refs` with a target kind not installed, `validate` without its external
+tool) leaves the fixture `ok`, and is counted on the summary line, the last line:
+`conformance <backend> (<kind>): 4 fixture(s): 3 ok, 0 FAIL, 1 skipped; 2 check(s) skipped`
+(the `supported` line of an unsupported fixture is not counted as a skipped check).
+
+**Exit codes.** 0 when no fixture failed (ok or skipped, all of them skipped included), 1
+when one did, 2 for an unknown backend, a kind without fixtures (`kind os-install has no
+fixtures`; os-install ships none yet), a broken plugin that fails to load, or a temporary
+directory that could not be removed.
+
+**JSON** (`--json`): `{"format", "backend", "kind", "ok", "skipped_checks", "fixtures":
+[{"name", "status", "checks": [{"check", "status", "detail"}]}]}`. Statuses are lowercase,
+`"ok"`, `"fail"`, `"skipped"` (the text spells a failure `FAIL`), at fixture and check
+level; `ok` is `true` when no fixture failed and `skipped_checks` is the summary line's
+count. Details are those of the text, raw (plugin text unescaped; [Machine-readable
+output](#machine-readable-output)).
+
+**Stability.** The check names above, the line shape, the summary line, the statuses and the
+JSON keys are part of the `prov.cli/v1alpha1` format: while it is alpha they change only
+with a CHANGELOG entry; new checks and keys are additions (consumers ignore what they do
+not know).
+
+**Where it writes.** Only to a fresh temporary directory from `$TMPDIR`
+(`prov-conformance-*`), never in the item tree (`prov conformance` does not read the root),
+and removed before the command returns, failure or not: best effort against a plugin that
+removes the directory or makes part of it unreadable, and a directory that cannot be removed
+is an exit-2 error naming it `<tmp>` (look for `prov-conformance-*` in `$TMPDIR`). Its path
+never appears in the output: plugin text that names it, resolved through a symlinked
+`$TMPDIR` or not, reads `<tmp>`. The output is deterministic (the same plugins give
+byte-identical text and JSON).
+
 ## Kind plugins
 
 A kind is a module registered under the `prov.kinds` entry-point group; the entry-point name
@@ -351,7 +471,7 @@ its own kind's core properties; other kinds' properties do not matter.
 
 ## Machine-readable output
 
-`prov kinds`, `backends`, `schema`, `validate` and `plan` take `--json` and then print
+`prov kinds`, `backends`, `schema`, `validate`, `plan` and `conformance` take `--json` and then print
 exactly one JSON document on stdout: keys sorted, indented by 2, ASCII only (any other
 character, controls and bidi marks included, is a `\uNNNN` escape), one trailing newline.
 Plugin-supplied fields (summaries, `OUTPUTS` schemas, outputs, plugin findings' `where` and `message`) are raw, as the
@@ -366,10 +486,11 @@ an invalid spec), and stdout stays empty. `prov list` has no `--json`.
 
 ```text
 prov kinds --json
-{"format", "kinds": [{"name", "group", "api_versions", "summary", "builtin", "outputs", "refs"}, ...]}  # ordered by name
+{"format", "kinds": [{"name", "group", "api_versions", "summary", "builtin", "outputs", "refs", "fixtures"}, ...]}  # ordered by name
 
 prov backends [--kind K] --json
-{"format", "backends": [{"name", "kind", "summary", "builtin", "starter", "check", "preserve"}, ...]}
+{"format", "backends": [{"name", "kind", "summary", "builtin", "starter", "check", "preserve",
+                          "fixtures", "unsupported_fixtures"}, ...]}
                                                      # ordered by (kind, name), like the text
 prov schema <kind> --json                            # the schema itself; --json changes nothing
 
@@ -378,6 +499,9 @@ prov validate <ref> --json                           # exit 0 ok, 1 findings
 
 prov plan <ref> --json
 {"format", "ref", "backend", "rendered_dir", "lines": [...]}
+
+prov conformance <backend> --json                    # exit 0 ok, 1 a fixture failed
+{"format", "backend", "kind", "ok", "skipped_checks", "fixtures": [{"name", "status", "checks": [{"check", "status", "detail"}, ...]}, ...]}
 ```
 
 | Key | Meaning |
@@ -396,12 +520,14 @@ prov plan <ref> --json
 | `refs` (validate) | the item's resolved references, `{alias: {"ref", "kind", "outputs"}}` with the target's outputs, raw like plugin text (`{}` without references); `null` while the spec is invalid, including when a reference does not resolve |
 | `ok` | no finding of level `error`; the exit code is 0 exactly when it is `true` |
 | `findings` | every finding, warnings and `skipped` ones included: errors first, then by `where`, `message`, as in the text output; `where` is `""` for the whole item |
+| `fixtures` (kinds) | the names of the kind's conformance `FIXTURES`, sorted (`[]` without) |
+| `fixtures`, `unsupported_fixtures` (backends) | the fixture names the backend has a table for, a sorted list, and `{fixture: reason}` of its `UNSUPPORTED_FIXTURES` (`[]` / `{}` without); stable like every key here |
+| `fixtures` (conformance) | one entry per fixture, ordered by name; see [Conformance fixtures](#conformance-fixtures) |
 | `rendered_dir` | absolute path of the item's `rendered/` directory, the plan's `cd` target |
 | `lines` | exactly the lines the text output prints, in order, header comments and `cd` included (text = the lines joined by newlines); a line with an unsafe character is refused, never escaped |
 
 **Stability.** `format` is versioned on its own, independent of the spec `api_version`s.
-Adding a key to these objects (as `outputs` and `refs` were; conformance fixtures
-come later) keeps `format` unchanged: consumers ignore keys they do not know. Removing or renaming a
+Adding a key to these objects (as `outputs`, `refs` and `fixtures` were) keeps `format` unchanged: consumers ignore keys they do not know. Removing or renaming a
 key, or changing a value's type or meaning, moves `format` on (`prov.cli/v1alpha2`, then
 `prov.cli/v1` with 1.0) and carries a CHANGELOG Migration paragraph; check `format` before
 reading a document. From `prov.cli/v1` on, changes are additive only, like the spec

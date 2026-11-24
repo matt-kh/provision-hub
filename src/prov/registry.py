@@ -3,7 +3,9 @@
 A backend is a module (or any object) exposing the contract in ``docs/adding-a-backend.md``:
 ``NAME``, ``KIND``, ``SCHEMA``, ``render(spec, ctx)``, ``validate(rendered_dir)``,
 ``plan(spec, ctx)``, and optionally ``PLUGIN_API`` (default 1), ``check(spec, ctx)``,
-``starter(name)``, ``PRESERVE``, ``REFS``, ``artifacts(spec)`` and ``build(spec, ctx)`` with
+``starter(name)``, ``PRESERVE``, ``REFS``, ``FIXTURES`` and ``UNSUPPORTED_FIXTURES``
+(conformance: the backend table per kind fixture, and the fixtures it cannot express, with a
+reason; only their shape is checked at discovery), ``artifacts(spec)`` and ``build(spec, ctx)`` with
 ``BUILD_TOOLS`` (build is reserved: checked here, not called yet; a backend's ``REFS`` is
 reserved and must be empty, references are declared by the kind and reach the backend as
 ``ctx.refs``).
@@ -91,6 +93,7 @@ def check_contract(plugin: Backend, origin: str) -> None:
             f"backend plugin {origin}: REFS is reserved and must be empty; references are declared by the kind "
             f"(REFS of kind {short_repr(plugin.KIND)}) and reach the backend as ctx.refs"
         )
+    _check_fixtures(plugin, origin)
     if hasattr(plugin, "build"):
         tools = getattr(plugin, "BUILD_TOOLS", None)
         if not (isinstance(tools, (tuple, list)) and all(isinstance(t, str) for t in tools)):
@@ -101,6 +104,30 @@ def check_contract(plugin: Backend, origin: str) -> None:
         raise ConfigError(f"backend plugin {origin}: invalid SCHEMA: {esc(str(exc))}") from None
     except Exception as exc:  # backstop: a schema shape the checker did not anticipate
         raise ConfigError(f"backend plugin {origin}: invalid SCHEMA: {esc(type(exc).__name__)}: {esc(str(exc))}") from None
+
+
+def _check_fixtures(plugin: Backend, origin: str) -> None:
+    """``FIXTURES`` {fixture: backend table} and ``UNSUPPORTED_FIXTURES`` {fixture: reason}, both optional.
+
+    Only their shape is checked here: str keys, plain JSON tables, non-empty reasons, no
+    fixture in both. Whether each key names a fixture of the kind is for ``prov conformance``
+    (a FAIL there), so a backend whose kind renamed a fixture still loads for every other
+    verb; whether a table matches ``SCHEMA`` is checked there too, on the composed spec.
+    """
+    who = f"backend plugin {origin}"
+    tables = getattr(plugin, "FIXTURES", {})
+    reasons = getattr(plugin, "UNSUPPORTED_FIXTURES", {})
+    if type(tables) is not dict or not all(type(n) is str and type(t) is dict for n, t in tables.items()):
+        raise ConfigError(f"{who}: FIXTURES must be a dict of fixture name -> backend table (a dict)")
+    if type(reasons) is not dict or not all(type(n) is str and type(r) is str and r.strip() for n, r in reasons.items()):
+        raise ConfigError(f"{who}: UNSUPPORTED_FIXTURES must be a dict of fixture name -> reason (a non-empty str)")
+    both = sorted(set(tables) & set(reasons))
+    if both:
+        raise ConfigError(f"{who}: {', '.join(short_repr(n) for n in both)} in both FIXTURES and UNSUPPORTED_FIXTURES")
+    for name, table in sorted(tables.items()):
+        problem = kinds.json_problem(table, f"FIXTURES.{name}", strict=False, max_depth=kinds.SCHEMA_MAX_DEPTH)
+        if problem:
+            raise ConfigError(f"{who}: FIXTURES[{short_repr(name)}] is not plain JSON data: {esc(problem)}")
 
 
 def discover() -> Dict[str, Backend]:

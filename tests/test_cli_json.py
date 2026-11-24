@@ -55,6 +55,7 @@ def test_kinds_json_shape(capsys):
         "builtin": True,
         "outputs": None,
         "refs": {},
+        "fixtures": [],
     }
 
 
@@ -71,6 +72,7 @@ def test_kinds_json_third_party_kind(capsys, extra_kinds):
         "builtin": False,
         "outputs": None,
         "refs": {},
+        "fixtures": [],
     }
 
 
@@ -88,6 +90,8 @@ def test_backends_json_shape(capsys):
         "starter": True,
         "check": True,
         "preserve": ["flake.lock"],
+        "fixtures": [],
+        "unsupported_fixtures": {},
     }
     assert by_name["ubuntu-autoinstall"]["preserve"] == [] and by_name["ubuntu-autoinstall"]["builtin"] is True
 
@@ -112,6 +116,8 @@ def test_backends_json_third_party_and_kind_filter(capsys, extra_kinds, extra_ba
                 "starter": False,
                 "check": False,
                 "preserve": [],
+                "fixtures": [],
+                "unsupported_fixtures": {},
             }
         ]
     }
