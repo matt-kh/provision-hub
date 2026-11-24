@@ -1,7 +1,7 @@
 # CLAUDE.md — working on provision-hub (`prov`)
 
 `prov` renders, validates and plans provisioning artefacts from
-`<root>/<kind>/<name>/spec.toml`. Every spec has a `kind` (core, e.g. `os-install`) and a
+`<root>/<kind>/<name>/spec.toml`. Every spec has a `kind` (plugin, e.g. `os-install`) and a
 `backend` (plugin, e.g. `ubuntu-autoinstall`). Public and organisation-neutral; private
 repos pin its releases, so the spec format is a public API. Generic across OS installs,
 images, VMs and Kubernetes distributions; it champions no backend.
@@ -13,11 +13,13 @@ uv sync                                  # dev env (Python 3.12, .python-version
 uv run pytest -q                         # all tests
 uv run --python 3.10 pytest -q           # oldest supported Python
 uv run prov kinds && uv run prov backends --kind os-install
+uv run prov --root examples validate os-install/demo-lvm --json   # also kinds/backends/schema/plan
 uv run prov --root <dir> init os-install/demo --backend ubuntu-autoinstall
 uv run prov --root <dir> render os-install/demo && uv run prov --root <dir> validate os-install/demo
 uv run prov --root <dir> plan os-install/demo && uv run prov --root <dir> list
 uv run prov --root examples validate os-install/demo-lvm
 uv run prov --root examples plan os-install/demo-nixos-ext4   # nixos-disko USB steps
+uv run prov conformance ubuntu-autoinstall && uv run prov conformance nixos-disko   # os-install FIXTURES, static only
 pre-commit run --all-files               # same hooks as the CI lint job
 ```
 
@@ -26,19 +28,36 @@ stay minimal (pyyaml; tomli on 3.10 only) — justify any new one in the PR.
 
 ## Layout
 
-- `src/prov/kinds/` — core kinds (`os_install.py`) and shared `$defs` (`common.py`). Kinds are
-  not pluggable; a new kind is a core change documented in `docs/kinds.md`.
+- `src/prov/kinds/` — built-in kinds (`os_install.py`), discovery and the kind contract
+  (`__init__.py`: `discover`, `builtin`, `get`, `check_kind`, `call_kind`, `item_outputs`) and shared `$defs`
+  (`common.py`). Kinds are plugins registered through the `prov.kinds` entry-point group in
+  `pyproject.toml` (entry-point name = `NAME`, `PLUGIN_API = 1`); bare names only for this
+  distribution, third-party kinds are dotted (`registry.example.org`, api group
+  `example.org`). See `docs/kinds.md` "Kind plugins".
 - `src/prov/backends/` — built-in backends (`ubuntu_autoinstall.py`, `nixos_disko.py`),
   registered through the `prov.backends` entry-point group in `pyproject.toml` (entry-point
-  name = `NAME`) and listed in `prov.registry.builtin()`. Per-backend docs:
+  name = `NAME`); `prov.registry.builtin()` and `prov.kinds.builtin()` are the entry points of
+  the `provision-hub` distribution, never a list of imports. Per-backend docs:
   `docs/backends/<name>.md`. A backend's optional `PRESERVE` names human-created files
   `render` keeps in `rendered/` (nixos-disko: `flake.lock`).
-- `src/prov/registry.py` — discovery, contract checks, `Context`, `call_plugin` (every call
-  into a backend goes through it). `src/prov/spec.py` — refs and envelope checks.
+- `src/prov/registry.py` — backend discovery, contract checks, `Context`, `call_plugin` (every
+  call into a backend goes through it). `src/prov/plugin.py` — what kinds and backends share:
+  entry-point loading, `PLUGIN_API`, the guarded call. `src/prov/spec.py` — refs and
+  envelope checks, `check_item`/`load_item` (every verb that needs a valid item).
+  `src/prov/refs.py` — resolves a spec's `[refs]` into `Context.refs`: reads only targets'
+  `spec.toml` under the root, never through symlinks.
+  `src/prov/conformance.py` — `prov conformance <backend>`: kind `FIXTURES` (+ backend
+  `FIXTURES` / `UNSUPPORTED_FIXTURES`) composed, checked, rendered and validated statically;
+  `compose_spec` is the one composition path (conformance runs and exports), and
+  `export_fixtures` builds `conformance/*.fixtures.json` (and `prov conformance --export`).
 - `src/prov/text.py` — the output-escaping predicate and helpers (`unsafe`, `esc`, `show`,
-  `short_repr`).
-- Core modules (`cli`, `spec`, `registry`, `render`, `plan`, `schema`, `validate`, `text`) must stay
-  kind- and backend-neutral; `tests/test_kinds.py` proves it with a fake kind + backend.
+  `short_repr`) and `json_text`, the one JSON serialisation (schemas, every `--json`
+  document; `ensure_ascii` is its printing boundary, values go in raw).
+- Core modules (`cli`, `spec`, `registry`, `render`, `plan`, `schema`, `validate`, `text`,
+  `util`, `plugin`, `refs`, `conformance`, `kinds/__init__`) must stay kind- and backend-neutral and never import a
+  specific kind or backend module; `tests/test_kinds.py` and `tests/test_kind_plugins.py`
+  prove it with fake kinds + backends (tests register them with the `extra_kinds` /
+  `extra_backends` fixtures) and an import scan.
 
 ## Rules
 
@@ -47,7 +66,12 @@ stay minimal (pyyaml; tomli on 3.10 only) — justify any new one in the PR.
   under `<kind>/<name>/rendered/`; `build/` is reserved for a later `prov build`.
   `validate` may run read-only local validators (e.g. `cloud-init schema`) and reports a
   missing tool as `skipped: <tool> not installed`. `tests/test_plan.py` enforces that plan
-  executes nothing.
+  executes nothing. `conformance` is static + rendered only: it writes only to a fresh
+  temporary directory from `$TMPDIR` (never the item tree) that it removes, and never runs
+  a plan or a behavioural test (a backend may render e.g. `goss.yaml`; its plan prints the
+  command for a human; `tests/test_conformance.py` guards it). `conformance --export KIND DIR`
+  writes one file, atomically, into an existing real directory outside `<root>/<kind>/`,
+  never through a symlink.
 - **Synthetic data only.** Examples, fixtures and tests use documentation addresses
   (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24, 2001:db8::/32), example.com/org/net and
   fake ssh keys containing `EXAMPLE`. `tests/test_synthetic_data.py` enforces it. Never
@@ -65,19 +89,21 @@ stay minimal (pyyaml; tomli on 3.10 only) — justify any new one in the PR.
   `tests/test_plan.py`).
 - **Escape at the printing boundary.** Never print a file name, plugin text, exception text,
   tool output or spec value raw: route it through `prov.text` (`show` for names, `esc` for
-  text, `short_repr` for values). Plan lines with an unsafe character are refused, never
+  text, `short_repr` for values; `json_text` for a `--json` document). Plan lines with an unsafe character are refused, never
   escaped. `tests/test_output_escaping.py` sweeps every verb against a hostile root.
 - **Deterministic output.** Sorted keys, stable ordering, no timestamps or random ids;
-  goldens depend on it.
+  goldens depend on it. The principle: [docs/determinism.md](docs/determinism.md).
 - New backends follow [docs/adding-a-backend.md](docs/adding-a-backend.md).
 - Don't edit `.github/workflows/*` or `.harness.toml` unless the user asks.
 
 ## Goldens
 
 The committed `examples/<kind>/<name>/rendered/` directories are the golden files, and
-`schema/<kind>.<version>.schema.json` is generated from the code. After an intended change:
+`schema/<kind>.<version>.schema.json` and `conformance/<kind>.<version>.fixtures.json` (kind
+`FIXTURES` + built-in backends' tables and reasons) are generated from the code. After an
+intended change:
 
 ```sh
-PROV_UPDATE_GOLDENS=1 uv run pytest -q   # rewrites goldens and the schema files
-git diff examples/ schema/                # review every changed line before committing
+PROV_UPDATE_GOLDENS=1 uv run pytest -q   # rewrites goldens, schema and conformance files
+git diff examples/ schema/ conformance/   # review every changed line before committing
 ```

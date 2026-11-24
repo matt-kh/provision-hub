@@ -13,9 +13,13 @@ non-UTF-8 file names).
   ``\\xNN`` / ``\\uNNNN`` / ``\\UNNNNNNNN`` escape; safe text is unchanged.
 - ``show(name)``: ``esc`` for names (no character kept, so a name is always one line).
 - ``short_repr(value)``: ``repr`` of a spec value for messages, with a capped output length.
+- ``json_text(value)``: the one JSON serialisation prov prints or writes (``--json``, schemas).
 """
 
 from __future__ import annotations
+
+import json
+from typing import Any
 
 REPR_LIMIT = 80
 
@@ -65,3 +69,17 @@ def short_repr(value: object, limit: int = REPR_LIMIT) -> str:
         return text if n == len(value) else text + "…"
     text = esc(repr(value))
     return text if len(text) <= limit + 2 else text[: limit + 2] + "…"
+
+
+def json_text(value: Any) -> str:
+    """Canonical JSON: sorted keys, indent 2, ASCII only, one trailing newline.
+
+    Used for every JSON document prov prints (``--json``, ``prov schema``) or publishes
+    (``schema/*.schema.json``). Values go in raw, never ``esc``-ed: ``ensure_ascii`` is the
+    printing boundary, turning every non-ASCII character (controls, bidi marks, lone
+    surrogates from non-UTF-8 names) into a JSON ``\\uNNNN`` escape, so the text is printable
+    ASCII (every character outside space to ``~``, DEL included, is escaped) apart from its
+    newlines, and still decodes to the exact values. NaN and infinities are refused (ValueError),
+    never written as the non-JSON tokens ``NaN`` or ``Infinity``.
+    """
+    return json.dumps(value, indent=2, sort_keys=True, ensure_ascii=True, allow_nan=False) + "\n"

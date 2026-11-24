@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -173,9 +174,44 @@ def _stub(name, hostile):
     return mod
 
 
+HOSTILE_KIND = "hostile.example.org"
+
+
+def _hostile_kind():
+    """A third-party kind plugin whose text is hostile and whose semantic raises hostile text."""
+    kind = types.ModuleType(HOSTILE_KIND)
+    kind.__doc__ = f"Hostile kind {HOSTILE} for escaping tests."
+    kind.NAME = HOSTILE_KIND
+    kind.PLUGIN_API = 1
+    kind.VERSIONS = ("v1alpha1",)
+    kind.PROPERTIES = {"size": {"type": "integer", "description": f"size {HOSTILE}"}}
+    kind.REQUIRED = []
+    kind.REFS = {"peer": {"kind": HOSTILE_KIND, "required": False, "description": f"peer {HOSTILE}"}}
+    kind.OUTPUTS = {"type": "object", "additionalProperties": False, "description": f"outputs {HOSTILE}", "properties": {"size": {"type": "integer"}}}
+    kind.outputs = lambda spec: {"size": spec["size"]}  # never reached: semantic raises first
+
+    def semantic(spec):
+        raise RuntimeError(HOSTILE)
+
+    kind.semantic = semantic
+    return kind
+
+
+def _hostile_kind_backend():
+    mod = _stub("stub-hostile-kind", "findings")
+    mod.KIND = HOSTILE_KIND
+    del mod.check
+    return mod
+
+
 @pytest.fixture
-def hostile_root(tmp_path, capsys, extra_backends):
-    extra_backends(fake_entry_point(_stub("stub-findings", "findings")), fake_entry_point(_stub("stub-raise", "raise")))
+def hostile_root(tmp_path, capsys, extra_kinds, extra_backends):
+    extra_kinds(fake_entry_point(_hostile_kind(), value=f"prov_{HOSTILE}"))
+    extra_backends(
+        fake_entry_point(_stub("stub-findings", "findings")),
+        fake_entry_point(_stub("stub-raise", "raise")),
+        fake_entry_point(_hostile_kind_backend()),
+    )
     root = tmp_path / "root"
     assert run(capsys, "--root", str(root), "init", "os-install/web", "--backend", "ubuntu-autoinstall")[0] == 0
     assert run(capsys, "--root", str(root), "render", "os-install/web")[0] == 0
@@ -189,6 +225,9 @@ def hostile_root(tmp_path, capsys, extra_backends):
     os.mkdir(os.path.join(os.fsencode(root / "os-install"), b"bad\xffname"))
     with open(os.path.join(os.fsencode(root / "os-install"), b"bad\xffname", b"spec.toml"), "w") as fh:
         fh.write("x = 1\n")
+    item = root / HOSTILE_KIND / "odd"
+    item.mkdir(parents=True)
+    (item / "spec.toml").write_text(f'api_version = "example.org/v1alpha1"\nkind = "{HOSTILE_KIND}"\nbackend = "stub-hostile-kind"\nsize = 1\n[stub-hostile-kind]\n')
     capsys.readouterr()
     return root
 
@@ -201,13 +240,16 @@ def test_every_verb_writes_only_printable_text(hostile_root, capsys):
         ["backends", "--kind", "os-install"],
         ["list"],
         ["schema", "os-install"],
+        ["schema", HOSTILE_KIND],
+        ["backends", "--kind", HOSTILE_KIND],
+        ["init", f"{HOSTILE_KIND}/fresh", "--backend", "stub-hostile-kind"],
         ["init", "os-install/fresh", "--backend", "stub-findings"],
         ["init", "os-install/fresh", "--backend", "stub-raise", "--force"],
     ]
-    for item in ("web", "finder", "raiser", "fresh"):
+    for item in ("os-install/web", "os-install/finder", "os-install/raiser", "os-install/fresh", f"{HOSTILE_KIND}/odd"):
         for verb in ("validate", "diff", "plan", "render"):
-            argvs.append([verb, f"os-install/{item}"])
-    seen = []
+            argvs.append([verb, item])
+    seen, outputs = [], {}
     for argv in argvs:
         code, out, err = run(capsys, "--root", root, *argv)
         assert code in (0, 1, 2), argv
@@ -215,9 +257,49 @@ def test_every_verb_writes_only_printable_text(hostile_root, capsys):
         assert "Traceback" not in err, argv
         assert not any(line.startswith(("forged", "error: forged")) for line in (out + err).splitlines()), argv
         seen.append((argv[0], code))
+        outputs[tuple(argv)] = (code, out, err)
     # the hostile parts were exercised, not skipped
     joined = dict(((a, c) for a, c in seen))
-    assert joined["list"] == 1 and ("plan", 2) in seen and ("render", 2) in seen and ("validate", 1) in seen
+    assert joined["kinds"] == 0 and joined["list"] == 1 and ("plan", 2) in seen and ("render", 2) in seen and ("validate", 1) in seen
+    assert f"{HOSTILE_KIND}\texample.org/v1alpha1\tHostile kind ev\\x1b[2Jil\n" in outputs[("kinds",)][1]  # first docstring line
+    code, _, err = outputs[("render", f"{HOSTILE_KIND}/odd")]
+    assert code == 2 and f"kind '{HOSTILE_KIND}' failed in semantic: RuntimeError: ev\\x1b[2Jil\\x0aerror: forged" in err
+
+
+def test_every_json_verb_writes_ascii_json(hostile_root, capsys):
+    """--json: one parseable document of printable ASCII on stdout, or an exit-2 text error and nothing on stdout."""
+    root = str(hostile_root)
+    assert run(capsys, "--root", root, "render", "os-install/finder")[0] == 0  # so its backend's validate runs
+    argvs = [["kinds"], ["backends"], ["backends", "--kind", "os-install"], ["backends", "--kind", HOSTILE_KIND], ["schema", "os-install"], ["schema", HOSTILE_KIND]]
+    for item in ("os-install/web", "os-install/finder", "os-install/raiser", f"{HOSTILE_KIND}/odd", "os-install/missing"):
+        for verb in ("validate", "plan"):
+            argvs.append([verb, item])
+    docs, seen = {}, []
+    for argv in argvs:
+        code, out, err = run(capsys, "--root", root, *argv, "--json")
+        assert code in (0, 1, 2) and "Traceback" not in err and clean(err), (argv, err)
+        seen.append((argv[0], code))
+        if code == 2:
+            assert out == "" and err.startswith("prov: error: ") and err.count("\n") == 1, (argv, out, err)
+            continue
+        assert err == "", (argv, err)
+        assert all(" " <= ch <= "~" or ch == "\n" for ch in out), argv  # printable ASCII only
+        assert not any(line.lstrip().startswith(("forged", "error: forged")) for line in out.splitlines()), argv
+        docs[tuple(argv)] = json.loads(out)
+        assert (docs[tuple(argv)].get("format") == "prov.cli/v1alpha1") is (argv[0] != "schema"), argv
+    assert ("validate", 1) in seen and ("plan", 2) in seen and ("validate", 2) in seen
+    # raw values survive the round trip: escaping is JSON's, not prov.text's
+    kind = next(k for k in docs[("kinds",)]["kinds"] if k["name"] == HOSTILE_KIND)
+    assert kind["summary"] == "Hostile kind ev\x1b[2Jil" and kind["builtin"] is False
+    assert kind["outputs"]["description"] == f"outputs {HOSTILE}"
+    assert kind["refs"]["peer"]["description"] == f"peer {HOSTILE}"
+    stub = next(b for b in docs[("backends",)]["backends"] if b["name"] == "stub-findings")
+    assert stub["summary"] == "Stub backend ev\x1b[2Jil"
+    finder = docs[("validate", "os-install/finder")]
+    assert finder["ok"] is False and {"level": "error", "where": HOSTILE, "message": f"validate says {HOSTILE}"} in finder["findings"]
+    assert {"level": "warning", "where": f"where{HOSTILE}", "message": f"check says {HOSTILE}"} in finder["findings"]
+    web = docs[("validate", "os-install/web")]
+    assert any(f["where"] == "rendered/line\\x0aforged" for f in web["findings"]), web  # names stay show()-escaped by core
 
 
 # --- argv echoed by argparse, diff line splitting, plugin edge cases ---------------------

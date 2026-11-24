@@ -8,6 +8,10 @@ may change incompatibly; every such change has a Migration paragraph. See
 
 ### Added
 
+- Docs: `docs/determinism.md`, the determinism principle: the same spec and pinned inputs
+  render a byte-identical tree; specs and host-owned fragments (the nixos-disko `local.nix`
+  pattern) are authored and reviewed, kinds and backends are reviewed code with goldens,
+  and apply and behavioural tests stay outside prov.
 - nixos-disko: `local_module = true` imports a hand-written `../local.nix` next to
   `spec.toml` (proprietary packages, services, `programs.*`, fonts), required once set and
   copied onto the installer stick like the hardware file; `[nixos-disko.inputs]` adds
@@ -62,6 +66,107 @@ may change incompatibly; every such change has a Migration paragraph. See
 - Backend contract: optional `PRESERVE`, relative paths of human-created regular files in
   `rendered/` that `render` keeps and `diff`/`validate` do not report as stale (used for
   nixos-disko's `flake.lock`).
+- Kind plugins: kinds register under the `prov.kinds` entry-point group exactly like
+  backends under `prov.backends`; `os-install` is registered that way, and core imports no
+  kind or backend module (`prov.kinds.builtin()` / `prov.registry.builtin()` are the
+  entry points of the `provision-hub` distribution). Third-party kinds are dotted,
+  Kubernetes CRD style, `<label>.<group>` with a dotted group (`registry.example.org`, items
+  under `<root>/registry.example.org/<name>/`), the group being their api group
+  (`api_version = "example.org/v1alpha1"`), and a schema `$id` of `SCHEMA_URL` (an https
+  base URL to which `<NAME>.<version>.schema.json` is appended) or
+  `urn:prov:schema:<NAME>:<version>`; bare names are reserved for provision-hub. Kinds and backends declare `PLUGIN_API = 1` (required for kinds, optional
+  for backends, default 1); a broken, misnamed, duplicate or wrong-API plugin exits 2 with one
+  escaped line, as does a kind whose `semantic` raises. `prov list` warns, on stderr
+  and with exit 0, about a dotted directory with items whose kind is not installed. Docs: "Kind plugins" in
+  `docs/kinds.md`; `docs/adding-a-backend.md` gains `PLUGIN_API` and a vendor-prefix naming
+  convention for third-party backends (`acme-talos`). os-install's schema is unchanged.
+- `--json` on `prov kinds`, `backends`, `schema` (a no-op: the schema is JSON already),
+  `validate` and `plan`: one JSON document on stdout, sorted keys, ASCII only, raw plugin
+  values, a top-level `"format": "prov.cli/v1alpha1"` (not in `schema`'s output)
+  (`kinds`: name, group, api_versions, summary, builtin; `backends`: name, kind, summary,
+  builtin, starter, check, preserve; `validate`: ref, backend, ok, findings with level,
+  where, message; `plan`: ref, backend, rendered_dir, lines identical to the text). Exit
+  codes are unchanged; `validate --json` writes nothing on stderr; exit-2 errors stay text
+  on stderr (`prov: error: …`, possibly with indented continuation lines) with empty
+  stdout, and `plan` still refuses unsafe lines. Text output without `--json` is
+  unchanged. Shapes and the stability promise: "Machine-readable output" in `docs/kinds.md`.
+- Kind outputs: a kind may declare `OUTPUTS` (an object-schema fragment with
+  `"additionalProperties": false`, under the backend `SCHEMA` rules) together with
+  `outputs(spec)`, a pure, deterministic function of the tool-neutral part of the validated spec (`api_version`, `kind` and core keys, never the backend's name or table) that returns plain
+  JSON data (exact types, 64-bit integers, no control characters in strings or keys) valid
+  against `OUTPUTS`. Declaring only one, an `OUTPUTS` or `PROPERTIES` that is not plain JSON
+  data, or an output name that looks like a secret value is refused at load; the same
+  secret-name lint runs over every key of the result. The lint splits a name into words and
+  flags `password`, `passwd`, `passphrase`, `pwd`, `secret(s)`, `credential(s)`,
+  `kubeconfig`, `private key`, `api key`, `ssh key`, `tls key` and a final `token(s)` (not
+  after `max`/`num`), unless the last word is `path`, `name`, `ref` or `file`; it is not
+  part of `PLUGIN_API` and may grow between releases. JSON output refuses NaN and infinities.
+  `prov validate` computes them (a raising or invalid `outputs` exits 2 naming the kind);
+  `validate --json` adds `"outputs"` (`{}` without `OUTPUTS`, `null` while the spec is
+  invalid) and `kinds --json` adds the `OUTPUTS` schema (`null` without); `format` stays
+  `prov.cli/v1alpha1`, text output is unchanged. Post-apply facts are exported only as a
+  path or secret-name reference the human writes in the spec, never a value; prov never
+  reads live state. os-install declares no outputs. Docs: "Outputs" in `docs/kinds.md`.
+- References: a kind may declare `REFS` (`{alias: {"kind", "required", "description"}}`,
+  `required` defaulting to false and `description` to `""`; aliases match
+  `^[a-z][a-z0-9_-]{0,62}$`; checked when the kind is loaded) and its specs then name targets in one optional envelope
+  table, `[refs]` (`upstream = "registry.example.org/hub"`); the composed schema gains a
+  `refs` object only for such kinds (one pattern per alias pinning the target kind, required
+  aliases required), so `schema/os-install.v1alpha1.schema.json` is unchanged. `render`,
+  `diff`, `plan` and `validate` resolve the references against the root (new
+  `prov.refs`, `prov.spec.check_item` / `load_item`): only each target's `spec.toml` is
+  read, without following symlinks (its `rendered/` and `build/` do not matter), checked
+  in full with its own references, and its kind's outputs (`{}` for a kind without
+  `OUTPUTS`) reach the backend as the read-only `ctx.refs[alias]` =
+  `{"ref", "kind", "name", "outputs"}`. Missing, invalid or uninstalled targets,
+  self-references, cycles and chains of more than 32 references are findings at
+  `refs.<alias>` naming targets by ref (`validate` exits 1, the other verbs 2); a broken
+  target plugin is exit 2 naming the target. Editing a target makes its
+  consumers' `rendered/` out of date, by design. `kinds --json` adds `"refs"` (the kind's
+  `REFS`, defaults filled in), `validate --json` adds `"refs"` (`{alias: {"ref", "kind",
+  "outputs"}}`, `null` while the spec is invalid); `format` stays `prov.cli/v1alpha1`. Docs: "References" in `docs/kinds.md`.
+- Conformance: a kind may declare `FIXTURES` (`{name: {"spec", "refs", "expect"}}`: core
+  keys, literal outputs per reference alias, and `expect` with `valid` (default true),
+  `outputs`, `contains`, `absent`; checked when the kind loads), and a backend `FIXTURES`
+  (its table per fixture) and `UNSUPPORTED_FIXTURES` (fixture -> reason; both checked for
+  shape only when the backend is discovered; a name the kind does not have is a `FAIL` of
+  `table` in conformance, not a load error). New verb
+  `prov conformance <backend> [--json]` (`prov.conformance`) composes each fixture into a
+  spec with synthetic refs (`<target kind>/<alias>`) and checks, static and rendered only:
+  literal refs outputs against the target kind's `OUTPUTS` (skipped when it is not
+  installed), the spec (a negative fixture is composed with the backend's real table,
+  like a valid one, and must be rejected by an error outside that table, containing the
+  optional `expect.error`), outputs, two equal renders, a write to a temporary `rendered/`
+  that diffs clean and rewrites with 0 changes, the backend's `validate`,
+  `contains`/`absent`, and the plan's refusal checks. Lines
+  `ok|FAIL|skipped<TAB><fixture><TAB><check><TAB><detail>` and a summary line with the
+  number of skipped checks (a skipped check leaves its fixture ok); exit 0, 1 when a
+  fixture failed, 2 for an unknown backend, a kind without fixtures or a temporary
+  directory that could not be removed. `--json` statuses are `"ok"`, `"fail"`,
+  `"skipped"`, plus `"skipped_checks"`; check names, the summary line and the keys are part
+  of the stable format. It never runs a plan, a test runner or a subprocess, and writes
+  only to a fresh temporary directory from `$TMPDIR` (never the item tree) that it removes,
+  best effort; the directory's path never appears in the output. `kinds --json` adds
+  `"fixtures"`, `backends --json` adds `"fixtures"` (sorted names) and
+  `"unsupported_fixtures"` (`{name: reason}`); `format` stays `prov.cli/v1alpha1`. Docs: "Conformance fixtures" in `docs/kinds.md`, "Conformance" in
+  `docs/adding-a-backend.md`.
+- os-install conformance fixtures: `conf-uefi-static`, `conf-uefi-dhcp`, `conf-bios-dhcp`,
+  `conf-two-disks` and the negative `conf-bad-gateway-family` and `conf-duplicate-user`
+  (synthetic data, tool-neutral `contains`/`absent` strings, `expect.error` pinning the
+  rule; firmware and the boot disk are not checked by content). `ubuntu-autoinstall` and
+  `nixos-disko` give a table for each; nixos-disko skips `conf-two-disks` (one-disk
+  layouts). Both pass `prov conformance` (static checks of rendered files only; nothing
+  installed). Exported as generated, drift-tested
+  `conformance/os-install.v1alpha1.fixtures.json` (format `prov.conformance/v1alpha1`:
+  `kind`, `api_version`, `fixtures`, `backends` with `fixtures` tables, `unsupported`
+  reasons and `specs`, the fully composed spec per supported fixture from the same
+  composition path `prov conformance` checks), regenerated with `PROV_UPDATE_GOLDENS=1` and
+  included in the sdist, so other implementations can run the same cases. New
+  `prov conformance --export <kind> DIR` writes that file for any installed kind with
+  fixtures and its installed backends into an existing real directory outside
+  `<root>/<kind>/` (atomic, never through a symlink; exit 2 for an unknown kind or a kind
+  without fixtures). Docs: "Exported fixtures" and the os-install fixtures in
+  `docs/kinds.md`.
 
 ### Security
 
@@ -107,6 +212,15 @@ may change incompatibly; every such change has a Migration paragraph. See
   table (at least one interface, addresses, gateways, nameservers); backends that need it
   say so in `check`: `ubuntu-autoinstall` (netplan is rendered from it) and nixos-disko with
   `networking = "networkd"`.
+- Backend contract: a backend `NAME` now collides only with the envelope keys and its own
+  kind's core properties; another kind's properties no longer block it. `prov.kinds.KINDS` is
+  gone: look kinds up with `prov.kinds.discover()` / `get()`, and register test kinds through
+  entry points (the test suite's `extra_kinds` fixture).
+- Plugin contracts: `refs` is reserved as an envelope key (no kind property, no backend
+  `NAME`), and a backend's `REFS`, reserved before, must now be empty. `Context.refs` is
+  populated for items with references; `prov.spec.check_spec` / `load_spec` take an
+  optional `root=` to resolve them (without it, `[refs]` is checked by the schema only and
+  the backend's `check` is skipped for a spec that has references).
 
 ### Known limitations
 
@@ -135,3 +249,8 @@ validated before still validates and renders the same files. Third-party `os-ins
 backends must handle a missing `spec["network"]` in `render`, `plan` and `check`
 (`"network" in spec`); a backend that needs it should report an error in `check`, which runs
 before `render` and `plan`, as `ubuntu-autoinstall` does.
+
+Kind plugins change the Python API, not the spec format: `prov.kinds.KINDS` is gone (use
+`prov.kinds.discover()`, `get(name)` or `builtin()`), and `prov.kinds.core_keys(kind_name)`
+now takes the kind whose properties a backend NAME may not use. Code that registered a kind
+by adding it to `KINDS` registers it through the `prov.kinds` entry-point group instead.

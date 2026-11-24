@@ -8,7 +8,7 @@ import types
 
 import jsonschema
 import pytest
-from conftest import fake_entry_point
+from conftest import PROVISION_HUB, fake_entry_point
 
 from prov import kinds
 from prov.backends import ubuntu_autoinstall as ubuntu
@@ -30,17 +30,17 @@ def run(capsys, *argv):
 # --- built-in kinds ---------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("name", sorted(kinds.KINDS))
+@pytest.mark.parametrize("name", sorted(kinds.builtin()))
 def test_builtin_kinds_satisfy_the_contract(name):
-    kinds.check_kind(kinds.KINDS[name])
-    assert kinds.KINDS[name].NAME == name
+    kinds.check_kind(kinds.get(name))
+    assert kinds.get(name).NAME == name
 
 
 def test_os_install_core_has_no_backend_keys():
-    props = kinds.KINDS["os-install"].PROPERTIES
+    props = kinds.get("os-install").PROPERTIES
     assert "distro" not in props and "schema_version" not in props and "backend" not in props
-    assert kinds.KINDS["os-install"].REQUIRED == ["hostname", "storage"]
-    assert kinds.KINDS["os-install"].REFS == {}
+    assert kinds.get("os-install").REQUIRED == ["hostname", "storage"]
+    assert kinds.get("os-install").REFS == {}
 
 
 @pytest.mark.parametrize(
@@ -59,7 +59,7 @@ def test_os_install_core_has_no_backend_keys():
 def test_kind_contract_rejects(member, value, needle):
     kind = types.ModuleType("broken")
     for key in kinds.REQUIRED_MEMBERS:
-        setattr(kind, key, getattr(kinds.KINDS["os-install"], key))
+        setattr(kind, key, getattr(kinds.get("os-install"), key))
     if member == "PROPERTIES" or member == "REQUIRED":
         kind.REQUIRED = [] if member == "PROPERTIES" else value
     setattr(kind, member, value)
@@ -156,14 +156,12 @@ def test_toml_helper_round_trips():
     assert tomllib.loads(_toml(STARTER)) == STARTER
 
 
-def test_backend_of_another_kind_is_refused(extra_backends):
-    image_kind = _widget_kind("image")
-    with pytest.MonkeyPatch.context() as mp:
-        mp.setitem(kinds.KINDS, "image", image_kind)
-        other = _widget_backend("image-builder", "image")
-        extra_backends(fake_entry_point(other))
-        with pytest.raises(ConfigError, match="backend 'image-builder' renders kind 'image', not 'os-install'"):
-            check(mutate(lambda r: r.update(backend="image-builder")))
+def test_backend_of_another_kind_is_refused(extra_kinds, extra_backends):
+    extra_kinds(fake_entry_point(_widget_kind("image"), dist=PROVISION_HUB))
+    other = _widget_backend("image-builder", "image")
+    extra_backends(fake_entry_point(other))
+    with pytest.raises(ConfigError, match="backend 'image-builder' renders kind 'image', not 'os-install'"):
+        check(mutate(lambda r: r.update(backend="image-builder")))
 
 
 def test_init_refuses_a_backend_of_another_kind(tmp_path, capsys, widget):
@@ -193,6 +191,7 @@ def _widget_kind(name="widget"):
     kind = types.ModuleType(name)
     kind.__doc__ = "A test-only kind: a widget of some size."
     kind.NAME = name
+    kind.PLUGIN_API = 1
     kind.VERSIONS = ("v1alpha1",)
     kind.PROPERTIES = {
         "size": {"type": "integer", "minimum": 1, "description": "Widget size."},
@@ -236,11 +235,11 @@ def _widget_backend(name="widget-text", kind="widget"):
 
 
 @pytest.fixture
-def widget(monkeypatch, extra_backends):
-    """Register a test-only kind (kinds are not pluggable in production) and one backend for it."""
+def widget(extra_kinds, extra_backends):
+    """Register a test-only kind (bare, so registered as if by provision-hub) and one backend for it."""
     kind = _widget_kind()
     kinds.check_kind(kind)
-    monkeypatch.setitem(kinds.KINDS, "widget", kind)
+    extra_kinds(fake_entry_point(kind, dist=PROVISION_HUB))
     backend = _widget_backend()
     check_contract(backend, "widget-text = tests")
     extra_backends(fake_entry_point(backend))
@@ -292,7 +291,7 @@ def test_fake_kind_schema(capsys, widget):
     jsonschema.Draft202012Validator(schema).validate(good)
     assert not jsonschema.Draft202012Validator(schema).is_valid(dict(good, kind="os-install"))
     # the os-install schema does not know the widget backend
-    os_schema = spec_schema(kinds.KINDS["os-install"], {"ubuntu-autoinstall": ubuntu}, DEFS)
+    os_schema = spec_schema(kinds.get("os-install"), {"ubuntu-autoinstall": ubuntu}, DEFS)
     assert "widget-text" not in os_schema["properties"]
 
 
@@ -301,8 +300,8 @@ def test_backend_name_colliding_with_a_fake_kind_property(widget):
         check_contract(_widget_backend("size"), "size = tests")
 
 
-def test_kind_without_backends(capsys, monkeypatch):
-    monkeypatch.setitem(kinds.KINDS, "widget", _widget_kind())
+def test_kind_without_backends(capsys, extra_kinds):
+    extra_kinds(fake_entry_point(_widget_kind(), dist=PROVISION_HUB))
     code, out, _ = run(capsys, "schema", "widget")
     assert code == 0 and "enum" not in json.loads(out)["properties"]["backend"]
     assert run(capsys, "backends", "--kind", "widget") == (0, "", "")

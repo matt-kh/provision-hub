@@ -6,7 +6,7 @@ Render, validate and plan reusable provisioning artefacts (OS installs, OS image
 
 - Kind: cli
 - Languages: python (uv)
-- Notes: prov CLI: versioned spec.toml per item (`<kind>/<name>`), core kinds plus backend plugins (render/validate/plan), never applies; synthetic examples only (RFC 5737/3849 IPs, example.com); Python 3.10+ with uv.
+- Notes: prov CLI: versioned spec.toml per item (`<kind>/<name>`), kind and backend plugins (render/validate/plan), never applies; synthetic examples only (RFC 5737/3849 IPs, example.com); Python 3.10+ with uv.
 
 `prov` turns one versioned `spec.toml` per item into the artefacts its backend produces,
 checks them, and prints the steps a human runs to apply them. It never applies anything: no
@@ -23,8 +23,10 @@ and OS images (`image`, planned). See [docs/kinds.md](docs/kinds.md).
 | `os-install` | `ubuntu-autoinstall` (22.04, 24.04) | NoCloud seed: autoinstall `user-data`, `meta-data`, `kernel-cmdline` | storage layouts `lvm`, `zfs`, `mdraid` |
 | `os-install` | `nixos-disko` (nixpkgs `nixos-YY.MM`) | pinned flake: `flake.nix`, `configuration.nix`, `disko.nix`, `installer.nix` (offline USB installer ISO) | layouts `ext4`, `ext4-luks` (LVM on LUKS); systemd-networkd or NetworkManager, optional GNOME desktop; see [docs/backends/nixos-disko.md](docs/backends/nixos-disko.md) |
 
-New backends follow [docs/adding-a-backend.md](docs/adding-a-backend.md); new kinds are a
-core change ([docs/kinds.md](docs/kinds.md)).
+New backends follow [docs/adding-a-backend.md](docs/adding-a-backend.md); new kinds are
+plugins too, dotted for third parties (`registry.example.org`,
+[docs/kinds.md](docs/kinds.md#kind-plugins)). Same spec and pinned inputs, same rendered
+bytes: [docs/determinism.md](docs/determinism.md).
 
 ## Usage
 
@@ -38,22 +40,34 @@ uv run prov validate os-install/demo                          # checks spec.toml
 uv run prov diff os-install/demo                              # fresh render vs. rendered/ on disk
 uv run prov plan os-install/demo                              # prints the seed-ISO and boot steps; runs nothing
 uv run prov list                                              # every item under the root
+uv run prov validate os-install/demo --json                   # one JSON document (kinds, backends, schema, validate, plan, conformance)
+uv run prov conformance <backend>                             # render the kind's fixtures through a backend; static checks only
+uv run prov conformance --export os-install out/              # write out/os-install.v1alpha1.fixtures.json (fixtures, tables, composed specs)
 ```
 
 | Command | Does | Exit codes |
 |---|---|---|
-| `prov kinds` | list the kinds and their api versions | 0 |
-| `prov backends [--kind K]` | list registered backends (name, kind) | 0, 2 |
-| `prov list` | list every item under the root (ref, backend) | 0, 1 findings (symlinked, unreadable or invalidly named entries), 2 missing root |
-| `prov schema <kind> [--backend B]` | print the JSON Schema of a kind | 0, 2 |
+| `prov kinds [--json]` | list the installed kinds (plugins) and their api versions | 0, 2 (broken kind plugin) |
+| `prov backends [--kind K] [--json]` | list registered backends (name, kind) | 0, 2 |
+| `prov list` | list every item under the root (ref, backend); findings on stderr | 0 (also with warnings, e.g. a dotted directory whose kind is not installed), 1 findings (symlinked, unreadable or invalidly named entries), 2 missing root |
+| `prov schema <kind> [--backend B] [--json]` | print the JSON Schema of a kind (`--json` changes nothing) | 0, 2 |
 | `prov init <ref> --backend B [--force]` | write a starter `<kind>/<name>/spec.toml` | 0, 2 |
 | `prov render <ref>` | make `<kind>/<name>/rendered/` hold exactly the rendered files | 0, 2 |
-| `prov validate <ref>` | envelope, schema and semantic checks, rendered-file checks, staleness | 0, 1 findings, 2 |
+| `prov validate <ref> [--json]` | envelope, schema and semantic checks, rendered-file checks, staleness | 0, 1 findings, 2 |
 | `prov diff <ref>` | unified diff from `rendered/` to a fresh render | 0, 1 diff, 2 |
-| `prov plan <ref>` | print the apply steps for a human | 0, 2 |
+| `prov plan <ref> [--json]` | print the apply steps for a human | 0, 2 |
+| `prov conformance <backend> [--json]` | render each conformance fixture of the backend's kind through it and check the result statically (spec, outputs, deterministic render, clean rewrite, `validate`, expected strings, plan refusal checks); writes only to a fresh temporary directory from `$TMPDIR` that it removes, never the item tree, and runs nothing | 0 all ok or skipped, 1 a fixture failed, 2 unknown backend, kind without fixtures or temporary directory left behind |
+| `prov conformance --export <kind> DIR` | write `<kind>.<version>.fixtures.json` (the kind's fixtures, its installed backends' tables, unsupported reasons and composed specs) into the existing real directory DIR, outside `<root>/<kind>/`; atomic, never through a symlink | 0, 2 unknown kind, kind without fixtures, refused directory or target |
 
 A ref is `<kind>/<name>`, e.g. `os-install/demo`. Exit code 2 means a usage or configuration
 error (missing item, unknown kind or backend, bad envelope, invalid `spec.toml`).
+
+`--json` prints one JSON document instead of the text (sorted keys, ASCII only, a
+`"format": "prov.cli/v1alpha1"` key except for `schema`) with the same exit codes;
+`validate --json` puts every finding in it and nothing on stderr, and an exit-2 error
+stays text on stderr (`prov: error: …`, possibly with indented continuation lines) with
+nothing on stdout. Shapes:
+[docs/kinds.md](docs/kinds.md#machine-readable-output).
 
 **Root.** `--root DIR`, else `$PROV_ROOT`, else the current directory. Layout:
 
@@ -127,7 +141,8 @@ Then:
 uv sync                               # Python 3.12 by default (.python-version)
 uv run pytest -q
 uv run --python 3.10 pytest -q        # the oldest supported Python
-PROV_UPDATE_GOLDENS=1 uv run pytest   # accept intended changes to goldens and the schema file
+uv run prov conformance ubuntu-autoinstall   # os-install fixtures through a backend (static only)
+PROV_UPDATE_GOLDENS=1 uv run pytest   # accept intended changes to goldens, schema and conformance files
 ```
 
 Agents working on this repository: see [CLAUDE.md](CLAUDE.md).

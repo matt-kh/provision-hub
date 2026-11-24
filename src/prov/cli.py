@@ -1,4 +1,12 @@
-"""prov command line. Exit codes: 0 ok, 1 findings or diff, 2 usage or configuration error."""
+"""prov command line. Exit codes: 0 ok, 1 findings or diff, 2 usage or configuration error.
+
+``--json`` (kinds, backends, schema, validate, plan, conformance) prints exactly one JSON document on
+stdout through ``prov.text.json_text``; its shapes are documented in docs/kinds.md
+("Machine-readable output"), and every document but ``schema``'s carries
+``"format": JSON_FORMAT``. Exit codes do not change with it, and an exit-2 error stays text
+on stderr (``prov: error: …``, possibly with indented continuation lines) with nothing on
+stdout.
+"""
 
 from __future__ import annotations
 
@@ -11,17 +19,21 @@ import sys
 from pathlib import Path
 from typing import Any, List, Optional, Sequence, Tuple
 
-from . import __version__, kinds
+from . import __version__, conformance, kinds
 from .kinds.common import DEFS
 from .plan import plan_lines
-from .registry import Context, call_plugin, discover, for_kind, lookup, preserved
+from .registry import builtin_names, call_plugin, discover, for_kind, lookup, preserved
+from .refs import thaw
 from .render import atomic_write, diff_rendered, safe_item_dir, special_entries, write_rendered
-from .schema import ID_PATTERN, NAME_PATTERN, SPEC_FILE, ConfigError, api_versions, read_toml, schema_json, spec_schema, tomllib
-from .spec import check_spec, load_spec, parse_ref
-from .text import esc, short_repr, show
-from .validate import ERROR, Finding, has_errors
+from .schema import ID_PATTERN, KIND_PATTERN, NAME_PATTERN, SPEC_FILE, ConfigError, api_versions, kind_group, read_toml, schema_json, spec_schema, tomllib
+from .spec import check_item, check_spec, load_item, parse_ref
+from .text import esc, json_text, short_repr, show
+from .validate import ERROR, WARNING, Finding, has_errors
 
 EXIT_OK, EXIT_FINDINGS, EXIT_USAGE = 0, 1, 2
+# The version of the --json document formats (kinds, backends, validate, plan), versioned
+# separately from the spec api_version; bump policy in docs/kinds.md "Machine-readable output".
+JSON_FORMAT = "prov.cli/v1alpha1"
 
 
 class _Parser(argparse.ArgumentParser):
@@ -44,25 +56,59 @@ def item_dir(root: Path, ref: str) -> Tuple[str, str, Path]:
 
 
 def _load(args: argparse.Namespace) -> tuple:
+    """(backend, spec, findings, item dir, ctx) of a valid item, its references resolved (exit 2 otherwise)."""
     backends = discover()
     kind, name, idir = item_dir(args.root, args.ref)
-    spec, findings = load_spec(idir / SPEC_FILE, kind, name, backends)
-    return backends[spec["backend"]], spec, findings, idir, Context(name)
+    plugin, spec, findings, ctx = load_item(args.root, kind, name, backends)
+    return plugin, spec, findings, idir, ctx
 
 
-def _print_findings(findings: List[Any]) -> None:
-    for f in sorted(findings, key=lambda f: (f.level != ERROR, f.where, f.message)):
-        print(f, file=sys.stderr if f.level == ERROR else sys.stdout)
+def _sorted_findings(findings: List[Any]) -> List[Any]:
+    """Errors first, then by (where, message): the order of both the text and the JSON output."""
+    return sorted(findings, key=lambda f: (f.level != ERROR, f.where, f.message))
+
+
+def _print_findings(findings: List[Any], warnings_to_stderr: bool = False) -> None:
+    for f in _sorted_findings(findings):
+        print(f, file=sys.stderr if f.level == ERROR or warnings_to_stderr else sys.stdout)
+
+
+def _print_json(document: Any) -> None:
+    """The one JSON document of a ``--json`` call, stamped with ``format``; raw values, ASCII-escaped by ``json_text``."""
+    sys.stdout.write(json_text({**document, "format": JSON_FORMAT}))
+
+
+def _doc_line(obj: Any) -> str:
+    """The first docstring line of a plugin, raw (plugin text: escape before printing)."""
+    doc = (getattr(obj, "__doc__", None) or "").strip().splitlines()
+    return doc[0] if doc else ""
 
 
 def _summary(obj: Any) -> str:
-    doc = (getattr(obj, "__doc__", None) or "").strip().splitlines()
-    return esc(doc[0]) if doc else ""  # plugin text
+    return esc(_doc_line(obj))  # plugin text
 
 
 def cmd_kinds(args: argparse.Namespace) -> int:
-    for name in sorted(kinds.KINDS):
-        kind = kinds.KINDS[name]
+    found = kinds.discover()
+    if args.json:
+        own = kinds.builtin_names()
+        _print_json({
+            "kinds": [
+                {
+                    "name": name,
+                    "group": kind_group(name),
+                    "api_versions": api_versions(kind),
+                    "summary": _doc_line(kind),
+                    "builtin": name in own,
+                    "outputs": getattr(kind, "OUTPUTS", None),
+                    "refs": kinds.declared_refs(kind),
+                    "fixtures": list(kinds.fixtures(kind)),
+                }
+                for name, kind in found.items()
+            ]
+        })  # fmt: skip
+        return EXIT_OK
+    for name, kind in found.items():
         print(f"{name}\t{', '.join(api_versions(kind))}\t{_summary(kind)}")
     return EXIT_OK
 
@@ -72,6 +118,25 @@ def cmd_backends(args: argparse.Namespace) -> int:
     if args.kind is not None:
         kinds.get(args.kind)
         backends = for_kind(backends, args.kind)
+    if args.json:
+        own = builtin_names()
+        _print_json({
+            "backends": [
+                {
+                    "name": name,
+                    "kind": plugin.KIND,
+                    "summary": _doc_line(plugin),
+                    "builtin": name in own,
+                    "starter": hasattr(plugin, "starter"),
+                    "check": hasattr(plugin, "check"),
+                    "preserve": list(preserved(plugin)),
+                    "fixtures": sorted(getattr(plugin, "FIXTURES", {})),
+                    "unsupported_fixtures": dict(sorted(getattr(plugin, "UNSUPPORTED_FIXTURES", {}).items())),
+                }
+                for name, plugin in backends.items()
+            ]
+        })  # fmt: skip
+        return EXIT_OK
     for name, plugin in backends.items():
         print(f"{name}\t{plugin.KIND}\t{_summary(plugin)}")
     return EXIT_OK
@@ -86,17 +151,20 @@ def _entry_kind(path: Path) -> str:
 
 
 def cmd_list(args: argparse.Namespace) -> int:
-    """Every item under the root, as ``<ref>\\t<backend>``; problems are findings (exit 1).
+    """Every item under the root, as ``<ref>\\t<backend>`` on stdout.
 
-    Only names matching the item name pattern are ever printed raw; any other name appears as
+    Problems are findings on stderr, warnings included, so stdout stays the listing: errors
+    (symlinks, unreadable entries, invalid names or spec files) exit 1, warnings (a dotted
+    directory whose kind is not installed) exit 0. Only names matching the item name pattern are ever printed raw; any other name appears as
     a capped repr, so a planted file name cannot forge output lines or terminal escapes.
     """
     root = Path(args.root)
     if not root.is_dir():
         raise ConfigError(f"root {show(str(root))} does not exist or is not a directory")
     root = root.resolve()
-    problems: List[Finding] = []
-    for kind in sorted(kinds.KINDS):
+    known = kinds.discover()
+    problems: List[Finding] = _unknown_dotted_kinds(root, known)
+    for kind in known:
         kdir = root / kind
         try:
             if not os.path.lexists(kdir):
@@ -135,11 +203,41 @@ def cmd_list(args: argparse.Namespace) -> int:
                 continue
             backend = raw.get("backend")
             print(f"{ref}\t{backend if isinstance(backend, str) and re.fullmatch(ID_PATTERN.strip('^$'), backend) else '-'}")
-    _print_findings(problems)
-    return EXIT_FINDINGS if problems else EXIT_OK
+    # stdout is the listing (ref, backend); every finding, warnings included, goes to stderr
+    _print_findings(problems, warnings_to_stderr=True)
+    return EXIT_FINDINGS if has_errors(problems) else EXIT_OK
+
+
+def _unknown_dotted_kinds(root: Path, known: Any) -> List[Finding]:
+    """A warning per dotted directory (a third-party kind's shape) that holds items but whose kind is not installed."""
+    out: List[Finding] = []
+    try:
+        entries = sorted(root.iterdir())
+    except OSError:
+        return out  # the kind loop below reports nothing either; an unreadable root is not a kind problem
+    missing = "no kind of this name is installed; its items are not listed (install the plugin that provides it)"
+    for entry in entries:
+        name = entry.name
+        if "." not in name or name in known or not re.fullmatch(KIND_PATTERN.strip("^$"), name):
+            continue
+        try:
+            what = _entry_kind(entry)
+            if what == "symlink":  # never followed
+                out.append(Finding(WARNING, "is a symlink; refused (and no kind of this name is installed)", name))
+                continue
+            if what != "dir":
+                continue
+            # an item is a real directory holding spec.toml; a symlinked item is never followed
+            holds_items = any(_entry_kind(item) == "dir" and os.path.lexists(item / SPEC_FILE) for item in entry.iterdir())
+        except OSError:
+            holds_items = True  # unreadable: say so rather than hide it
+        if holds_items:
+            out.append(Finding(WARNING, missing, name))
+    return out
 
 
 def cmd_schema(args: argparse.Namespace) -> int:
+    """The schema is JSON already: ``--json`` changes nothing."""
     kind = kinds.get(args.kind)
     backends = for_kind(discover(), args.kind)
     if args.backend is not None:
@@ -195,14 +293,12 @@ def cmd_diff(args: argparse.Namespace) -> int:
 def cmd_validate(args: argparse.Namespace) -> int:
     backends = discover()
     kind, name, idir = item_dir(args.root, args.ref)
-    path = idir / SPEC_FILE
-    raw = read_toml(path)
-    try:
-        spec, findings = check_spec(raw, kind, name, backends)
-    except ConfigError as exc:
-        raise ConfigError(f"{show(str(path))}: {exc}") from None
+    raw, spec, findings, ctx = check_item(args.root, kind, name, backends)  # references resolved into ctx.refs
+    outputs = refs = None  # null in --json while the spec is invalid
     if spec is not None:
-        plugin, ctx = backends[spec["backend"]], Context(name)
+        outputs = kinds.item_outputs(kinds.get(kind), spec)  # a broken outputs is exit 2, like a broken semantic
+        refs = {alias: {"ref": entry["ref"], "kind": entry["kind"], "outputs": thaw(entry["outputs"])} for alias, entry in ctx.refs.items()}
+        plugin = backends[spec["backend"]]
         rendered = idir / "rendered"
         if not rendered.is_dir():
             findings.append(Finding(ERROR, "not rendered yet; run prov render " + args.ref, "rendered"))
@@ -214,8 +310,20 @@ def cmd_validate(args: argparse.Namespace) -> int:
                 findings += call_plugin(plugin, "validate", rendered)
             if diff_rendered(rendered, call_plugin(plugin, "render", spec, ctx), preserved(plugin)):
                 findings.append(Finding(ERROR, "out of date with spec.toml; run prov diff / prov render", "rendered"))
+    failed = has_errors(findings)
+    if args.json:  # every finding on stdout, nothing on stderr; the exit code says the same as without --json
+        backend = raw.get("backend")  # the spec's own value, even when other keys fail validation
+        _print_json({
+            "ref": args.ref,
+            "backend": backend if isinstance(backend, str) and backend in for_kind(backends, kind) else None,
+            "ok": not failed,
+            "outputs": outputs,
+            "refs": refs,
+            "findings": [{"level": str(f.level), "where": str(f.where), "message": str(f.message)} for f in _sorted_findings(findings)],
+        })  # fmt: skip
+        return EXIT_FINDINGS if failed else EXIT_OK
     _print_findings(findings)
-    if has_errors(findings):
+    if failed:
         return EXIT_FINDINGS
     print(f"ok: {args.ref}")
     return EXIT_OK
@@ -223,9 +331,34 @@ def cmd_validate(args: argparse.Namespace) -> int:
 
 def cmd_plan(args: argparse.Namespace) -> int:
     plugin, spec, _, idir, ctx = _load(args)
-    for line in plan_lines(plugin, spec, ctx, args.ref, idir / "rendered"):
+    lines = plan_lines(plugin, spec, ctx, args.ref, idir / "rendered")  # refuses unsafe lines (exit 2) before printing any
+    if args.json:
+        _print_json({"ref": args.ref, "backend": plugin.NAME, "rendered_dir": str(idir / "rendered"), "lines": lines})
+        return EXIT_OK
+    for line in lines:
         print(line)
     return EXIT_OK
+
+
+def cmd_conformance(args: argparse.Namespace) -> int:
+    """Static + rendered conformance of one backend against its kind's fixtures; writes only to a removed temp dir.
+
+    With ``--export KIND DIR``: write the kind's exported fixtures file into DIR instead.
+    """
+    if args.export is not None:
+        if args.backend is not None or args.json:
+            raise ConfigError("conformance --export KIND DIR takes no backend and no --json")
+        print(f"wrote {show(conformance.export(args.export[0], args.export[1], args.root))}")
+        return EXIT_OK
+    if args.backend is None:
+        raise ConfigError("conformance needs a backend NAME (or --export KIND DIR)")
+    result = conformance.run(args.backend)
+    if args.json:
+        _print_json(conformance.document(result))
+    else:
+        for line in conformance.text_lines(result):
+            print(line)
+    return EXIT_OK if result.ok else EXIT_FINDINGS
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -239,27 +372,44 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", metavar="COMMAND", parser_class=_Parser)
     sub.required = True
 
-    def add(name: str, func: Any, help_: str, ref: bool = True) -> argparse.ArgumentParser:
+    def add(name: str, func: Any, help_: str, ref: bool = True, json_help: Optional[str] = None) -> argparse.ArgumentParser:
         p = sub.add_parser(name, help=help_, description=help_)
         if ref:
             p.add_argument("ref", help="item ref <kind>/<name>, e.g. os-install/demo")
-        p.set_defaults(func=func)
+        if json_help is not None:
+            p.add_argument("--json", action="store_true", help=json_help)
+        p.set_defaults(func=func, json=False)
         return p
 
-    add("kinds", cmd_kinds, "list the kinds prov knows and their api versions", ref=False)
-    p = add("backends", cmd_backends, "list registered backends (NAME, KIND)", ref=False)
+    as_json = "print one JSON document instead of text (shapes: docs/kinds.md, Machine-readable output)"
+    add("kinds", cmd_kinds, "list the kinds prov knows and their api versions", ref=False, json_help=as_json)
+    p = add("backends", cmd_backends, "list registered backends (NAME, KIND)", ref=False, json_help=as_json)
     p.add_argument("--kind", help="only backends of this kind")
     add("list", cmd_list, "list every item under the root (ref, backend)", ref=False)
-    p = add("schema", cmd_schema, "print the JSON Schema of a kind for its registered backends", ref=False)
+    p = add("schema", cmd_schema, "print the JSON Schema of a kind for its registered backends", ref=False, json_help="accepted for symmetry; the schema is JSON already")
     p.add_argument("kind")
     p.add_argument("--backend", help="only this backend's table")
     p = add("init", cmd_init, "write a synthetic starter <kind>/<name>/spec.toml")
     p.add_argument("--backend", required=True, help="backend that renders the item")
     p.add_argument("--force", action="store_true", help="overwrite an existing spec.toml")
     add("render", cmd_render, "render artefacts into <kind>/<name>/rendered/")
-    add("validate", cmd_validate, "validate spec.toml and the rendered artefacts")
+    add("validate", cmd_validate, "validate spec.toml and the rendered artefacts", json_help=as_json + "; findings on stdout only")
     add("diff", cmd_diff, "diff a fresh render against <kind>/<name>/rendered/")
-    add("plan", cmd_plan, "print the apply steps for a human (never runs them)")
+    add("plan", cmd_plan, "print the apply steps for a human (never runs them)", json_help=as_json)
+    p = add(
+        "conformance",
+        cmd_conformance,
+        "render the backend's kind fixtures and check them statically (never runs a plan or test)",
+        ref=False,
+        json_help=as_json,
+    )
+    p.add_argument("backend", nargs="?", help="backend NAME, e.g. ubuntu-autoinstall")
+    p.add_argument(
+        "--export",
+        nargs=2,
+        metavar=("KIND", "DIR"),
+        help="write <kind>.<version>.fixtures.json (the kind's fixtures, its installed backends' tables, reasons and composed specs) into the existing directory DIR",
+    )
     return parser
 
 

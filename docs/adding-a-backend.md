@@ -16,8 +16,9 @@ party) exposes:
 
 | Member | Required | Signature | Purpose |
 |---|---|---|---|
-| `NAME` | yes | `str` | Backend id, `[a-z][a-z0-9-]*`, globally unique. Equals the entry-point name and the spec's `backend` value, and names its table (`[talos]`). May not equal an envelope key or any kind's core property (`hostname`, `storage`, ...). |
-| `KIND` | yes | `str` | The kind it renders (`"os-install"`); must be a kind prov knows (`prov kinds`). |
+| `NAME` | yes | `str` | Backend id, `[a-z][a-z0-9-]*`, globally unique. Equals the entry-point name and the spec's `backend` value, and names its table (`[talos]`). May not equal an envelope key or one of its own kind's core properties (`hostname`, `storage`, ...). Third parties: see [Naming](#naming-third-party-backends). |
+| `KIND` | yes | `str` | The kind it renders: `"os-install"`, or a third-party kind plugin such as `"registry.example.org"` ([kinds.md](kinds.md#kind-plugins)); must be an installed kind (`prov kinds`). |
+| `PLUGIN_API` | no | `int` | The backend contract version it implements; `1` today, and `1` when absent. Any other value is refused. Declare it: prov's own backends do. |
 | `SCHEMA` | yes | `dict` | JSON Schema fragment for the backend table (section 2). |
 | `render` | yes | `render(spec: dict, ctx: Context) -> dict[str, str]` | Relative POSIX path → file text. Pure: no I/O, no clock, no randomness. |
 | `validate` | yes | `validate(rendered_dir: pathlib.Path) -> list[Finding]` | Check the files on disk. |
@@ -25,11 +26,20 @@ party) exposes:
 | `check` | no | `check(spec: dict, ctx: Context) -> list[Finding]` | Cross-field rules JSON Schema cannot express. |
 | `starter` | no | `starter(name: str) -> str` | `spec.toml` text for `prov init <kind>/<name> --backend <NAME>`; without it `init` refuses. |
 | `PRESERVE` | no | `tuple[str, ...]` | Relative paths of files a human may create in `rendered/` that `render` must keep and `diff`/`validate` must not report as stale (e.g. `("flake.lock",)`), written normalised (no `./`, `//` or trailing `/`). Only regular files are kept; symlinks and special files are removed whatever their name. A listed name that `render` also returns, or that is a parent directory of a file it returns, is not preserved (render's output wins), so list only names that are never a file or a parent directory of a file `render` produces. |
-| `REFS` | no | `dict` | Reserved for cross-spec references (a later release). |
+| `REFS` | no | `dict` | Reserved; must be empty (`{}`) if present. References are declared by the kind (its `REFS`) and reach your backend as `ctx.refs`. |
+| `FIXTURES` | no | `dict[str, dict]` | Your backend table for each conformance fixture of the kind (`{"basic": {"port": 8081}}`), negative ones (`expect.valid = false`) included; see [Conformance](#6-conformance). |
+| `UNSUPPORTED_FIXTURES` | no | `dict[str, str]` | Fixtures of the kind your backend cannot express, each with a reason; `prov conformance` reports them as skipped. |
 | `artifacts` | no | `artifacts(spec: dict) -> ...` | Reserved for `prov build` (a later release). |
 | `build` + `BUILD_TOOLS` | no | `build(spec, ctx)`, `BUILD_TOOLS: tuple[str, ...]` | Reserved for `prov build`, which will write only under the item's `build/`. A backend that defines `build` must list the local tools it runs in `BUILD_TOOLS`. |
 
 The module docstring's first line is shown by `prov backends`.
+
+### Naming third-party backends
+
+Backend names are not namespaced: one flat, global set of ids. A third-party backend
+should carry a vendor prefix, `<vendor>-<tool>` (`acme-talos`, not `talos`), so it does
+not collide with a backend another package, or provision-hub itself, ships later. This is a
+convention, not a check; it will be revisited before 1.0.
 
 `Finding` is `prov.validate.Finding(level, message, where="")`, a frozen dataclass; `level` is
 one of `prov.validate.ERROR` (`"error"`), `WARNING` (`"warning"`) or `SKIPPED` (`"skipped"`).
@@ -37,12 +47,15 @@ one of `prov.validate.ERROR` (`"error"`), `WARNING` (`"warning"`) or `SKIPPED` (
 make `prov validate` exit 1. Printed form: `error: storage.disks: needs one disk`.
 
 The registry (`prov.registry.discover`) rejects a backend that lacks a required member, whose
-optional members are not callable, whose `KIND` is unknown, whose `NAME` is not an id,
-differs from its entry-point name, is already registered or collides with a core property,
-that defines `build` without `BUILD_TOOLS`, whose `PRESERVE` is not a list of safe, normalised relative
+optional members are not callable, whose `PLUGIN_API` is not `1`, whose `KIND` is unknown,
+whose `NAME` is not an id, differs from its entry-point name, is already registered or
+collides with an envelope key (`refs` included) or a core property of its kind, whose `REFS` is not empty,
+that defines `build` without `BUILD_TOOLS`, whose `FIXTURES` or `UNSUPPORTED_FIXTURES` are not a dict of str names to
+plain JSON tables / to non-empty reasons (or name a fixture in both; a name the kind does not
+have is a `FAIL` of `prov conformance`, not a load error), whose `PRESERVE` is not a list of safe, normalised relative
 paths, or whose `SCHEMA` uses an unsupported keyword, an
 invalid keyword value or an invalid `pattern`. Every call into a backend goes through
-`prov.registry.call_plugin`: an exception escaping it, or a result of the wrong type (`render`
+`prov.registry.call_plugin` (the same guarded call prov uses for kinds, `prov.plugin`): an exception escaping it, or a result of the wrong type (`render`
 not a `dict[str, str]`, `validate`/`check` not a `list[Finding]`, `plan` not a `list[str]`,
 `starter` not a `str`), is reported as `backend '<NAME>' failed in <method>: ...` with exit
 code 2; a `ConfigError` your backend raises is reported the same way, with your text.
@@ -59,7 +72,15 @@ a message. Plan lines are the exception: they are refused, not escaped (section 
 `ctx` is `prov.registry.Context`, a frozen dataclass:
 
 - `ctx.name` — the item name, i.e. the directory `<root>/<kind>/<name>/` (`"demo-cp"`).
-- `ctx.refs` — a read-only mapping of resolved references; always empty for now.
+- `ctx.refs` — the item's resolved references ([kinds.md](kinds.md#references)): a
+  read-only mapping from each alias present in the spec's `[refs]` table to
+  `{"ref": "registry.example.org/hub", "kind": "registry.example.org", "name": "hub",
+  "outputs": {...}}`, where `outputs` are the target's outputs (its kind's `OUTPUTS`, `{}`
+  for a kind without). Deeply read-only: mappings are `types.MappingProxyType`, arrays
+  tuples; copy before changing or serialising (`json.dumps(dict(...))` fails on a mapping
+  proxy). `check`, `render` and `plan` get it populated; they are called only when every
+  reference resolved. An optional alias the spec leaves out is absent: test with `in`.
+  Empty for a kind without references.
 
 Use `ctx.name` only where the item name is meant; values the user wrote (such as
 `hostname`) come from `spec`.
@@ -69,7 +90,9 @@ Use `ctx.name` only where the item name is meant; values the user wrote (such as
 `render`, `plan` and `check` receive the parsed `spec.toml` as a plain `dict` **after** the
 envelope check, the full JSON Schema and the kind's semantic checks, **with every schema
 `default` filled in** (core keys and your table). Keys without a default may be absent: test
-with `in`. The envelope keys are present too: `api_version`, `kind`, `backend` (your `NAME`).
+with `in`. The envelope keys are present too: `api_version`, `kind`, `backend` (your `NAME`). For a kind
+with references, `spec["refs"]` holds the raw `[refs]` table (alias to ref string) when the
+spec has one; use `ctx.refs` for the resolved targets.
 
 For the `os-install` kind (authoritative definition:
 `schema/os-install.v1alpha1.schema.json`, described in [kinds.md](kinds.md)):
@@ -136,6 +159,7 @@ schema and makes the table required when `backend = "<NAME>"`. Rules:
 
 NAME = "talos"
 KIND = "os-install"
+PLUGIN_API = 1
 
 SCHEMA = {
     "type": "object",
@@ -206,7 +230,7 @@ Requirements:
 
 - **render** returns every file the backend needs; paths are relative, without `..` or
   control characters. Core writes them to `<root>/<kind>/<name>/rendered/` and removes files
-  it did not return, except the regular files named in `PRESERVE`. Output must be byte-for-byte deterministic (use `prov.util.dump_yaml`
+  it did not return, except the regular files named in `PRESERVE`. Output must be byte-for-byte deterministic ([determinism.md](determinism.md); use `prov.util.dump_yaml`
   or sorted JSON), text only, end with a newline and carry no trailing whitespace. Never
   embed secrets that are not in `spec`.
 - **validate** parses what is on disk (it may have been edited by hand): required files,
@@ -240,16 +264,19 @@ ubuntu-autoinstall = "prov.backends.ubuntu_autoinstall"
 talos = "prov.backends.talos"
 ```
 
-Third-party package, in its own `pyproject.toml` (then `uv add` it next to prov):
+Third-party package, in its own `pyproject.toml` (then `uv add` it next to prov), with a
+vendor-prefixed name:
 
 ```toml
 [project.entry-points."prov.backends"]
-talos = "prov_talos"
+acme-talos = "prov_acme_talos"
 ```
 
 Run `uv sync` so the entry point is installed; `uv run prov backends --kind os-install`
-should list it. Add a built-in to `prov.registry.builtin()` too, because the published
-schemas are generated from the built-ins.
+should list it. Built-in and third-party backends register the same way; prov never imports
+a backend by name. `prov.registry.builtin()` is the set the `provision-hub` distribution
+registers, and the published schemas are generated from it, so a built-in needs nothing
+beyond its entry point.
 
 ## 5. Schema file, example, goldens, tests
 
@@ -272,4 +299,49 @@ schemas are generated from the built-ins.
 4. Document the backend in the README table.
 
 Checklist: `uv run pytest -q`, `uv run --python 3.10 pytest -q`,
-`uv run prov --root examples validate os-install/demo-talos-cp`, `pre-commit run --all-files`.
+`uv run prov --root examples validate os-install/demo-talos-cp`, `uv run prov conformance <NAME>`
+(exit 0: every fixture of the kind ok or skipped with a reason), then
+`PROV_UPDATE_GOLDENS=1 uv run pytest -q` to regenerate `conformance/<kind>.<version>.fixtures.json`
+(a built-in backend's tables and reasons are exported there; review the diff), and
+`pre-commit run --all-files`.
+
+## 6. Conformance
+
+A kind may ship conformance fixtures ([kinds.md](kinds.md#conformance-fixtures)): small
+specs and what every backend must make of them. `uv run prov conformance <NAME>` renders
+each one through your backend and checks it statically: the spec is valid (or, for a
+negative fixture, rejected), outputs match, two renders are equal, the files written to a
+temporary `rendered/` diff clean and rewrite with no change, your `validate` reports no
+error, expected strings are present or absent, and your plan passes the plan refusal
+checks. It writes only to a fresh temporary directory from `$TMPDIR`, never in the item
+tree, removes it afterwards, and runs nothing.
+
+```python
+FIXTURES = {"basic": {"role": "controlplane"}}           # your table per fixture
+UNSUPPORTED_FIXTURES = {"two-disks": "talos installs to exactly one disk"}
+```
+
+- Give a table for each fixture that needs one, negative fixtures (`expect.valid = false`)
+  included; without a table prov uses `{}`, which only works when your `SCHEMA` requires no
+  keys (else the fixture fails with `no backend table for fixture`). A negative fixture's
+  table must be valid: the fixture must be rejected by an error outside your table (the
+  kind's rules, or your `check` about core keys); an error in your table does not count.
+- A name in `FIXTURES` or `UNSUPPORTED_FIXTURES` that the kind does not have (it renamed or
+  dropped a fixture) fails `prov conformance` but does not stop your backend loading.
+- List a fixture in `UNSUPPORTED_FIXTURES` only when your tool truly cannot express it, with
+  a reason a reader can check; never relax `validate` or `check` to make a fixture pass.
+- os-install ships fixtures ([kinds.md](kinds.md#os-install-v1alpha1)); an os-install
+  backend gives a table (or a reason) for each. A built-in backend's tables and reasons are
+  exported with the kind's fixtures to `conformance/<kind>.<version>.fixtures.json`
+  ([Exported fixtures](kinds.md#exported-fixtures)); regenerate it with
+  `PROV_UPDATE_GOLDENS=1 uv run pytest -q` after changing them.
+- A third-party backend (or kind) can publish the same file for its users:
+  `uv run prov conformance --export <kind> DIR` writes `<kind>.<version>.fixtures.json`
+  for the kind and every installed backend of it, composed specs included, into an existing
+  directory outside the item tree ([Exported fixtures](kinds.md#exported-fixtures)).
+- Conformance is static: it proves the rendered files are consistent, never that an install
+  works.
+- Behavioural tests (does the installed host answer on its port, are the disks laid out?)
+  are files you render, such as `goss.yaml`, and a command your `plan` prints for a human
+  (`goss --gossfile goss.yaml validate`). `prov conformance` and every other prov command
+  only check that the plan lines are printable; prov never runs them.

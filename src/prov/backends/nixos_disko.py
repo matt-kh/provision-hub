@@ -16,6 +16,7 @@ or fetches.
 
 from __future__ import annotations
 
+import copy
 import json
 import re
 import shlex
@@ -30,6 +31,7 @@ from ..validate import ERROR, SKIPPED, WARNING, Finding
 
 NAME = "nixos-disko"
 KIND = "os-install"
+PLUGIN_API = 1
 
 # The disko release the flake pins (a tag of github.com/nix-community/disko). Its
 # docs/disko-install.md at this tag is the source of the offline-installer pattern.
@@ -192,6 +194,16 @@ SCHEMA: Dict[str, Any] = {
             "description": "none: no graphical desktop. gnome: GNOME on Wayland with GDM; needs networking = networkmanager and release nixos-25.11 or newer.",
         },
     },
+}
+
+# Tables for the os-install conformance fixtures (prov conformance nixos-disko).
+_FIXTURE_TABLE: Dict[str, Any] = {"release": "nixos-26.05", "state_version": "26.05"}
+FIXTURES: Dict[str, Any] = {
+    name: copy.deepcopy(_FIXTURE_TABLE)  # one table per fixture, never shared
+    for name in ("conf-uefi-static", "conf-uefi-dhcp", "conf-bios-dhcp", "conf-bad-gateway-family", "conf-duplicate-user")
+}
+UNSUPPORTED_FIXTURES: Dict[str, str] = {
+    "conf-two-disks": "layouts ext4 and ext4-luks install to exactly one disk; a spec with more than one disk in storage.disks is refused",
 }
 
 ESP_MIN_MIB = 256

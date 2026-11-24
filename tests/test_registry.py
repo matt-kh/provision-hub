@@ -149,6 +149,20 @@ def test_context_is_frozen_with_empty_refs():
     assert Context("a").refs is not None and Context("a") == Context("a")
 
 
+def test_context_carries_read_only_refs():
+    from types import MappingProxyType
+
+    from prov.refs import freeze
+
+    refs = freeze({"upstream": {"ref": "registry.example.org/hub", "kind": "registry.example.org", "name": "hub", "outputs": {"tags": ["a"]}}})
+    ctx = Context("demo", refs)
+    assert isinstance(ctx.refs, MappingProxyType) and ctx.refs["upstream"]["outputs"]["tags"] == ("a",)
+    with pytest.raises(TypeError):
+        ctx.refs["upstream"]["outputs"]["x"] = 1  # type: ignore[index]
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        ctx.refs = {}  # type: ignore[misc]
+
+
 @pytest.mark.parametrize(
     "method,value,needle",
     [
@@ -229,7 +243,7 @@ def test_composed_schema_passes_its_own_check():
     from prov.schema import spec_schema
     from prov.validate import check_schema_fragment
 
-    for name, kind in kinds.KINDS.items():
+    for name, kind in kinds.builtin().items():
         composed = spec_schema(kind, for_kind(builtin(), name), DEFS)
         check_schema_fragment(composed, f"<{name}>", defs=composed["$defs"])
 
