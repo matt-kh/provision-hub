@@ -15,7 +15,7 @@ import os
 import stat
 import tempfile
 from pathlib import Path, PurePosixPath
-from typing import Dict, Iterable, List, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
 from .schema import ConfigError
 from .text import esc, has_unsafe, show
@@ -52,7 +52,7 @@ def check_paths(files: Dict[str, str]) -> None:
             raise ConfigError(f"plugin returned an unsafe output path: '{show(name)}'")
 
 
-def _walk(rendered_dir: Path) -> Tuple[List[Path], List[Path], List[Path]]:
+def _walk(rendered_dir: Path, onerror: Optional[Callable[[OSError], None]] = None) -> Tuple[List[Path], List[Path], List[Path]]:
     """(regular files, others, directories) under ``rendered_dir``, classified by lstat.
 
     "Others" are symlinks and special files (FIFOs, sockets, devices): never followed, never
@@ -60,9 +60,10 @@ def _walk(rendered_dir: Path) -> Tuple[List[Path], List[Path], List[Path]]:
     character (``prov.text.unsafe``: controls, bidi/zero-width, lone surrogates from a
     non-UTF-8 name ...) is an "other" too, directories included: no backend can have written
     it (``check_paths``), so it is never read or diffed, only reported and removed.
+    ``onerror`` is ``os.walk``'s: without it a directory that cannot be listed is skipped.
     """
     files, others, dirs = [], [], []
-    for top, dirnames, filenames in os.walk(rendered_dir, followlinks=False):
+    for top, dirnames, filenames in os.walk(rendered_dir, onerror=onerror, followlinks=False):
         for name in dirnames + filenames:
             path = Path(top) / name
             mode = os.lstat(path).st_mode
@@ -105,6 +106,20 @@ def _read(path: Path) -> str:
         if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
             return ""
         return fh.read().decode("utf-8", errors="replace")
+
+
+def tree_entries(rendered_dir: Path) -> Tuple[List[Path], List[Path]]:
+    """(regular files, others) under ``rendered_dir``, sorted; "others" as in ``_walk`` (never read).
+
+    Unlike ``_walk``, a directory that cannot be listed raises (OSError): a caller that hashes
+    the tree must not silently hash part of it.
+    """
+
+    def fail(exc: OSError) -> None:
+        raise exc
+
+    files, others, _ = _walk(rendered_dir, onerror=fail)
+    return files, others
 
 
 def existing_files(rendered_dir: Path) -> Dict[str, str]:

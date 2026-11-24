@@ -1,7 +1,8 @@
 """``prov plan``: print the apply steps for a human. Never executes anything.
 
 The backend's ``plan(spec, ctx)`` returns lines (shell commands and ``#`` comments) written
-relative to the item's rendered directory; this module adds the common header and refuses
+relative to the item's rendered directory; this module adds the common header (including the
+``prov digest`` of the current ``rendered/``, ``prov.state``) and refuses
 any line holding a line break or another unsafe character (``prov.text.unsafe``): a spec
 value smuggling a newline could otherwise turn a comment into a command, and an escape or
 bidi control could make a pasted line differ from what the terminal shows. Plan lines are
@@ -16,13 +17,16 @@ from typing import Any, Dict, List
 
 from .registry import Context, call_plugin
 from .schema import ConfigError
+from .state import digest_or_reason
 from .text import short_repr, unsafe
 
 
 def plan_lines(plugin: Any, spec: Dict[str, Any], ctx: Context, ref: str, rendered_dir: Path) -> List[str]:
+    digest, reason = digest_or_reason(rendered_dir)
     lines = [
         f"# prov plan for {shlex.quote(ref)} ({plugin.NAME}) - prov never runs these steps;",
         f"# review them and run them yourself. Render first: prov render {shlex.quote(ref)}.",
+        f"# render digest: {digest or 'none (' + reason + ')'} - record it with what you apply (docs/state.md)",
         f"cd {shlex.quote(str(rendered_dir))}",
     ]
     for n, line in enumerate(lines):

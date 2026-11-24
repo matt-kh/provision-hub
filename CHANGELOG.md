@@ -8,6 +8,27 @@ may change incompatibly; every such change has a Migration paragraph. See
 
 ### Added
 
+- Observed state ([docs/state.md](docs/state.md)), read-only and from local files only:
+  - `prov digest <ref> [--json]` prints `sha256:<hex>`, the identity of `rendered/`: sha256
+    over a `sha256sum` manifest of every regular file (`PRESERVE` files included, modes not),
+    reproducible with coreutils. `prov plan` prints it in its header (`# render digest: …`;
+    `render_digest` in `plan --json`, `null` when not rendered), so plans now have one more
+    header line.
+  - State records `<state-dir>/<kind>/<name>.json`, written by a host agent (never by prov),
+    format `prov.state/v1alpha1`, published as `schema/prov.state.v1alpha1.schema.json`:
+    `ref`, `last_seen`, `drift {status, detail}`, optional `applied_rev`, `render_digest`,
+    `generation`, `facts`, `agent_version`. Strings may not hold control characters, as in
+    `spec.toml`.
+  - `prov status [ref ...] [--state-dir DIR] [--stale-after 72h] [--now T] [--json]`: per item
+    a lifecycle (`planned`, `active`, `stale`, `decommissioned`, or `invalid`) and a sync
+    state (`in-sync`, `pending`, `drifted`, `unknown`), plus a warning per record without an
+    item. It never writes, runs or fetches anything. `--state-dir` defaults to
+    `$PROV_STATE_DIR`.
+  - The optional, kind-neutral envelope table `[state]` with `decommissioned = true`, in every
+    kind's schema; renders never read it. `state` becomes a reserved name like `refs`: no
+    kind property and no backend `NAME` may use it (no built-in one did; regenerate
+    third-party schemas).
+
 - Docs: `docs/determinism.md`, the determinism principle: the same spec and pinned inputs
   render a byte-identical tree; specs and host-owned fragments (the nixos-disko `local.nix`
   pattern) are authored and reviewed, kinds and backends are reviewed code with goldens,
@@ -254,3 +275,9 @@ Kind plugins change the Python API, not the spec format: `prov.kinds.KINDS` is g
 `prov.kinds.discover()`, `get(name)` or `builtin()`), and `prov.kinds.core_keys(kind_name)`
 now takes the kind whose properties a backend NAME may not use. Code that registered a kind
 by adding it to `KINDS` registers it through the `prov.kinds` entry-point group instead.
+
+`state` is now a reserved envelope name (the optional `[state]` table, [docs/state.md](docs/state.md)):
+a third-party kind with a core property named `state`, or a backend named `state`, must
+rename it. Plan output gained a header line (`# render digest: …`); scripts that count or
+slice plan lines by position should skip `#` lines instead. Nothing else changes in
+existing specs or renders.

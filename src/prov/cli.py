@@ -16,10 +16,11 @@ import re
 import stat
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, List, Optional, Sequence, Tuple
 
-from . import __version__, conformance, kinds
+from . import __version__, conformance, kinds, state
 from .kinds.common import DEFS
 from .plan import plan_lines
 from .registry import builtin_names, call_plugin, discover, for_kind, lookup, preserved
@@ -158,12 +159,29 @@ def cmd_list(args: argparse.Namespace) -> int:
     directory whose kind is not installed) exit 0. Only names matching the item name pattern are ever printed raw; any other name appears as
     a capped repr, so a planted file name cannot forge output lines or terminal escapes.
     """
-    root = Path(args.root)
+    rows, problems, _ = _scan_items(Path(args.root))
+    for ref, backend in rows:
+        print(f"{ref}\t{backend}")
+    # stdout is the listing (ref, backend); every finding, warnings included, goes to stderr
+    _print_findings(problems, warnings_to_stderr=True)
+    return EXIT_FINDINGS if has_errors(problems) else EXIT_OK
+
+
+def _scan_items(root: Path) -> Tuple[List[Tuple[str, str]], List[Finding], List[str]]:
+    """((ref, backend or "-") per item, findings, unreadable refs) for every item under the root.
+
+    Rows are what ``prov list`` shows: refs only for item names matching the name pattern; the
+    backend is "-" when spec.toml does not name a valid backend id. Items with a valid name
+    whose spec.toml cannot be read or parsed are not rows but findings, and their refs are
+    returned as unreadable (``prov status`` still shows them, as invalid).
+    """
     if not root.is_dir():
         raise ConfigError(f"root {show(str(root))} does not exist or is not a directory")
     root = root.resolve()
     known = kinds.discover()
     problems: List[Finding] = _unknown_dotted_kinds(root, known)
+    rows: List[Tuple[str, str]] = []
+    unreadable: List[str] = []
     for kind in known:
         kdir = root / kind
         try:
@@ -200,12 +218,11 @@ def cmd_list(args: argparse.Namespace) -> int:
                 raw = read_toml(entry / SPEC_FILE)
             except ConfigError as exc:
                 problems.append(Finding(ERROR, str(exc).replace(show(str(entry / SPEC_FILE)) + ": ", ""), ref))
+                unreadable.append(ref)
                 continue
             backend = raw.get("backend")
-            print(f"{ref}\t{backend if isinstance(backend, str) and re.fullmatch(ID_PATTERN.strip('^$'), backend) else '-'}")
-    # stdout is the listing (ref, backend); every finding, warnings included, goes to stderr
-    _print_findings(problems, warnings_to_stderr=True)
-    return EXIT_FINDINGS if has_errors(problems) else EXIT_OK
+            rows.append((ref, backend if isinstance(backend, str) and re.fullmatch(ID_PATTERN.strip("^$"), backend) else "-"))
+    return rows, problems, unreadable
 
 
 def _unknown_dotted_kinds(root: Path, known: Any) -> List[Finding]:
@@ -333,11 +350,96 @@ def cmd_plan(args: argparse.Namespace) -> int:
     plugin, spec, _, idir, ctx = _load(args)
     lines = plan_lines(plugin, spec, ctx, args.ref, idir / "rendered")  # refuses unsafe lines (exit 2) before printing any
     if args.json:
-        _print_json({"ref": args.ref, "backend": plugin.NAME, "rendered_dir": str(idir / "rendered"), "lines": lines})
+        digest, _ = state.digest_or_reason(idir / "rendered")
+        _print_json({"ref": args.ref, "backend": plugin.NAME, "rendered_dir": str(idir / "rendered"), "render_digest": digest, "lines": lines})
         return EXIT_OK
     for line in lines:
         print(line)
     return EXIT_OK
+
+
+def cmd_digest(args: argparse.Namespace) -> int:
+    """The digest of ``<kind>/<name>/rendered/`` (``prov.state.render_digest``); exit 2 when not rendered."""
+    _, _, idir = item_dir(args.root, args.ref)
+    digest = state.render_digest(idir / "rendered")
+    if digest is None:
+        raise ConfigError(f"{args.ref}: not rendered yet; run prov render {args.ref}")
+    if args.json:
+        _print_json({"ref": args.ref, "digest": digest})
+    else:
+        print(digest)
+    return EXIT_OK
+
+
+def _state_dir(arg: Optional[str]) -> Optional[Path]:
+    """--state-dir, else $PROV_STATE_DIR, else None (no records: every item is planned); an empty value is None."""
+    value = arg if arg is not None else os.environ.get("PROV_STATE_DIR")  # --state-dir "": no records
+    if not value:
+        return None
+    path = Path(value)
+    if not path.is_dir():
+        raise ConfigError(f"state directory {show(value)} does not exist or is not a directory")
+    return path.resolve()
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    """Lifecycle and sync of items from spec.toml, rendered/ and the state records; reads local files only.
+
+    Rows on stdout (``prov.state.text_line``), findings on stderr. Exit 1 when an item, a
+    record or the scan has an error; drift, pending renders and stale hosts are states, not
+    errors (exit 0).
+    """
+    root = Path(args.root)
+    state_dir = _state_dir(args.state_dir)
+    stale_after = state.parse_duration(args.stale_after)
+    if args.now is not None:
+        try:
+            now = state.parse_time(args.now)
+        except ValueError:
+            raise ConfigError(f"--now {short_repr(args.now)} is not an RFC 3339 timestamp (e.g. 2026-01-02T03:04:05Z)") from None
+    else:
+        now = datetime.now(timezone.utc)
+    scan_findings: List[Finding] = []
+    unreadable: List[str] = []
+    if args.refs:
+        refs = []
+        for ref in args.refs:  # a named item must exist: a typo is a usage error, not a row
+            kind, name, idir = item_dir(root, ref)
+            if not os.path.lexists(idir / SPEC_FILE):
+                raise ConfigError(f"{ref}: not found ({show(str(idir / SPEC_FILE))} does not exist)")
+            refs.append(ref)
+    else:
+        rows, scan_findings, unreadable = _scan_items(root)
+        refs = sorted([ref for ref, _ in rows] + unreadable)  # unreadable items are rows too (invalid; the scan already reported why)
+    backends = discover()
+    statuses = []
+    for ref in refs:
+        if ref in unreadable:  # spec.toml unreadable or not TOML: the scan finding says why
+            statuses.append(state.Status(ref, None, state.INVALID, state.NO_SYNC))
+            continue
+        kind, name, idir = item_dir(root, ref)
+        try:
+            _, spec, findings, _ = check_item(root, kind, name, backends)
+        except ConfigError as exc:
+            spec, findings = None, [Finding(ERROR, str(exc), "spec.toml")]
+        statuses.append(state.item_status(ref, spec, findings, idir / "rendered", state_dir, now, stale_after))
+    if state_dir is not None and not args.refs:
+        scan_findings += state.orphan_findings(state_dir, list(kinds.discover()), refs)
+    every = scan_findings + [Finding(f.level, f.message, f"{s.ref}: {f.where}" if f.where else s.ref) for s in statuses for f in s.findings]
+    failed = has_errors(every)
+    if args.json:
+        _print_json({
+            "now": state.format_time(now),
+            "stale_after_seconds": int(stale_after.total_seconds()),
+            "state_dir": None if state_dir is None else str(state_dir),
+            "items": [s.document() for s in statuses],
+            "findings": [{"level": str(f.level), "where": str(f.where), "message": str(f.message)} for f in _sorted_findings(every)],
+        })  # fmt: skip
+        return EXIT_FINDINGS if failed else EXIT_OK
+    for s in statuses:
+        print(state.text_line(s))
+    _print_findings(every, warnings_to_stderr=True)
+    return EXIT_FINDINGS if failed else EXIT_OK
 
 
 def cmd_conformance(args: argparse.Namespace) -> int:
@@ -396,6 +498,18 @@ def build_parser() -> argparse.ArgumentParser:
     add("validate", cmd_validate, "validate spec.toml and the rendered artefacts", json_help=as_json + "; findings on stdout only")
     add("diff", cmd_diff, "diff a fresh render against <kind>/<name>/rendered/")
     add("plan", cmd_plan, "print the apply steps for a human (never runs them)", json_help=as_json)
+    add("digest", cmd_digest, "print the sha256 digest of <kind>/<name>/rendered/ (docs/state.md)", json_help=as_json)
+    p = add(
+        "status",
+        cmd_status,
+        "lifecycle and sync of items from spec.toml, rendered/ and state records (local files only)",
+        ref=False,
+        json_help=as_json,
+    )
+    p.add_argument("refs", nargs="*", metavar="ref", help="items to show (default: every item under the root)")
+    p.add_argument("--state-dir", help="directory of <kind>/<name>.json state records (default: $PROV_STATE_DIR; none: every item is planned)")
+    p.add_argument("--stale-after", default="72h", help="a host not seen for longer is stale: <n>s|m|h|d (default: 72h)")
+    p.add_argument("--now", help="evaluate at this RFC 3339 time instead of the clock (reproducible output)")
     p = add(
         "conformance",
         cmd_conformance,

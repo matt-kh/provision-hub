@@ -232,9 +232,30 @@ def hostile_root(tmp_path, capsys, extra_kinds, extra_backends):
     return root
 
 
+EVIL_TEXT = "ev\u202eil\u200b"  # bidi override and zero width: valid in a record, never printed raw as text
+
+
+def _hostile_state_dir(root):
+    """A state directory next to the root: a valid record with bidi/zero-width text, one with
+    control characters (rejected, its error escaped) and an undecodable one."""
+    sd = root.parent / "state"
+    (sd / "os-install").mkdir(parents=True)
+    base = {"api_version": "prov.state/v1alpha1", "last_seen": "2026-01-10T11:00:00Z"}
+    web = dict(base, ref="os-install/web", drift={"status": "drifted", "detail": EVIL_TEXT}, facts={EVIL_TEXT: EVIL_TEXT}, agent_version=EVIL_TEXT)
+    (sd / "os-install" / "web.json").write_text(json.dumps(web))
+    controls = "ev\x1b[2Jil\nerror: forged"
+    raiser = dict(base, ref="os-install/raiser", drift={"status": "clean", "detail": controls}, facts={controls: 1})
+    (sd / "os-install" / "raiser.json").write_text(json.dumps(raiser))
+    (sd / "os-install" / "finder.json").write_bytes(b'{"ref": "\xff\x1b[2J\nforged"}')
+    return str(sd)
+
+
 def test_every_verb_writes_only_printable_text(hostile_root, capsys):
     root = str(hostile_root)
+    sd = _hostile_state_dir(hostile_root)
     argvs = [
+        ["status"],
+        ["status", "--state-dir", sd],
         ["kinds"],
         ["backends"],
         ["backends", "--kind", "os-install"],
@@ -247,8 +268,9 @@ def test_every_verb_writes_only_printable_text(hostile_root, capsys):
         ["init", "os-install/fresh", "--backend", "stub-raise", "--force"],
     ]
     for item in ("os-install/web", "os-install/finder", "os-install/raiser", "os-install/fresh", f"{HOSTILE_KIND}/odd"):
-        for verb in ("validate", "diff", "plan", "render"):
+        for verb in ("validate", "diff", "plan", "render", "digest"):
             argvs.append([verb, item])
+        argvs.append(["status", "--state-dir", sd, item])
     seen, outputs = [], {}
     for argv in argvs:
         code, out, err = run(capsys, "--root", root, *argv)
@@ -261,6 +283,7 @@ def test_every_verb_writes_only_printable_text(hostile_root, capsys):
     # the hostile parts were exercised, not skipped
     joined = dict(((a, c) for a, c in seen))
     assert joined["kinds"] == 0 and joined["list"] == 1 and ("plan", 2) in seen and ("render", 2) in seen and ("validate", 1) in seen
+    assert ("digest", 2) in seen and ("status", 1) in seen
     assert f"{HOSTILE_KIND}\texample.org/v1alpha1\tHostile kind ev\\x1b[2Jil\n" in outputs[("kinds",)][1]  # first docstring line
     code, _, err = outputs[("render", f"{HOSTILE_KIND}/odd")]
     assert code == 2 and f"kind '{HOSTILE_KIND}' failed in semantic: RuntimeError: ev\\x1b[2Jil\\x0aerror: forged" in err
@@ -270,9 +293,11 @@ def test_every_json_verb_writes_ascii_json(hostile_root, capsys):
     """--json: one parseable document of printable ASCII on stdout, or an exit-2 text error and nothing on stdout."""
     root = str(hostile_root)
     assert run(capsys, "--root", root, "render", "os-install/finder")[0] == 0  # so its backend's validate runs
+    sd = _hostile_state_dir(hostile_root)
     argvs = [["kinds"], ["backends"], ["backends", "--kind", "os-install"], ["backends", "--kind", HOSTILE_KIND], ["schema", "os-install"], ["schema", HOSTILE_KIND]]
+    argvs += [["status"], ["status", "--state-dir", sd]]
     for item in ("os-install/web", "os-install/finder", "os-install/raiser", f"{HOSTILE_KIND}/odd", "os-install/missing"):
-        for verb in ("validate", "plan"):
+        for verb in ("validate", "plan", "digest"):
             argvs.append([verb, item])
     docs, seen = {}, []
     for argv in argvs:
@@ -287,7 +312,9 @@ def test_every_json_verb_writes_ascii_json(hostile_root, capsys):
         assert not any(line.lstrip().startswith(("forged", "error: forged")) for line in out.splitlines()), argv
         docs[tuple(argv)] = json.loads(out)
         assert (docs[tuple(argv)].get("format") == "prov.cli/v1alpha1") is (argv[0] != "schema"), argv
-    assert ("validate", 1) in seen and ("plan", 2) in seen and ("validate", 2) in seen
+    assert ("validate", 1) in seen and ("plan", 2) in seen and ("validate", 2) in seen and ("status", 1) in seen
+    web = next(i for i in docs[("status", "--state-dir", sd)]["items"] if i["ref"] == "os-install/web")
+    assert web["sync"] == "drifted" and web["record"]["drift"]["detail"] == EVIL_TEXT and web["record"]["facts"] == {EVIL_TEXT: EVIL_TEXT}
     # raw values survive the round trip: escaping is JSON's, not prov.text's
     kind = next(k for k in docs[("kinds",)]["kinds"] if k["name"] == HOSTILE_KIND)
     assert kind["summary"] == "Hostile kind ev\x1b[2Jil" and kind["builtin"] is False

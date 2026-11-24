@@ -286,7 +286,7 @@ def test_fake_kind_schema(capsys, widget):
     jsonschema.Draft202012Validator.check_schema(schema)
     assert schema["$id"].endswith("/widget.v1alpha1.schema.json")
     assert schema["required"] == ["api_version", "kind", "backend", "size"]
-    assert set(schema["properties"]) == {"api_version", "kind", "backend", "size", "owners", "widget-text"}
+    assert set(schema["properties"]) == {"api_version", "kind", "backend", "size", "owners", "state", "widget-text"}
     good = {"api_version": "prov/v1alpha1", "kind": "widget", "backend": "widget-text", "size": 2, "widget-text": {}}
     jsonschema.Draft202012Validator(schema).validate(good)
     assert not jsonschema.Draft202012Validator(schema).is_valid(dict(good, kind="os-install"))

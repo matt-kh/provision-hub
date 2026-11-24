@@ -43,6 +43,8 @@ uv run prov list                                              # every item under
 uv run prov validate os-install/demo --json                   # one JSON document (kinds, backends, schema, validate, plan, conformance)
 uv run prov conformance <backend>                             # render the kind's fixtures through a backend; static checks only
 uv run prov conformance --export os-install out/              # write out/os-install.v1alpha1.fixtures.json (fixtures, tables, composed specs)
+uv run prov digest os-install/demo                            # sha256 identity of rendered/ (also in the plan header)
+uv run prov status --state-dir ../state                       # lifecycle and sync of every item from host-written state records
 ```
 
 | Command | Does | Exit codes |
@@ -55,7 +57,9 @@ uv run prov conformance --export os-install out/              # write out/os-ins
 | `prov render <ref>` | make `<kind>/<name>/rendered/` hold exactly the rendered files | 0, 2 |
 | `prov validate <ref> [--json]` | envelope, schema and semantic checks, rendered-file checks, staleness | 0, 1 findings, 2 |
 | `prov diff <ref>` | unified diff from `rendered/` to a fresh render | 0, 1 diff, 2 |
-| `prov plan <ref> [--json]` | print the apply steps for a human | 0, 2 |
+| `prov plan <ref> [--json]` | print the apply steps for a human (the header carries the render digest) | 0, 2 |
+| `prov digest <ref> [--json]` | print the `sha256:` digest of `rendered/` ([docs/state.md](docs/state.md)) | 0, 2 not rendered or unsafe entries |
+| `prov status [ref ...] [--state-dir DIR] [--stale-after D] [--now T] [--json]` | lifecycle (planned, active, stale, decommissioned) and sync (in-sync, pending, drifted, unknown) of items, from `spec.toml`, `rendered/` and host-written state records; reads local files only ([docs/state.md](docs/state.md)) | 0, 1 invalid spec or record, 2 |
 | `prov conformance <backend> [--json]` | render each conformance fixture of the backend's kind through it and check the result statically (spec, outputs, deterministic render, clean rewrite, `validate`, expected strings, plan refusal checks); writes only to a fresh temporary directory from `$TMPDIR` that it removes, never the item tree, and runs nothing | 0 all ok or skipped, 1 a fixture failed, 2 unknown backend, kind without fixtures or temporary directory left behind |
 | `prov conformance --export <kind> DIR` | write `<kind>.<version>.fixtures.json` (the kind's fixtures, its installed backends' tables, unsupported reasons and composed specs) into the existing real directory DIR, outside `<root>/<kind>/`; atomic, never through a symlink | 0, 2 unknown kind, kind without fixtures, refused directory or target |
 
