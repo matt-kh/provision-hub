@@ -17,8 +17,9 @@ hostname = "demo"
 The ref `<kind>/<name>` (`os-install/demo`) is the item's path below the root, the CLI
 argument (`prov render os-install/demo`) and the value of a reference in the optional
 `[refs]` table (see [References](#references)). The optional `[state]` table holds the
-item's lifecycle intent (`decommissioned = true`) for `prov status`; every kind accepts it
-and no render reads it ([state.md](state.md)).
+item's lifecycle intent (`decommissioned = true`) for `prov status`, which no render reads,
+and optionally `[state.report]`, which a backend with `STATE_AGENT = True` renders into a
+report-only state agent; every kind accepts the table ([state.md](state.md)).
 
 | Part | Owned by | Defined in |
 |---|---|---|

@@ -364,6 +364,8 @@ evaluation warnings; the LUKS device is unchanged.
 <root>/os-install/<name>/rendered/disko.nix
 <root>/os-install/<name>/rendered/installer.nix
 <root>/os-install/<name>/rendered/flake.lock          # yours: created by nix flake lock, kept by render
+<root>/os-install/<name>/rendered/prov-state.nix      # with [state.report] only
+<root>/os-install/<name>/rendered/prov-state-agent.sh # with [state.report] only
 ```
 
 - **`configuration.nix`** — the target. It imports `not-detected.nix` and a broad initrd
@@ -404,6 +406,49 @@ directly in the store. A `rendered/hardware-configuration.nix` is never imported
 next `prov render` deletes it): keep the file next to `spec.toml`. Only that one file is
 copied onto the stick, so it must be self-contained: no `imports` of other relative
 files (the output of `nixos-generate-config` already is).
+
+## State agent (`[state.report]`)
+
+With `[state.report]` in `spec.toml` ([state.md](../state.md#reporting-state-statereport)) the
+render gains two files, and `configuration.nix` imports the first:
+
+- **`prov-state.nix`** — a NixOS module: the `prov-state-agent` service (oneshot, root,
+  `ProtectSystem=strict`, `ProtectHome=read-only`, state in `/var/lib/prov-state`, mode
+  0700) and its timer (`OnBootSec=2min`, then every `interval`, up to 1 minute random
+  delay); `/etc/prov/state-known-hosts` with the spec's `known_hosts` lines; and
+  `/etc/prov/render-digest`.
+- **`prov-state-agent.sh`** — the agent, built with `writeShellApplication` (which runs
+  shellcheck at build time) with git, openssh, jq, coreutils and iproute2. It is the same
+  for every host: its settings come from the service's environment.
+
+**The render digest is computed by Nix at evaluation time**, not by prov: the module reads
+its own directory (`builtins.readDir ./.`) and hashes every regular file with the manifest
+of `prov digest`, skipping the installer's `*.installer-copy.nix` files. The stick's flat
+copy and a checkout therefore yield the same value and the same system (the offline install
+needs both to evaluate identically). Nix sees only git-tracked files, so the value equals
+`prov digest` when `rendered/` is committed as `prov render` wrote it, `flake.lock` included.
+Checked with Nix 2.24 on the synthetic example: `nix eval` of the locked flake from a git
+subdirectory gives the `prov digest` value. No host has run the agent yet.
+
+The target system still gets no `self` (no git revision), so the record has no
+`applied_rev`: adding the revision would change the system on every commit to the
+repository, and the stick's copy has none.
+
+What the agent reports (one record, `<kind>/<name>.json` in the state repository):
+
+| Field | Source |
+|---|---|
+| `render_digest` | `/run/current-system/etc/prov/render-digest` |
+| `generation` | the `system-<N>-link` the system profile points to |
+| `drift` | `drifted` when `/run/current-system` is not the system profile (`nixos-rebuild test`, a manual activation) or the profile is older than the newest generation (a rollback); `unknown` without a digest; else `clean` |
+| `facts` | `hostname`, `kernel`, `nixos_version`, `reboot_pending` (booted kernel, initrd or modules differ from the current system's), `addresses` (global, at most 64) |
+
+Every string is reduced to printable ASCII (anything else becomes `?`). The agent pushes
+when the record changed apart from `last_seen`, or when the last push is older than
+`heartbeat`; it retries a rejected push three times on top of the current branch. It
+connects with `StrictHostKeyChecking=yes` against the pinned keys only, and with the deploy
+key at `identity_file`, which `prov plan` (step 8) tells you to create on the host and add to
+the state repository with write access. It never builds, switches or rolls back anything.
 
 ## Host-owned module and extra inputs
 
@@ -567,3 +612,4 @@ checks only: nothing is locked, evaluated, built or installed.
 Building the ISO or writing the USB from prov, unattended wipe-on-boot installers,
 nixos-anywhere / install over ssh, btrfs / ZFS layouts, LUKS key files, TPM2 or FIDO2
 unlocking, encrypted `/boot`, LUKS on BIOS, home-manager, non-flake output, `follows` for extra inputs.
+State agent: `applied_rev`, applying changes from git (converge), and a boot test of the agent in a VM.
