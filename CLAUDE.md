@@ -19,7 +19,7 @@ uv run prov --root <dir> render os-install/demo && uv run prov --root <dir> vali
 uv run prov --root <dir> plan os-install/demo && uv run prov --root <dir> list
 uv run prov --root examples validate os-install/demo-lvm
 uv run prov --root examples plan os-install/demo-nixos-ext4   # nixos-disko USB steps
-uv run prov conformance <backend>        # kind FIXTURES through one backend (os-install has none yet: exit 2)
+uv run prov conformance ubuntu-autoinstall && uv run prov conformance nixos-disko   # os-install FIXTURES, static only
 pre-commit run --all-files               # same hooks as the CI lint job
 ```
 
@@ -47,7 +47,9 @@ stay minimal (pyyaml; tomli on 3.10 only) — justify any new one in the PR.
   `src/prov/refs.py` — resolves a spec's `[refs]` into `Context.refs`: reads only targets'
   `spec.toml` under the root, never through symlinks.
   `src/prov/conformance.py` — `prov conformance <backend>`: kind `FIXTURES` (+ backend
-  `FIXTURES` / `UNSUPPORTED_FIXTURES`) composed, checked, rendered and validated statically.
+  `FIXTURES` / `UNSUPPORTED_FIXTURES`) composed, checked, rendered and validated statically;
+  `compose_spec` is the one composition path (conformance runs and exports), and
+  `export_fixtures` builds `conformance/*.fixtures.json` (and `prov conformance --export`).
 - `src/prov/text.py` — the output-escaping predicate and helpers (`unsafe`, `esc`, `show`,
   `short_repr`) and `json_text`, the one JSON serialisation (schemas, every `--json`
   document; `ensure_ascii` is its printing boundary, values go in raw).
@@ -67,7 +69,9 @@ stay minimal (pyyaml; tomli on 3.10 only) — justify any new one in the PR.
   executes nothing. `conformance` is static + rendered only: it writes only to a fresh
   temporary directory from `$TMPDIR` (never the item tree) that it removes, and never runs
   a plan or a behavioural test (a backend may render e.g. `goss.yaml`; its plan prints the
-  command for a human; `tests/test_conformance.py` guards it).
+  command for a human; `tests/test_conformance.py` guards it). `conformance --export KIND DIR`
+  writes one file, atomically, into an existing real directory outside `<root>/<kind>/`,
+  never through a symlink.
 - **Synthetic data only.** Examples, fixtures and tests use documentation addresses
   (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24, 2001:db8::/32), example.com/org/net and
   fake ssh keys containing `EXAMPLE`. `tests/test_synthetic_data.py` enforces it. Never
@@ -95,9 +99,11 @@ stay minimal (pyyaml; tomli on 3.10 only) — justify any new one in the PR.
 ## Goldens
 
 The committed `examples/<kind>/<name>/rendered/` directories are the golden files, and
-`schema/<kind>.<version>.schema.json` is generated from the code. After an intended change:
+`schema/<kind>.<version>.schema.json` and `conformance/<kind>.<version>.fixtures.json` (kind
+`FIXTURES` + built-in backends' tables and reasons) are generated from the code. After an
+intended change:
 
 ```sh
-PROV_UPDATE_GOLDENS=1 uv run pytest -q   # rewrites goldens and the schema files
-git diff examples/ schema/                # review every changed line before committing
+PROV_UPDATE_GOLDENS=1 uv run pytest -q   # rewrites goldens, schema and conformance files
+git diff examples/ schema/ conformance/   # review every changed line before committing
 ```

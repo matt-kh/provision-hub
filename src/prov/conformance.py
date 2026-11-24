@@ -56,11 +56,11 @@ from . import kinds
 from .kinds.common import DEFS
 from .plan import plan_lines
 from .refs import freeze
-from .registry import Context, call_plugin, discover, preserved
-from .render import diff_rendered, write_rendered
+from .registry import Context, call_plugin, discover, for_kind, preserved
+from .render import atomic_write, diff_rendered, write_rendered
 from .schema import ConfigError, api_versions
 from .spec import check_raw
-from .text import esc, short_repr, show
+from .text import esc, json_text, short_repr, show
 from .validate import ERROR, SKIPPED, WARNING, Finding, json_equal, schema_errors
 
 OK, FAIL, SKIP = "ok", "FAIL", "skipped"
@@ -148,6 +148,39 @@ def _os_error(exc: OSError) -> str:
     return f"{name}{esc(str(exc.strerror or exc))}"
 
 
+Refs = Dict[str, Tuple[str, str, Dict[str, Any]]]  # alias -> (target kind, synthetic ref, literal outputs)
+
+
+def fixture_refs(kind: Any, fixture: Mapping[str, Any]) -> Refs:
+    """The synthetic ref of each ``refs`` literal of a (normalised) fixture, in alias order."""
+    declared = kinds.declared_refs(kind)
+    out: Refs = {}
+    for alias, outputs in sorted(fixture["refs"].items()):
+        target = declared[alias]["kind"]
+        out[alias] = (target, synthetic_ref(target, alias, frozenset(ref for _, ref, _ in out.values())), outputs)
+    return out
+
+
+def fixture_table(plugin: Any, name: str) -> Dict[str, Any]:
+    """The backend's table for fixture ``name`` (a copy), ``{}`` when it gives none."""
+    return copy.deepcopy(getattr(plugin, "FIXTURES", {}).get(name, {}))
+
+
+def compose_spec(kind: Any, plugin: Any, fixture: Mapping[str, Any], table: Mapping[str, Any], refs: Refs) -> Dict[str, Any]:
+    """The raw spec of one fixture through one backend, as ``prov conformance`` checks it.
+
+    Envelope (the kind's current ``api_version``, ``kind``, ``backend``), the fixture's core
+    keys, ``[refs]`` with the synthetic refs (when there are any) and the backend table under
+    the backend's NAME. The one composition path: ``run`` and ``export_fixtures`` both use it.
+    """
+    raw: Dict[str, Any] = {"api_version": api_versions(kind)[-1], "kind": kind.NAME, "backend": plugin.NAME}
+    raw.update(copy.deepcopy(dict(fixture["spec"])))
+    if refs:
+        raw["refs"] = {alias: ref for alias, (_, ref, _) in refs.items()}
+    raw[plugin.NAME] = copy.deepcopy(dict(table))
+    return raw
+
+
 class _Run:
     """One fixture through one backend; results go to ``self.result``."""
 
@@ -192,26 +225,19 @@ class _Run:
         self._plan(spec, ctx)
 
     def _table(self) -> Dict[str, Any]:
-        tables = getattr(self.plugin, "FIXTURES", {})
-        if self.name in tables:
-            return copy.deepcopy(tables[self.name])
-        if not self.plugin.SCHEMA.get("required"):
-            return {}
+        if self.name in getattr(self.plugin, "FIXTURES", {}) or not self.plugin.SCHEMA.get("required"):
+            return fixture_table(self.plugin, self.name)
         self.stop("table", f"no backend table for fixture; the backend's SCHEMA requires {', '.join(map(str, self.plugin.SCHEMA['required']))}: add FIXTURES[{self.name!r}] or UNSUPPORTED_FIXTURES[{self.name!r}]")
         return {}  # unreachable
 
-    def _refs(self) -> Dict[str, Tuple[str, str, Dict[str, Any]]]:
+    def _refs(self) -> Refs:
         """alias -> (target kind, synthetic ref, literal outputs); the ``refs`` check when there are any."""
-        literals = self.fixture["refs"]
-        if not literals:
+        out = fixture_refs(self.kind, self.fixture)
+        if not out:
             return {}
-        declared = kinds.declared_refs(self.kind)
         installed = kinds.discover()
-        out: Dict[str, Tuple[str, str, Dict[str, Any]]] = {}
         absent: List[str] = []
-        for alias, outputs in sorted(literals.items()):
-            target = declared[alias]["kind"]
-            out[alias] = (target, synthetic_ref(target, alias, frozenset(ref for _, ref, _ in out.values())), outputs)
+        for alias, (target, _, outputs) in out.items():
             if target not in installed:
                 absent.append(f"refs.{alias}: kind {short_repr(target)} is not installed; its literal outputs were checked as JSON data only")
                 continue
@@ -228,13 +254,9 @@ class _Run:
             self.add("refs", OK, f"{len(out)} reference(s) match their target kinds' OUTPUTS")
         return out
 
-    def _spec(self, table: Dict[str, Any], refs: Dict[str, Tuple[str, str, Dict[str, Any]]]) -> Tuple[Optional[Dict[str, Any]], Context]:
+    def _spec(self, table: Dict[str, Any], refs: Refs) -> Tuple[Optional[Dict[str, Any]], Context]:
         kind, plugin, name = self.kind, self.plugin, self.name
-        raw: Dict[str, Any] = {"api_version": api_versions(kind)[-1], "kind": kind.NAME, "backend": plugin.NAME}
-        raw.update(copy.deepcopy(self.fixture["spec"]))
-        if refs:
-            raw["refs"] = {alias: ref for alias, (_, ref, _) in refs.items()}
-        raw[plugin.NAME] = table
+        raw = compose_spec(kind, plugin, self.fixture, table, refs)
 
         def resolver(kind_name: str, item: str, spec: Mapping[str, Any]) -> Tuple[Mapping[str, Any], List[Finding]]:
             resolved = {}
@@ -469,6 +491,70 @@ def _unknown_names(plugin: Any, kind: Any, fixtures: Mapping[str, Any]) -> List[
                 detail = f"{member} names unknown fixture {short_repr(name)} (fixtures of kind {kind.NAME}: {known})"
                 out.append(FixtureResult(name, [Check("table", FAIL, detail)]))
     return sorted(out, key=lambda f: f.name)
+
+
+EXPORT_FORMAT = "prov.conformance/v1alpha1"
+
+
+def fixtures_file_name(kind: Any) -> str:
+    """``<kind>.<current version>.fixtures.json``, the exported conformance file of a kind."""
+    return f"{kind.NAME}.{kind.VERSIONS[-1]}.fixtures.json"
+
+
+def export_fixtures(kind: Any, backends: Mapping[str, Any]) -> Dict[str, Any]:
+    """The language-neutral conformance document of one kind (docs/kinds.md "Exported fixtures").
+
+    ``{"format", "kind", "api_version", "fixtures", "backends"}``: the kind's fixtures in the
+    ``prov.kinds.fixtures`` form (``expect`` defaults filled in) and, per backend of that kind
+    in ``backends`` (keyed by NAME), its tables (``fixtures``), reasons (``unsupported``) and
+    the composed spec of every fixture it does not mark unsupported (``specs``, from
+    ``compose_spec``, exactly what ``prov conformance`` checks). Kind-neutral: the caller
+    chooses the backends (the published files use ``prov.registry.builtin()``, ``prov
+    conformance --export`` the installed ones). Serialise with ``prov.text.json_text``.
+    """
+    fixtures = kinds.fixtures(kind)
+    out: Dict[str, Any] = {}
+    for name, plugin in sorted(backends.items()):
+        if plugin.KIND != kind.NAME:
+            continue
+        reasons = dict(getattr(plugin, "UNSUPPORTED_FIXTURES", {}))
+        specs = {
+            fixture_name: compose_spec(kind, plugin, fixture, fixture_table(plugin, fixture_name), fixture_refs(kind, fixture))
+            for fixture_name, fixture in fixtures.items()
+            if fixture_name not in reasons
+        }
+        out[name] = {"fixtures": copy.deepcopy(dict(getattr(plugin, "FIXTURES", {}))), "unsupported": reasons, "specs": specs}
+    return {"format": EXPORT_FORMAT, "kind": kind.NAME, "api_version": api_versions(kind)[-1], "fixtures": fixtures, "backends": out}
+
+
+def export(kind_name: str, directory: str, root: Path) -> str:
+    """``prov conformance --export``: write ``<kind>.<version>.fixtures.json`` for the kind and its installed backends.
+
+    ``directory`` must exist as a real directory (not a symlink) outside ``<root>/<kind>/``
+    (both resolved); an existing target must be a regular file (never written through a
+    symlink); the file is replaced atomically. Returns the written path as given (for
+    ``show``). ConfigError (exit 2) for an unknown kind, a kind without fixtures, or a refused
+    directory or target.
+    """
+    kind = kinds.get(kind_name)
+    if not kinds.fixtures(kind):
+        raise ConfigError(f"kind {kind.NAME} has no fixtures (FIXTURES); nothing to export")
+    if os.path.islink(directory):
+        raise ConfigError(f"{show(directory)}: is a symlink; give the real directory to export into")
+    if not os.path.isdir(directory):
+        raise ConfigError(f"{show(directory)}: not an existing directory; create it first")
+    resolved = Path(directory).resolve()
+    tree = (Path(root) / kind.NAME).resolve()
+    if resolved == tree or tree in resolved.parents:
+        raise ConfigError(f"{show(directory)}: inside the item tree <root>/{kind.NAME}/; export somewhere else")
+    target = resolved / fixtures_file_name(kind)
+    shown = os.path.join(directory, fixtures_file_name(kind))
+    if os.path.islink(target):
+        raise ConfigError(f"{show(shown)}: is a symlink; not written through")
+    if os.path.lexists(target) and not target.is_file():
+        raise ConfigError(f"{show(shown)}: exists and is not a regular file")
+    atomic_write(target, json_text(export_fixtures(kind, for_kind(discover(), kind.NAME))))
+    return shown
 
 
 def text_lines(result: Result) -> List[str]:

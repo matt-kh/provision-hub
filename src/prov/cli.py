@@ -341,7 +341,17 @@ def cmd_plan(args: argparse.Namespace) -> int:
 
 
 def cmd_conformance(args: argparse.Namespace) -> int:
-    """Static + rendered conformance of one backend against its kind's fixtures; writes only to a removed temp dir."""
+    """Static + rendered conformance of one backend against its kind's fixtures; writes only to a removed temp dir.
+
+    With ``--export KIND DIR``: write the kind's exported fixtures file into DIR instead.
+    """
+    if args.export is not None:
+        if args.backend is not None or args.json:
+            raise ConfigError("conformance --export KIND DIR takes no backend and no --json")
+        print(f"wrote {show(conformance.export(args.export[0], args.export[1], args.root))}")
+        return EXIT_OK
+    if args.backend is None:
+        raise ConfigError("conformance needs a backend NAME (or --export KIND DIR)")
     result = conformance.run(args.backend)
     if args.json:
         _print_json(conformance.document(result))
@@ -393,7 +403,13 @@ def build_parser() -> argparse.ArgumentParser:
         ref=False,
         json_help=as_json,
     )
-    p.add_argument("backend", help="backend NAME, e.g. ubuntu-autoinstall")
+    p.add_argument("backend", nargs="?", help="backend NAME, e.g. ubuntu-autoinstall")
+    p.add_argument(
+        "--export",
+        nargs=2,
+        metavar=("KIND", "DIR"),
+        help="write <kind>.<version>.fixtures.json (the kind's fixtures, its installed backends' tables, reasons and composed specs) into the existing directory DIR",
+    )
     return parser
 
 

@@ -9,11 +9,13 @@ import pytest
 from conftest import EXAMPLES, fake_entry_point
 from test_kind_plugins import BACKEND, KIND, fake_backend, fake_kind
 
+from prov import registry
 from prov.cli import JSON_FORMAT, main
 from prov.text import json_text
 
 ITEM = "os-install/demo-lvm"
 FORMAT = "prov.cli/v1alpha1"
+NIXOS_DISKO = registry.builtin()["nixos-disko"]
 
 
 def run(capsys, *argv):
@@ -55,7 +57,7 @@ def test_kinds_json_shape(capsys):
         "builtin": True,
         "outputs": None,
         "refs": {},
-        "fixtures": [],
+        "fixtures": ["conf-bad-gateway-family", "conf-bios-dhcp", "conf-duplicate-user", "conf-two-disks", "conf-uefi-dhcp", "conf-uefi-static"],
     }
 
 
@@ -90,8 +92,8 @@ def test_backends_json_shape(capsys):
         "starter": True,
         "check": True,
         "preserve": ["flake.lock"],
-        "fixtures": [],
-        "unsupported_fixtures": {},
+        "fixtures": ["conf-bad-gateway-family", "conf-bios-dhcp", "conf-duplicate-user", "conf-uefi-dhcp", "conf-uefi-static"],
+        "unsupported_fixtures": {"conf-two-disks": NIXOS_DISKO.UNSUPPORTED_FIXTURES["conf-two-disks"]},
     }
     assert by_name["ubuntu-autoinstall"]["preserve"] == [] and by_name["ubuntu-autoinstall"]["builtin"] is True
 

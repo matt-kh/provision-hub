@@ -22,7 +22,9 @@ from test_refs import registry_kind
 
 from prov import kinds
 from prov.cli import main
-from prov.conformance import synthetic_ref
+from prov.conformance import export_fixtures, synthetic_ref
+from prov.registry import discover, for_kind
+from prov.text import json_text
 from prov.validate import ERROR, SKIPPED, WARNING, Finding
 
 SITE = "site.example.org"
@@ -330,10 +332,6 @@ def test_temp_path_never_printed(install, capsys):
 
 
 # --- exit 2 -------------------------------------------------------------------------------
-
-
-def test_builtin_backend_kind_without_fixtures(capsys):
-    assert run(capsys, "conformance", "ubuntu-autoinstall") == (2, "", "prov: error: kind os-install has no fixtures (FIXTURES); nothing to check for backend ubuntu-autoinstall\n")
 
 
 def test_unknown_backend(capsys):
@@ -666,3 +664,100 @@ def test_synthetic_ref_collisions():
     long = "a" * 63
     ref = synthetic_ref("x.example.org", long, frozenset({f"x.example.org/{long}"}))
     assert ref == f"x.example.org/{'a' * 61}-2"
+
+
+# --- prov conformance --export KIND DIR ---------------------------------------------------
+
+
+def _export_file(directory):
+    return directory / f"{SITE}.v1alpha1.fixtures.json"
+
+
+def test_export_writes_the_kind_and_its_installed_backends(install, capsys, tmp_path):
+    install()
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    code, out, err = run(capsys, "--root", str(tmp_path / "root"), "conformance", "--export", SITE, str(out_dir))
+    target = _export_file(out_dir)
+    assert (code, out, err) == (0, f"wrote {target}\n", "")
+    text = target.read_text(encoding="utf-8")
+    assert text == json_text(export_fixtures(kinds.get(SITE), for_kind(discover(), SITE)))
+    doc = json.loads(text)
+    assert (doc["format"], doc["kind"], doc["api_version"]) == ("prov.conformance/v1alpha1", SITE, "example.org/v1alpha1")
+    entry = doc["backends"][BACKEND]
+    assert entry["fixtures"] == {"basic": {"port": 8081}} and entry["unsupported"] == {}
+    assert entry["specs"]["with-registry"]["refs"] == {"registry": "registry.example.org/registry"}
+    assert entry["specs"]["basic"] == {"api_version": "example.org/v1alpha1", "kind": SITE, "backend": BACKEND, "hostname": "web.example.org", BACKEND: {"port": 8081}}
+    assert run(capsys, "conformance", "--export", SITE, str(out_dir))[0] == 0  # replaces it
+    assert target.read_text(encoding="utf-8") == text
+    assert sorted(p.name for p in out_dir.iterdir()) == [target.name]  # no temp file left
+
+
+def test_export_skips_unsupported_specs(install, capsys, tmp_path):
+    install(backend=site_backend(UNSUPPORTED_FIXTURES={"cached": "no cache"}))
+    assert run(capsys, "conformance", "--export", SITE, str(tmp_path))[0] == 0
+    entry = json.loads(_export_file(tmp_path).read_text(encoding="utf-8"))["backends"][BACKEND]
+    assert "cached" not in entry["specs"] and entry["unsupported"] == {"cached": "no cache"}
+
+
+def test_export_unknown_kind_and_kind_without_fixtures(extra_kinds, capsys, tmp_path):
+    code, out, err = run(capsys, "conformance", "--export", "no-such\x1b[2J", str(tmp_path))
+    assert (code, out) == (2, "") and err.startswith("prov: error: unknown kind 'no-such\\x1b[2J'") and clean(err)
+    extra_kinds(fake_entry_point(fake_kind(), value="prov_registry.kind"))
+    code, out, err = run(capsys, "conformance", "--export", "registry.example.org", str(tmp_path))
+    assert (code, out) == (2, "") and "kind registry.example.org has no fixtures (FIXTURES); nothing to export" in err
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_export_refuses_bad_directories(install, capsys, tmp_path):
+    install()
+    root = tmp_path / "root"
+    (root / SITE / "web").mkdir(parents=True)
+    real = tmp_path / "real"
+    real.mkdir()
+    (tmp_path / "link").symlink_to(real, target_is_directory=True)
+    (tmp_path / "into-tree").symlink_to(root / SITE, target_is_directory=True)
+    (tmp_path / "file").write_text("x", encoding="utf-8")
+    cases = {
+        str(tmp_path / "missing\x1b[2J"): "not an existing directory",
+        str(tmp_path / "file"): "not an existing directory",
+        str(tmp_path / "link"): "is a symlink",
+        str(root / SITE): f"inside the item tree <root>/{SITE}/",
+        str(root / SITE / "web"): f"inside the item tree <root>/{SITE}/",
+        str(tmp_path / "into-tree" / "web"): f"inside the item tree <root>/{SITE}/",
+    }
+    for directory, message in cases.items():
+        code, out, err = run(capsys, "--root", str(root), "conformance", "--export", SITE, directory)
+        assert (code, out) == (2, "") and message in err and clean(err), directory
+    assert list(real.iterdir()) == [] and sorted(p.name for p in (root / SITE).iterdir()) == ["web"]
+    assert run(capsys, "--root", str(root), "conformance", "--export", SITE, str(root))[0] == 0  # the root itself is outside <root>/<kind>/
+
+
+def test_export_never_writes_through_a_symlinked_target(install, capsys, tmp_path):
+    install()
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    victim = tmp_path / "victim"
+    victim.write_text("keep", encoding="utf-8")
+    _export_file(out_dir).symlink_to(victim)
+    code, out, err = run(capsys, "conformance", "--export", SITE, str(out_dir))
+    assert (code, out) == (2, "") and "is a symlink; not written through" in err
+    assert victim.read_text(encoding="utf-8") == "keep" and _export_file(out_dir).is_symlink()
+    _export_file(out_dir).unlink()
+    _export_file(out_dir).mkdir()
+    code, _, err = run(capsys, "conformance", "--export", SITE, str(out_dir))
+    assert code == 2 and "exists and is not a regular file" in err
+
+
+@pytest.mark.parametrize(
+    "argv, message",
+    [
+        (["conformance"], "conformance needs a backend NAME (or --export KIND DIR)"),
+        (["conformance", BACKEND, "--export", SITE, "."], "takes no backend and no --json"),
+        (["conformance", "--json", "--export", SITE, "."], "takes no backend and no --json"),
+    ],
+)
+def test_export_usage_errors(install, capsys, argv, message):
+    install()
+    code, out, err = run(capsys, *argv)
+    assert (code, out) == (2, "") and message in err

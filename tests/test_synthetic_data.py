@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import ipaddress
+import json
 import re
 from pathlib import Path
 
 from conftest import EXAMPLES, REPO
 
+from prov import kinds, registry
 from prov.backends import nixos_disko as nixos
 from prov.backends import ubuntu_autoinstall as ubuntu
 
@@ -25,7 +27,7 @@ PUBLIC_REFERENCES = (
     "openssh.com",  # part of the sk-* key type names
     "nixos.org",  # NixOS downloads and manuals, linked from docs
 )
-SCANNED = [EXAMPLES, REPO / "tests", REPO / "docs", REPO / "schema", REPO / "README.md", REPO / "CLAUDE.md", REPO / "CHANGELOG.md"]
+SCANNED = [EXAMPLES, REPO / "tests", REPO / "docs", REPO / "schema", REPO / "conformance", REPO / "README.md", REPO / "CLAUDE.md", REPO / "CHANGELOG.md"]
 SELF = Path(__file__).resolve()
 
 IPV4 = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?![\w.])")
@@ -43,6 +45,13 @@ def _files():
     # The `prov init` starter is synthetic data too.
     yield REPO / "src/prov/backends/ubuntu_autoinstall.py", ubuntu.starter("demo")
     yield REPO / "src/prov/backends/nixos_disko.py", nixos.starter("demo")
+    # Conformance fixtures of the built-in kinds and the built-in backends' tables and reasons
+    # (also exported to conformance/, scanned above). ensure_ascii=False keeps the text as written.
+    for name, kind in kinds.builtin().items():
+        yield REPO / f"src/prov/kinds/{name}:FIXTURES", json.dumps(getattr(kind, "FIXTURES", {}), ensure_ascii=False)
+    for name, plugin in registry.builtin().items():
+        tables = {"FIXTURES": getattr(plugin, "FIXTURES", {}), "UNSUPPORTED_FIXTURES": getattr(plugin, "UNSUPPORTED_FIXTURES", {})}
+        yield REPO / f"src/prov/backends/{name}:FIXTURES", json.dumps(tables, ensure_ascii=False)
 
 
 def _non_doc_addresses(text):
