@@ -41,6 +41,8 @@ should carry a vendor prefix, `<vendor>-<tool>` (`acme-talos`, not `talos`), so 
 not collide with a backend another package, or provision-hub itself, ships later. This is a
 convention, not a check; it will be revisited before 1.0.
 
+Why: [ADR 0009](adr/0009-backend-names-flat-vendor-prefix.md).
+
 `Finding` is `prov.validate.Finding(level, message, where="")`, a frozen dataclass; `level` is
 one of `prov.validate.ERROR` (`"error"`), `WARNING` (`"warning"`) or `SKIPPED` (`"skipped"`).
 `where` names the file or spec key (`"machineconfig.yaml"`, `"storage.disks"`). Only errors
@@ -278,6 +280,8 @@ a backend by name. `prov.registry.builtin()` is the set the `provision-hub` dist
 registers, and the published schemas are generated from it, so a built-in needs nothing
 beyond its entry point.
 
+Why: [ADR 0007](adr/0007-uniform-entry-point-plugins.md).
+
 ## 5. Schema file, example, goldens, tests
 
 1. Example item with synthetic data only — documentation addresses (192.0.2.0/24,
@@ -345,3 +349,5 @@ UNSUPPORTED_FIXTURES = {"two-disks": "talos installs to exactly one disk"}
   are files you render, such as `goss.yaml`, and a command your `plan` prints for a human
   (`goss --gossfile goss.yaml validate`). `prov conformance` and every other prov command
   only check that the plan lines are printable; prov never runs them.
+
+Why: [ADR 0014](adr/0014-static-conformance-exported-fixtures.md).

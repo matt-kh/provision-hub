@@ -49,7 +49,8 @@ Not recorded at the time as a comparison of options.
 - The layer-zero boundary hands over to GitOps; what lies beyond it belongs to other tools.
 - Still open from #16: catalog naming, profile merge semantics, and the GitOps hand-off
   contract.
-- [kinds.md](../kinds.md#planned-kinds-sketches-not-implemented) sketches the next kinds
-  (`image`, `vm`, `cluster`); their names and keys will change before they land.
+- [kinds.md](../kinds.md#planned-kinds-sketches-not-implemented) sketches the roadmap kinds
+  (`os-image`, `profile`, `gitops-controller`, `git-server`, `registry`); their keys will
+  change before they land, and each gets its own issue.
 
 The rules: [kinds.md](../kinds.md) and [determinism.md](../determinism.md#outside-prov).

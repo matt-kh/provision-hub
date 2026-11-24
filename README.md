@@ -1,6 +1,6 @@
 # provision-hub
 
-Render, validate and plan reusable provisioning artefacts (OS installs, OS images, VMs, Kubernetes distributions) from versioned kind + backend specs
+Render, validate and plan tool-neutral infrastructure definitions from versioned kind + backend specs: OS installs today; OS images, host profiles and layer-zero platform kinds next
 
 ## Overview
 
@@ -13,10 +13,18 @@ checks them, and prints the steps a human runs to apply them. It never applies a
 disk writes outside the item's `rendered/` directory, no ssh, no VM creation, no network
 calls.
 
-provision-hub is generic across domains — OS installs, OS images, VM setups, Kubernetes
-distributions — and champions no backend: a **kind** fixes what an item is (its core keys),
-any number of **backends** render it. The first wave is OS installs (`os-install`, shipped)
-and OS images (`image`, planned). See [docs/kinds.md](docs/kinds.md).
+provision-hub is a layered catalog of tool-neutral infrastructure definitions and champions
+no backend: a **kind** fixes what an item is (its core keys), any number of **backends**
+render it. `os-install` ships today; `os-image`, `profile` (host software) and the
+layer-zero platform kinds (`gitops-controller`, `git-server`, `registry`) are planned
+([roadmap](docs/kinds.md#planned-kinds-sketches-not-implemented)). Application deployment,
+cloud resources and applying or reconciling anything are non-goals
+([ADR 0015](docs/adr/0015-scope-and-non-goals.md)).
+
+Docs: [architecture overview](docs/architecture.md) (start here),
+[architecture decision records](docs/adr/README.md), [kinds](docs/kinds.md),
+[adding a backend](docs/adding-a-backend.md), [determinism](docs/determinism.md),
+[observed state](docs/state.md).
 
 | Kind | Backend | Artefacts | Notes |
 |---|---|---|---|
@@ -128,8 +136,8 @@ prints is exactly what you paste.
 
 **External validators** are optional: `prov validate` runs `cloud-init schema` when
 cloud-init is installed (ubuntu-autoinstall) and `nix-instantiate --parse` when nix is
-installed (nixos-disko; parse only, never evaluates or fetches), and otherwise reports
-`skipped: <tool> not installed`.
+installed (nixos-disko; parse only, never evaluates or fetches), and otherwise reports a
+skipped finding, e.g. `skipped: cloud-init not installed (cloud-init schema)`.
 
 ## Development
 

@@ -16,9 +16,10 @@ with the desired state from local files only.
                               prov status --state-dir <state-dir>
 ```
 
-Keep the records out of the infrastructure repository: a separate repository (or a
-directory that only hosts write) means a host never needs write access to the specs, state
-updates never conflict with spec changes, and a state commit can never trigger an apply.
+Keep the records out of the infrastructure repository: in a separate repository, or a
+directory that only hosts write. Rule: a state commit can never trigger an apply.
+
+Why: [ADR 0016](adr/0016-observed-state-records-separate-repository.md).
 
 ## Render digest
 
