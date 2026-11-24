@@ -42,6 +42,12 @@ DISKO_REF_COMMIT = "de5708739256238fb912c62f03988815db89ec9a"
 PRESERVE = ("flake.lock",)
 
 FILES = ("configuration.nix", "disko.nix", "flake.nix", "installer.nix")
+# [state.report] (docs/state.md): the report-only state agent, rendered only then.
+STATE_AGENT = True
+STATE_MODULE = "prov-state.nix"
+STATE_SCRIPT = "prov-state-agent.sh"
+STATE_FILES = (STATE_MODULE, STATE_SCRIPT)
+_AGENT_SOURCE = "nixos_disko_agent.sh"  # next to this module; rendered as STATE_SCRIPT
 
 # Name of the hardware file inside the installer's offline flake copy (never rendered; a
 # human-created rendered/hardware-configuration.nix is not imported).
@@ -690,6 +696,8 @@ def configuration_nix(spec: Dict[str, Any]) -> str:
             f"    [ ../{LOCAL_FILE} ];",
         ]
         imports = "hardware ++ local"
+    if _report(spec):
+        imports += f" ++ [ ./{STATE_MODULE} ]"
     lines += [
         "in",
         "{",
@@ -1036,6 +1044,7 @@ def installer_nix(spec: Dict[str, Any]) -> str:
             '        cp ${./disko.nix} "$out/disko.nix"',
             '        cp ${./installer.nix} "$out/installer.nix"',
             '        cp ${./flake.lock} "$out/flake.lock"',
+            *[f'        cp ${{./{n}}} "$out/{n}"' for n in (STATE_FILES if _report(spec) else ())],
             "      ''",
             "      + lib.optionalString (!storeRoot && builtins.pathExists ../hardware-configuration.nix) ''",
             f'        cp ${{../hardware-configuration.nix}} "$out/{HW_COPY}"',
@@ -1167,14 +1176,129 @@ def installer_nix(spec: Dict[str, Any]) -> str:
     )
 
 
+def _report(spec: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The spec's ``[state.report]`` (defaults applied), or None."""
+    return (spec.get("state") or {}).get("report")
+
+
+def state_module(spec: Dict[str, Any], ctx: Any) -> str:
+    """prov-state.nix: the report-only state agent as a NixOS module (docs/state.md)."""
+    report = _report(spec)
+    assert report is not None
+    ref = f"{KIND}/{ctx.name}"
+    known = "".join(f"\n    {nix_str(line)}" for line in report["known_hosts"])
+    env = {
+        "PROV_STATE_REF": ref,
+        "PROV_STATE_REPO": report["repo"],
+        "PROV_STATE_BRANCH": report["branch"],
+        "PROV_STATE_HEARTBEAT": report["heartbeat"],
+        "PROV_STATE_IDENTITY": report["identity_file"],
+        "PROV_STATE_KNOWN_HOSTS": "/etc/prov/state-known-hosts",
+        "PROV_STATE_DIR": "/var/lib/prov-state",
+    }
+    return "\n".join(
+        [
+            HEADER,
+            "# Report-only state agent ([state.report], docs/state.md): a systemd timer runs",
+            f"# {STATE_SCRIPT}, which writes this host's state record ({ref}) to the state",
+            "# repository. It never changes the system. A human places the deploy key on the host",
+            "# (prov plan prints the step); prov never renders a key.",
+            "{ lib, pkgs, ... }:",
+            "let",
+            "  # The render digest (prov digest) of this directory, computed at evaluation time:",
+            "  # sha256 over the sha256sum-style manifest of every regular file, sorted by name (this",
+            "  # backend renders a flat directory; validate refuses subdirectories). The",
+            "  # installer's *.installer-copy.nix files are not part of rendered/ and are skipped, so",
+            "  # the USB stick and a checkout give the same value and the same system. Nix sees only",
+            "  # git-tracked files: commit rendered/ (and flake.lock) for the value to match prov digest.",
+            "  names = builtins.attrNames (lib.filterAttrs",
+            '    (name: type: type == "regular" && !(lib.hasSuffix ".installer-copy.nix" name))',
+            "    (builtins.readDir ./.));",
+            '  manifest = lib.concatMapStrings (name: "${builtins.hashFile "sha256" (./. + "/${name}")}  ${name}\\n") names;',
+            '  renderDigest = "sha256:${builtins.hashString "sha256" manifest}";',
+            "",
+            "  agent = pkgs.writeShellApplication {",
+            '    name = "prov-state-agent";',
+            "    runtimeInputs = [ pkgs.coreutils pkgs.git pkgs.openssh pkgs.jq pkgs.iproute2 ];",
+            f"    text = builtins.readFile ./{STATE_SCRIPT};",
+            "  };",
+            "in",
+            "{",
+            '  environment.etc."prov/render-digest".text = renderDigest + "\\n";',
+            "  # The state repository's ssh host keys: the agent connects with StrictHostKeyChecking=yes.",
+            '  environment.etc."prov/state-known-hosts".text = lib.concatMapStrings (line: line + "\\n") [' + known,
+            "  ];",
+            "",
+            "  # The agent runs as its own system user, never as root; it owns /var/lib/prov-state.",
+            "  users.users.prov-state = {",
+            "    isSystemUser = true;",
+            '    group = "prov-state";',
+            '    home = "/var/lib/prov-state";',
+            "  };",
+            "  users.groups.prov-state = { };",
+            "",
+            "  systemd.services.prov-state-agent = {",
+            '    description = "prov state agent: report this host\'s state (report-only)";',
+            '    wants = [ "network-online.target" "time-sync.target" ];',
+            '    after = [ "network-online.target" "time-sync.target" ];',
+            "    environment = {",
+            *[f"      {k} = {nix_str(v)};" for k, v in env.items()],
+            "    };",
+            "    serviceConfig = {",
+            '      Type = "oneshot";',
+            '      ExecStart = "${agent}/bin/prov-state-agent";',
+            '      User = "prov-state";',
+            '      Group = "prov-state";',
+            "      # A hung connection must not stop the timer for good.",
+            '      TimeoutStartSec = "5min";',
+            '      StateDirectory = "prov-state";',
+            '      StateDirectoryMode = "0700";',
+            '      UMask = "0077";',
+            "      NoNewPrivileges = true;",
+            "      PrivateTmp = true;",
+            '      ProtectSystem = "strict";',
+            '      ProtectHome = "read-only";',
+            "      PrivateDevices = true;",
+            "      ProtectKernelTunables = true;",
+            "      ProtectKernelModules = true;",
+            "      ProtectControlGroups = true;",
+            "      LockPersonality = true;",
+            "      RestrictSUIDSGID = true;",
+            '      CapabilityBoundingSet = "";',
+            '      RestrictAddressFamilies = [ "AF_INET" "AF_INET6" "AF_UNIX" "AF_NETLINK" ];',
+            "    };",
+            "  };",
+            "  systemd.timers.prov-state-agent = {",
+            '    wantedBy = [ "timers.target" ];',
+            "    timerConfig = {",
+            '      OnBootSec = "2min";',
+            f"      OnUnitActiveSec = {nix_str(report['interval'])};",
+            '      RandomizedDelaySec = "1min";',
+            "    };",
+            "  };",
+            "}",
+            "",
+        ]
+    )
+
+
+def agent_script() -> str:
+    """The agent script rendered as prov-state-agent.sh (static: settings come from the environment)."""
+    return (Path(__file__).parent / _AGENT_SOURCE).read_text(encoding="utf-8")
+
+
 def render(spec: Dict[str, Any], ctx: Any) -> Dict[str, str]:
-    """Return the flake files (relative path -> text)."""
-    return {
+    """Return the flake files (relative path -> text); the state agent's two with [state.report]."""
+    files = {
         "configuration.nix": configuration_nix(spec),
         "disko.nix": disko_nix(spec),
         "flake.nix": flake_nix(spec),
         "installer.nix": installer_nix(spec),
     }
+    if _report(spec):
+        files[STATE_MODULE] = state_module(spec, ctx)
+        files[STATE_SCRIPT] = agent_script()
+    return files
 
 
 # --- contract: validate -------------------------------------------------------------------
@@ -1409,6 +1533,19 @@ def _validate_desktop(code: str) -> List[Finding]:
     return out
 
 
+# (needle in prov-state.nix, what is missing)
+_STATE_REQUIRED = [
+    (f"builtins.readFile ./{STATE_SCRIPT}", f"the agent script ./{STATE_SCRIPT}"),
+    ('environment.etc."prov/render-digest"', "the render digest in /etc/prov/render-digest"),
+    ('environment.etc."prov/state-known-hosts"', "the pinned known_hosts file"),
+    ('!(lib.hasSuffix ".installer-copy.nix" name)', "skipping the installer's copies in the digest"),
+    ("systemd.timers.prov-state-agent", "the timer"),
+    ('User = "prov-state";', "the agent's own user"),
+    ('ProtectSystem = "strict";', "ProtectSystem=strict"),
+    ('TimeoutStartSec = "5min";', "the start timeout"),
+]
+
+
 def validate(rendered_dir: Path) -> List[Finding]:
     """Check the rendered flake: files, key attributes, cross-file consistency, optional parse."""
     findings: List[Finding] = []
@@ -1468,6 +1605,34 @@ def validate(rendered_dir: Path) -> List[Finding]:
         if net:
             findings.append(Finding(ERROR, f"{net}: no network credentials may be rendered (connections are made on the machine)", name))
 
+    nix_files = [rendered_dir / name for name in FILES]
+    present = [name for name in STATE_FILES if (rendered_dir / name).exists() or (rendered_dir / name).is_symlink()]
+    if present:
+        state = {name: _read(rendered_dir / name, findings) for name in STATE_FILES}
+        module, script = state[STATE_MODULE], state[STATE_SCRIPT]
+        nix_files.append(rendered_dir / STATE_MODULE)
+        if module is not None:
+            for needle, what in _STATE_REQUIRED:
+                if needle not in module:
+                    findings.append(Finding(ERROR, f"{what} is missing", STATE_MODULE))
+            for check in (_secret, _net_secret):
+                hit = check(module)
+                if hit:
+                    findings.append(Finding(ERROR, f"{hit}: no credential may be rendered", STATE_MODULE))
+        if script is not None and script != agent_script():
+            findings.append(Finding(ERROR, "differs from the agent this prov renders; run prov render", STATE_SCRIPT))
+        subdirs = sorted(p.name for p in rendered_dir.iterdir() if p.is_dir() and not p.is_symlink())
+        if subdirs:
+            findings.append(Finding(ERROR, f"rendered/ holds a subdirectory ({esc(subdirs[0])}); the module's digest covers top-level files only", STATE_MODULE))
+        if conf is not None and f"./{STATE_MODULE}" not in _code(conf):
+            findings.append(Finding(ERROR, f"does not import ./{STATE_MODULE}", "configuration.nix"))
+        if inst is not None:
+            for name in STATE_FILES:
+                if f'cp ${{./{name}}} "$out/{name}"' not in inst:
+                    findings.append(Finding(ERROR, f"the offline flake does not copy {name}", "installer.nix"))
+    elif conf is not None and f"./{STATE_MODULE}" in _code(conf):
+        findings.append(Finding(ERROR, f"imports ./{STATE_MODULE}, which is missing; run prov render", "configuration.nix"))
+
     lock_path = rendered_dir / "flake.lock"
     if lock_path.exists() or lock_path.is_symlink():
         lock = _read(lock_path, findings)
@@ -1481,7 +1646,7 @@ def validate(rendered_dir: Path) -> List[Finding]:
                     findings.append(Finding(ERROR, "not a flake lock file (no 'nodes')", "flake.lock"))
 
     if not any(f.level == ERROR for f in findings):
-        findings += _external([rendered_dir / name for name in FILES])
+        findings += _external(nix_files)
     return findings
 
 
@@ -1637,6 +1802,27 @@ def plan(spec: Dict[str, Any], ctx: Any) -> List[str]:
         f"#        git pull && nixos-rebuild switch --flake .#{q(host)} --sudo",
         "#    Each switch adds a boot menu entry to roll back to.",
     ]
+    report = _report(spec)
+    if report:
+        key = report["identity_file"]
+        lines += [
+            "",
+            f"# 8. [state.report]: the state agent reports {q(f'{KIND}/{ctx.name}')} to {q(report['repo'])}",
+            "#    (docs/state.md). Until its deploy key exists the agent fails and reports nothing.",
+            "#    ON THE HOST, create the key there (the private key never leaves the host):",
+            "#    (as the agent's own user prov-state, which owns /var/lib/prov-state):",
+            "sudo install -d -m 700 -o prov-state -g prov-state /var/lib/prov-state",
+            f"sudo -u prov-state ssh-keygen -t ed25519 -N '' -C {q(f'prov-state {KIND}/{ctx.name}')} -f {q(key)}",
+            f"sudo cat {q(key + '.pub')}",
+            "#    Add that public key to the STATE repository as a deploy key with write access (never",
+            "#    to the infrastructure repository), then run the agent once and check it:",
+            "sudo systemctl start prov-state-agent",
+            "systemctl status prov-state-agent --no-pager",
+            "journalctl -u prov-state-agent -n 20 --no-pager",
+            "#    In a checkout of the state repository on this machine,",
+            "#        prov status --state-dir <that checkout>",
+            "#    shows the host as active.",
+        ]
     return lines
 
 

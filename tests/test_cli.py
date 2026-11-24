@@ -193,6 +193,7 @@ def test_list_examples(capsys):
         "os-install/demo-nixos-ext4\tnixos-disko",
         "os-install/demo-nixos-gnome-luks\tnixos-disko",
         "os-install/demo-nixos-local-module\tnixos-disko",
+        "os-install/demo-nixos-state\tnixos-disko",
         "os-install/demo-zfs\tubuntu-autoinstall",
     ]
 

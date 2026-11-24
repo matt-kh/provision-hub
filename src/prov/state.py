@@ -13,6 +13,8 @@ never reads the network and never writes a file.
   (``schema/prov.state.v1alpha1.schema.json``).
 - ``item_status`` derives an item's lifecycle (planned, active, stale, decommissioned, or
   invalid) and its sync state (in-sync, pending, drifted, unknown).
+- ``report_findings`` checks a spec's ``[state.report]`` (the agent a backend renders);
+  only backends that declare ``STATE_AGENT = True`` render one.
 
 Nothing here is specific to a kind or a backend.
 """
@@ -44,6 +46,9 @@ MAX_RECORD_BYTES = 256 * 1024
 PLANNED, ACTIVE, STALE, DECOMMISSIONED, INVALID = "planned", "active", "stale", "decommissioned", "invalid"
 IN_SYNC, PENDING, DRIFTED, UNKNOWN, NO_SYNC = "in-sync", "pending", "drifted", "unknown", "-"
 DRIFT_STATUSES = ("clean", "drifted", "unknown")
+
+# prov status's default --stale-after.
+DEFAULT_STALE_AFTER = "72h"
 
 # A host clock a little ahead of the reader's is normal; further ahead is worth a warning.
 FUTURE_SKEW = timedelta(minutes=5)
@@ -177,6 +182,81 @@ def parse_duration(text: str) -> timedelta:
     if m is None or int(m.group(1)) == 0:
         raise ConfigError(f"invalid duration {short_repr(text)}: expected a positive number and a unit s, m, h or d (e.g. 72h)")
     return timedelta(seconds=int(m.group(1)) * _UNITS[m.group(2)])
+
+
+# ---------------------------------------------------------------- [state.report]
+
+_SSH_URL = re.compile(r"ssh://[^@/]+@([^:/]+)(?::([0-9]+))?/")
+_SCP_URL = re.compile(r"[^@/]+@([^:/]+):")
+
+
+def _repo_host(repo: str) -> Tuple[str, int]:
+    """(host, port) of an ssh git URL already checked by the schema."""
+    m = _SSH_URL.match(repo)
+    if m:
+        return m.group(1), int(m.group(2) or 22)
+    m = _SCP_URL.match(repo)
+    return (m.group(1) if m else ""), 22
+
+
+def _known_host(line: str, host: str, port: int) -> Optional[bool]:
+    """Whether a known_hosts line names ``host`` (on ``port``): None for a hashed line, which
+    cannot be checked without hashing; ssh's wildcards ``*`` and ``?`` are honoured."""
+    patterns = line.split(" ", 1)[0]
+    if patterns.startswith("|"):
+        return None
+    want = host.lower() if port == 22 else f"[{host.lower()}]:{port}"
+    for pattern in patterns.lower().split(","):
+        if pattern.startswith("!"):
+            continue
+        rx = "".join(".*" if c == "*" else "." if c == "?" else re.escape(c) for c in pattern)
+        if re.fullmatch(rx, want):
+            return True
+    return False
+
+
+def report_findings(spec: Mapping[str, Any], backend: Any) -> List[Finding]:
+    """Findings for a valid spec's ``[state.report]`` (defaults applied); none without one.
+
+    Kind-neutral: the backend only says whether it renders an agent (``STATE_AGENT``).
+    """
+    report = (spec.get("state") or {}).get("report")
+    if report is None:
+        return []
+    where = "state.report"
+    if getattr(backend, "STATE_AGENT", False) is not True:
+        return [Finding(ERROR, f"backend {short_repr(backend.NAME)} does not render a state agent; remove [state.report]", where)]
+    out: List[Finding] = []
+    interval, heartbeat = parse_duration(report["interval"]), parse_duration(report["heartbeat"])
+    stale = parse_duration(DEFAULT_STALE_AFTER)
+    if heartbeat < interval:
+        out.append(Finding(ERROR, f"heartbeat {report['heartbeat']} is shorter than interval {report['interval']}", f"{where}.heartbeat"))
+    if interval <= heartbeat < 2 * interval:
+        out.append(
+            Finding(
+                WARNING,
+                f"heartbeat {report['heartbeat']} is less than twice interval {report['interval']}: "
+                "with the timer's random delay an idle host pushes only every second check",
+                f"{where}.heartbeat",
+            )
+        )
+    if report["branch"].endswith(".lock") or "/." in report["branch"] or report["branch"].startswith("."):
+        out.append(Finding(ERROR, f"branch {short_repr(report['branch'])} is not a valid git branch name", f"{where}.branch"))
+    if heartbeat >= stale:
+        out.append(
+            Finding(
+                WARNING,
+                f"heartbeat {report['heartbeat']} is not below prov status's default --stale-after {DEFAULT_STALE_AFTER}: "
+                "an idle host would show as stale",
+                f"{where}.heartbeat",
+            )
+        )
+    host, port = _repo_host(report["repo"])
+    matches = [_known_host(line, host, port) for line in report["known_hosts"]]
+    if not any(m is not False for m in matches):
+        shown = host if port == 22 else f"[{host}]:{port}"
+        out.append(Finding(ERROR, f"no known_hosts line names the repository host {short_repr(shown)}; ssh would refuse it", f"{where}.known_hosts"))
+    return out
 
 
 # ---------------------------------------------------------------- records

@@ -2,9 +2,10 @@
 
 prov knows an item's **desired** state: `spec.toml` and the committed `rendered/` tree. What
 a host actually runs is **observed** state. prov never collects it, because it never runs a
-command, opens a connection or touches a host. Something on the host (an agent, or a human
-after an apply) writes a small JSON **state record**, and `prov status` compares the records
-with the desired state from local files only.
+command, opens a connection or touches a host. Something on the host (the agent a backend
+renders for [`[state.report]`](#reporting-state-statereport), or a human after an apply)
+writes a small JSON **state record**, and `prov status` compares the records with the
+desired state from local files only.
 
 ```text
  infrastructure repo (desired)            state repo (observed)
@@ -90,7 +91,57 @@ kind-neutral envelope table `[state]`.
 decommissioned = true   # prov status shows the item as decommissioned
 ```
 
-No render reads `[state]`: adding or changing it never changes `rendered/` or its digest.
+No render reads `decommissioned`: adding or changing it never changes `rendered/` or its
+digest. `[state.report]` (below) does.
+
+## Reporting state: `[state.report]`
+
+`[state.report]` asks the backend to render a **report-only state agent**: a program the
+host runs on a timer that writes the item's record to the state repository. prov only
+renders it; it never runs it, and the agent never changes the host.
+
+```toml
+[state.report]
+repo = "git@git.example.com:example/hosts-state.git"   # ssh git URL; the host needs write access
+known_hosts = ["git.example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLE"]   # host keys
+# branch = "main"                                        # defaults shown
+# interval = "15m"                                       # how often the agent checks
+# heartbeat = "6h"                                       # push at least this often when nothing changed
+# identity_file = "/var/lib/prov-state/id_ed25519"       # the deploy key's path ON THE HOST
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `repo` | required | `ssh://user@host[:port]/path` or `user@host:path` (the path may be absolute); no part may start with `-` |
+| `known_hosts` | required | 1–16 known_hosts lines (no `@cert-authority`/`@revoked` markers); one must name the repository's host (`[host]:port` for a port other than 22; hashed lines are not checked) |
+| `branch` | `main` | branch the agent writes to (a valid git branch name; no `.lock` suffix) |
+| `interval` | `15m` | how often the agent checks, `<n>` plus `s`, `m`, `h` or `d` |
+| `heartbeat` | `6h` | the agent pushes when the record changed apart from `last_seen`, or when the last push is older than this; must not be shorter than `interval` (a warning below twice `interval`, since the timer's random delay would skip every other push); a warning from `72h` (`prov status`'s default `--stale-after`), when an idle host would show as stale |
+| `identity_file` | `/var/lib/prov-state/id_ed25519` | path of the ssh deploy key on the host, a file directly in `/var/lib/prov-state` (the agent's own directory; not `repo`, its checkout); prov never renders a key, `prov plan` prints how to create one there |
+
+Core checks these for every kind; a backend renders the agent only when it declares
+`STATE_AGENT = True` ([adding-a-backend.md](adding-a-backend.md)), and any other backend
+refuses a spec with `[state.report]`. Backends with an agent today: **nixos-disko**
+([its docs](backends/nixos-disko.md#state-agent-statereport)). Unlike `decommissioned`,
+`[state.report]` changes `rendered/` and therefore the digest.
+
+**Credentials.** Give each host its own deploy key with write access to the **state**
+repository only. The infrastructure repository never needs a writable key on a host: a
+host that could push there could push to the branch every host applies from. Host keys are
+pinned from the spec (`StrictHostKeyChecking=yes`), so a host never trusts a server on
+first use.
+
+**Trust model.** Hosts that share a state repository and branch trust each other: a host
+whose key can push can also rewrite or delete another host's record, and `prov status`
+believes what it reads. Protect the branch against force pushes and deletion where the
+server allows it, and use a repository (or branch) per host where hosts do not trust each
+other. The agent itself never follows a symlink in the state repository (it checks out
+with `core.symlinks=false` and refuses a record path that is not a plain file), starts each
+run from a fresh shallow checkout, and never reads another host's record.
+
+**What the digest covers.** `render_digest` identifies `rendered/` only. Host-owned files
+outside it (nixos-disko's `../local.nix` and `../hardware-configuration.nix`) change the
+system but not the digest, so `prov status` does not show them as pending.
 
 ## `prov status`
 
@@ -142,10 +193,12 @@ a bad `--stale-after` or `--now`). `--state-dir ""` means no records even when
 `record` is the record exactly as written (raw values: escape them before showing them to a
 human), or `null`.
 
-## How an agent uses this (later releases)
+## How an agent uses this
 
-Rendering a host agent is planned, not part of this release. The record format is designed
-for a pull agent that compares three things on every poll, like a three-way merge:
+Today's agent (nixos-disko, `[state.report]`) only reports: `render_digest`, `generation`,
+the drift it can see on the host, and facts. Applying changes from git (converge) is
+planned, not part of this release. The record format is designed for a pull agent that
+compares three things on every poll, like a three-way merge:
 
 - **base**: what the host last applied (`applied_rev` and `render_digest` in its own last record);
 - **host**: what the host runs now (`generation`, its drift check);

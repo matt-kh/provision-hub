@@ -21,6 +21,7 @@ uv run prov --root examples validate os-install/demo-lvm
 uv run prov --root examples plan os-install/demo-nixos-ext4   # nixos-disko USB steps
 uv run prov conformance ubuntu-autoinstall && uv run prov conformance nixos-disko   # os-install FIXTURES, static only
 uv run prov --root examples digest os-install/demo-lvm && uv run prov --root examples status   # observed state (docs/state.md)
+uv run prov --root examples plan os-install/demo-nixos-state   # [state.report]: rendered agent, deploy-key step
 pre-commit run --all-files               # same hooks as the CI lint job
 ```
 
@@ -52,8 +53,11 @@ stay minimal (pyyaml; tomli on 3.10 only) — justify any new one in the PR.
   `compose_spec` is the one composition path (conformance runs and exports), and
   `export_fixtures` builds `conformance/*.fixtures.json` (and `prov conformance --export`).
   `src/prov/state.py` — observed state (docs/state.md): `render_digest` (`prov digest`, the
-  plan header), the state record schema `RECORD_SCHEMA` and `load_record`, and `item_status`
-  for `prov status`; reads local files only.
+  plan header), the state record schema `RECORD_SCHEMA` and `load_record`, `item_status`
+  for `prov status`, and `report_findings` (core checks of `[state.report]`; backends opt in
+  with `STATE_AGENT = True`); reads local files only. nixos-disko renders the report-only
+  agent from `src/prov/backends/nixos_disko_agent.sh` (rendered as `prov-state-agent.sh`,
+  run only by `tests/test_state_agent.py` against a local bare repo and fake system paths).
 - `src/prov/text.py` — the output-escaping predicate and helpers (`unsafe`, `esc`, `show`,
   `short_repr`) and `json_text`, the one JSON serialisation (schemas, every `--json`
   document; `ensure_ascii` is its printing boundary, values go in raw).
@@ -77,6 +81,7 @@ stay minimal (pyyaml; tomli on 3.10 only) — justify any new one in the PR.
   writes one file, atomically, into an existing real directory outside `<root>/<kind>/`,
   never through a symlink. `digest` and `status` only read: specs, `rendered/` and
   state records (written by host agents, never by prov); `tests/test_state.py` guards it.
+  prov renders the state agent for `[state.report]` but never runs it.
 - **Synthetic data only.** Examples, fixtures and tests use documentation addresses
   (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24, 2001:db8::/32), example.com/org/net and
   fake ssh keys containing `EXAMPLE`. `tests/test_synthetic_data.py` enforces it. Never
