@@ -39,6 +39,13 @@ case "$ref" in
   *) die "PROV_STATE_REF must be <kind>/<name>" ;;
 esac
 
+# Settings reach GIT_SSH_COMMAND, which git runs through a shell: re-check their shape.
+for path in "$PROV_STATE_IDENTITY" "$PROV_STATE_KNOWN_HOSTS" "$dir"; do
+  if ! [[ "$path" =~ ^/[A-Za-z0-9._/-]+$ ]]; then
+    die "unsafe path $path (absolute, letters, digits and ._/- only)"
+  fi
+done
+
 if [ ! -s "$PROV_STATE_KNOWN_HOSTS" ]; then
   die "known_hosts file $PROV_STATE_KNOWN_HOSTS is missing or empty; refusing to connect without a pinned host key"
 fi
@@ -76,6 +83,7 @@ profiles="$root/nix/var/nix/profiles"
 current=$(resolve "$root/run/current-system")
 booted=$(resolve "$root/run/booted-system")
 profile=$(resolve "$profiles/system")
+staged=""
 generation=""
 link=$(readlink "$profiles/system" 2>/dev/null || true)
 if [[ "$link" =~ ^system-([0-9]+)-link$ ]]; then
@@ -105,18 +113,36 @@ detail=""
 if [ -z "$current" ] || [ -z "$profile" ]; then
   status="unknown"
   detail="cannot resolve /run/current-system or the system profile"
+elif [ "$current" != "$profile" ] && [ "$current" = "$booted" ] && [ -n "$generation" ] && [ "$generation" = "$newest" ]; then
+  # nixos-rebuild boot: the newest generation waits for the next boot while the booted
+  # system runs. Not drift; reported as staged_generation and a pending reboot.
+  staged="$generation"
+  generation=""
 elif [ "$current" != "$profile" ]; then
   status="drifted"
   detail="the running system is not the system profile (nixos-rebuild test or a manual activation)"
 elif [ -n "$generation" ] && [ -n "$newest" ] && [ "$generation" -lt "$newest" ]; then
   status="drifted"
   detail="rolled back: generation $generation is active, generation $newest is the newest"
-elif [ -z "$digest" ]; then
+fi
+if [ "$status" = "clean" ] && [ -z "$digest" ]; then
   status="unknown"
   detail="the running system carries no render digest (built without [state.report])"
 fi
 
+if [ -n "$staged" ]; then
+  for entry in "$profiles"/system-*-link; do
+    base="${entry##*/}"
+    if [[ "$base" =~ ^system-([0-9]+)-link$ ]] && [ "$(resolve "$entry")" = "$current" ]; then
+      generation="${BASH_REMATCH[1]}"
+    fi
+  done
+fi
+
 reboot_pending="false"
+if [ -n "$staged" ]; then
+  reboot_pending="true"
+fi
 if [ -n "$booted" ] && [ -n "$current" ]; then
   for part in kernel initrd kernel-modules; do
     if [ "$(resolve "$booted/$part")" != "$(resolve "$current/$part")" ]; then
@@ -127,8 +153,10 @@ fi
 
 addresses="[]"
 if command -v ip >/dev/null 2>&1; then
-  if out=$(ip -j addr show scope global 2>/dev/null); then
-    addresses=$(jq -c '[.[]? | .addr_info[]? | select(.local != null) | "\(.local)/\(.prefixlen)"] | .[:64]' <<<"$out" 2>/dev/null || echo "[]")
+  if out=$(ip -j addr show scope global 2>/dev/null) &&
+    parsed=$(jq -c '[.[]? | .addr_info[]? | select(.local != null) | "\(.local)/\(.prefixlen)"] | .[:64]' <<<"$out" 2>/dev/null) &&
+    jq -e 'type == "array"' <<<"$parsed" >/dev/null 2>&1; then
+    addresses="$parsed"
   fi
 fi
 
@@ -155,6 +183,7 @@ record=$(
     --arg kernel "$(first_line "$root/proc/sys/kernel/osrelease")" \
     --arg nixos "$nixos_version" \
     --argjson reboot "$reboot_pending" \
+    --arg staged "$staged" \
     --argjson addresses "$addresses" \
     '
     def clean: walk(if type == "string" then gsub("[^ -~]"; "?") else . end);
@@ -162,7 +191,7 @@ record=$(
     ({api_version: $api, ref: $ref, last_seen: $now, agent_version: $agent,
       drift: ({status: $status} + opt("detail"; $detail)),
       facts: (opt("hostname"; $hostname) + opt("kernel"; $kernel) + opt("nixos_version"; $nixos)
-              + {reboot_pending: $reboot, addresses: $addresses})}
+              + opt("staged_generation"; $staged) + {reboot_pending: $reboot, addresses: $addresses})}
      + opt("render_digest"; $digest) + opt("generation"; $generation)) | clean
     '
 )
@@ -172,21 +201,22 @@ record=$(
 export HOME="$dir"
 export GIT_CONFIG_NOSYSTEM=1
 export GIT_TERMINAL_PROMPT=0
-export GIT_SSH_COMMAND="ssh -i $PROV_STATE_IDENTITY -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$PROV_STATE_KNOWN_HOSTS"
+export GIT_SSH_COMMAND="ssh -i $PROV_STATE_IDENTITY -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$PROV_STATE_KNOWN_HOSTS -o ConnectTimeout=30 -o ServerAliveInterval=15 -o ServerAliveCountMax=3"
 
 repo="$dir/repo"
 file="$repo/$kind/$name.json"
+# core.symlinks=false: another host's commit can never make this checkout write through a
+# symlink (the state repository is shared; docs/state.md, trust model).
 git_() {
-  git -C "$repo" -c user.name=prov-state-agent -c user.email=prov-state-agent@localhost -c commit.gpgsign=false "$@"
+  git -C "$repo" -c core.symlinks=false -c user.name=prov-state-agent -c user.email=prov-state-agent@localhost -c commit.gpgsign=false "$@"
 }
 
+# The checkout is disposable (a depth-1 fetch): start from scratch every run, so a crash, a
+# stale lock or a corrupted checkout can never stop the agent for good.
 mkdir -p "$dir"
-if [ ! -d "$repo/.git" ]; then
-  rm -rf "$repo"
-  git init -q "$repo"
-  git_ remote add origin "$PROV_STATE_REPO"
-fi
-git_ remote set-url origin "$PROV_STATE_REPO"
+rm -rf "$repo"
+git init -q "$repo"
+git_ remote add origin "$PROV_STATE_REPO"
 
 # Make the checkout equal the remote branch (or an empty orphan branch when it does not
 # exist yet). The checkout is the agent's own: local changes in it are discarded.
@@ -195,7 +225,7 @@ sync_branch() {
   heads=$(git_ ls-remote --heads origin "refs/heads/$branch") || die "cannot reach the state repository"
   if [ -n "$heads" ]; then
     git_ fetch -q --depth 1 origin "refs/heads/$branch" || die "cannot fetch $branch from the state repository"
-    git_ checkout -q -B "$branch" FETCH_HEAD
+    git_ checkout -q -f -B "$branch" FETCH_HEAD
     git_ reset -q --hard FETCH_HEAD
   else
     # The branch does not exist yet: start it unborn, with an empty index.
@@ -206,7 +236,17 @@ sync_branch() {
   git_ clean -qfdx
 }
 
+# A record path that is a symlink, or a <kind> that is not a directory, is never read or
+# written through (with core.symlinks=false a committed symlink arrives as a plain file).
+check_paths() {
+  if [ -L "$repo/$kind" ] || [ -L "$file" ] || { [ -e "$repo/$kind" ] && [ ! -d "$repo/$kind" ]; } ||
+    { [ -e "$file" ] && [ ! -f "$file" ]; }; then
+    die "$kind/$name.json in the state repository is a symlink or not a regular file; refusing to touch it"
+  fi
+}
+
 sync_branch
+check_paths
 if [ -f "$file" ]; then
   previous=$(cat "$file")
   if same=$(jq -n --argjson a "$previous" --argjson b "$record" '($a | del(.last_seen)) == ($b | del(.last_seen))' 2>/dev/null) && [ "$same" = "true" ]; then
@@ -219,6 +259,7 @@ if [ -f "$file" ]; then
 fi
 
 for attempt in 1 2 3; do
+  check_paths
   mkdir -p "$repo/$kind"
   printf '%s\n' "$record" >"$file.tmp"
   mv "$file.tmp" "$file"

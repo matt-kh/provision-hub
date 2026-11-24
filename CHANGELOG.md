@@ -34,18 +34,20 @@ may change incompatibly; every such change has a Migration paragraph. See
   6h, `identity_file` /var/lib/prov-state/id_ed25519) asks the backend to render a
   report-only state agent. Core checks it for every kind: a backend renders it only when it
   declares the new optional contract member `STATE_AGENT = True` (others refuse the spec),
-  `heartbeat` may not be shorter than `interval` (a warning at prov status's 72h stale
-  threshold), and a `known_hosts` line must name the repository's host.
-  - nixos-disko renders `prov-state.nix` (a hardened systemd service and timer) and
-    `prov-state-agent.sh`, imported by `configuration.nix` and copied onto the installer
-    stick. The system carries its render digest, computed at evaluation time with prov
-    digest's manifest, so a host installed from the stick and one rebuilt from the checkout
-    report the same value. The agent writes `render_digest`, `generation`, drift (`drifted`
-    when the running system is not the system profile or is a rolled-back generation) and
-    facts (hostname, kernel, NixOS version, pending reboot, addresses) over ssh with a
-    pinned host key and a deploy key placed on the host (`prov plan` step 8). It never
-    changes the system and pushes only on a change or after `heartbeat`. `applied_rev` is
-    not reported yet.
+  `heartbeat` may not be shorter than `interval` (warnings below twice `interval` and at
+  prov status's 72h stale threshold), `identity_file` must sit in `/var/lib/prov-state`,
+  and a `known_hosts` line must name the repository's host.
+  - nixos-disko renders `prov-state.nix` (a system user `prov-state` and a hardened systemd
+    service and timer) and `prov-state-agent.sh`, imported by `configuration.nix` and copied
+    onto the installer stick. The system carries its render digest, computed at evaluation
+    time with prov digest's manifest, so a host installed from the stick and one rebuilt
+    from the checkout report the same value. The agent writes `render_digest`, `generation`,
+    drift (`drifted` when the running system is not the system profile or is a rolled-back
+    generation; a generation staged by `nixos-rebuild boot` is not drift) and facts
+    (hostname, kernel, NixOS version, pending reboot, staged generation, addresses) over ssh
+    with a pinned host key and a deploy key created on the host (`prov plan` step 8). It
+    never changes the system, never follows a symlink in the state repository, and pushes
+    only on a change or after `heartbeat`. `applied_rev` is not reported yet.
 
 - Docs: `docs/determinism.md`, the determinism principle: the same spec and pinned inputs
   render a byte-identical tree; specs and host-owned fragments (the nixos-disko `local.nix`

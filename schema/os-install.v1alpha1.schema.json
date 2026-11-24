@@ -413,9 +413,9 @@
             },
             "identity_file": {
               "default": "/var/lib/prov-state/id_ed25519",
-              "description": "Path ON THE HOST of the ssh deploy key; a human places it there, prov never renders a key.",
-              "maxLength": 256,
-              "pattern": "^/[A-Za-z0-9._/-]+$",
+              "description": "Path ON THE HOST of the ssh deploy key, in the agent's /var/lib/prov-state (not repo, its checkout); a human creates it there, prov never renders a key.",
+              "maxLength": 128,
+              "pattern": "^/var/lib/prov-state/(?!repo$)[A-Za-z0-9_][A-Za-z0-9._-]*$",
               "type": "string"
             },
             "interval": {
@@ -438,7 +438,7 @@
             "repo": {
               "description": "ssh git URL of the state repository (ssh://user@host/path or user@host:path); the host needs write access.",
               "maxLength": 512,
-              "pattern": "^(ssh://[A-Za-z0-9_][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]{1,5})?/[A-Za-z0-9._~][A-Za-z0-9._~/-]*|[A-Za-z0-9_][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9.-]*:[A-Za-z0-9._~][A-Za-z0-9._~/-]*)$",
+              "pattern": "^(ssh://[A-Za-z0-9_][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]{1,5})?/[A-Za-z0-9._~][A-Za-z0-9._~/-]*|[A-Za-z0-9_][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9.-]*:[A-Za-z0-9._~/][A-Za-z0-9._~/-]*)$",
               "type": "string"
             }
           },

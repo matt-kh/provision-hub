@@ -6,7 +6,8 @@
 { lib, pkgs, ... }:
 let
   # The render digest (prov digest) of this directory, computed at evaluation time:
-  # sha256 over the sha256sum-style manifest of every regular file, sorted by name. The
+  # sha256 over the sha256sum-style manifest of every regular file, sorted by name (this
+  # backend renders a flat directory; validate refuses subdirectories). The
   # installer's *.installer-copy.nix files are not part of rendered/ and are skipped, so
   # the USB stick and a checkout give the same value and the same system. Nix sees only
   # git-tracked files: commit rendered/ (and flake.lock) for the value to match prov digest.
@@ -29,10 +30,18 @@ in
     "git.example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE"
   ];
 
+  # The agent runs as its own system user, never as root; it owns /var/lib/prov-state.
+  users.users.prov-state = {
+    isSystemUser = true;
+    group = "prov-state";
+    home = "/var/lib/prov-state";
+  };
+  users.groups.prov-state = { };
+
   systemd.services.prov-state-agent = {
     description = "prov state agent: report this host's state (report-only)";
-    wants = [ "network-online.target" ];
-    after = [ "network-online.target" ];
+    wants = [ "network-online.target" "time-sync.target" ];
+    after = [ "network-online.target" "time-sync.target" ];
     environment = {
       PROV_STATE_REF = "os-install/demo-nixos-state";
       PROV_STATE_REPO = "git@git.example.com:example/hosts-state.git";
@@ -45,6 +54,10 @@ in
     serviceConfig = {
       Type = "oneshot";
       ExecStart = "${agent}/bin/prov-state-agent";
+      User = "prov-state";
+      Group = "prov-state";
+      # A hung connection must not stop the timer for good.
+      TimeoutStartSec = "5min";
       StateDirectory = "prov-state";
       StateDirectoryMode = "0700";
       UMask = "0077";
@@ -52,6 +65,14 @@ in
       PrivateTmp = true;
       ProtectSystem = "strict";
       ProtectHome = "read-only";
+      PrivateDevices = true;
+      ProtectKernelTunables = true;
+      ProtectKernelModules = true;
+      ProtectControlGroups = true;
+      LockPersonality = true;
+      RestrictSUIDSGID = true;
+      CapabilityBoundingSet = "";
+      RestrictAddressFamilies = [ "AF_INET" "AF_INET6" "AF_UNIX" "AF_NETLINK" ];
     };
   };
   systemd.timers.prov-state-agent = {

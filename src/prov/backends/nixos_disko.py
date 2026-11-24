@@ -1206,7 +1206,8 @@ def state_module(spec: Dict[str, Any], ctx: Any) -> str:
             "{ lib, pkgs, ... }:",
             "let",
             "  # The render digest (prov digest) of this directory, computed at evaluation time:",
-            "  # sha256 over the sha256sum-style manifest of every regular file, sorted by name. The",
+            "  # sha256 over the sha256sum-style manifest of every regular file, sorted by name (this",
+            "  # backend renders a flat directory; validate refuses subdirectories). The",
             "  # installer's *.installer-copy.nix files are not part of rendered/ and are skipped, so",
             "  # the USB stick and a checkout give the same value and the same system. Nix sees only",
             "  # git-tracked files: commit rendered/ (and flake.lock) for the value to match prov digest.",
@@ -1228,16 +1229,28 @@ def state_module(spec: Dict[str, Any], ctx: Any) -> str:
             '  environment.etc."prov/state-known-hosts".text = lib.concatMapStrings (line: line + "\\n") [' + known,
             "  ];",
             "",
+            "  # The agent runs as its own system user, never as root; it owns /var/lib/prov-state.",
+            "  users.users.prov-state = {",
+            "    isSystemUser = true;",
+            '    group = "prov-state";',
+            '    home = "/var/lib/prov-state";',
+            "  };",
+            "  users.groups.prov-state = { };",
+            "",
             "  systemd.services.prov-state-agent = {",
             '    description = "prov state agent: report this host\'s state (report-only)";',
-            '    wants = [ "network-online.target" ];',
-            '    after = [ "network-online.target" ];',
+            '    wants = [ "network-online.target" "time-sync.target" ];',
+            '    after = [ "network-online.target" "time-sync.target" ];',
             "    environment = {",
             *[f"      {k} = {nix_str(v)};" for k, v in env.items()],
             "    };",
             "    serviceConfig = {",
             '      Type = "oneshot";',
             '      ExecStart = "${agent}/bin/prov-state-agent";',
+            '      User = "prov-state";',
+            '      Group = "prov-state";',
+            "      # A hung connection must not stop the timer for good.",
+            '      TimeoutStartSec = "5min";',
             '      StateDirectory = "prov-state";',
             '      StateDirectoryMode = "0700";',
             '      UMask = "0077";',
@@ -1245,6 +1258,14 @@ def state_module(spec: Dict[str, Any], ctx: Any) -> str:
             "      PrivateTmp = true;",
             '      ProtectSystem = "strict";',
             '      ProtectHome = "read-only";',
+            "      PrivateDevices = true;",
+            "      ProtectKernelTunables = true;",
+            "      ProtectKernelModules = true;",
+            "      ProtectControlGroups = true;",
+            "      LockPersonality = true;",
+            "      RestrictSUIDSGID = true;",
+            '      CapabilityBoundingSet = "";',
+            '      RestrictAddressFamilies = [ "AF_INET" "AF_INET6" "AF_UNIX" "AF_NETLINK" ];',
             "    };",
             "  };",
             "  systemd.timers.prov-state-agent = {",
@@ -1519,6 +1540,9 @@ _STATE_REQUIRED = [
     ('environment.etc."prov/state-known-hosts"', "the pinned known_hosts file"),
     ('!(lib.hasSuffix ".installer-copy.nix" name)', "skipping the installer's copies in the digest"),
     ("systemd.timers.prov-state-agent", "the timer"),
+    ('User = "prov-state";', "the agent's own user"),
+    ('ProtectSystem = "strict";', "ProtectSystem=strict"),
+    ('TimeoutStartSec = "5min";', "the start timeout"),
 ]
 
 
@@ -1595,8 +1619,11 @@ def validate(rendered_dir: Path) -> List[Finding]:
                 hit = check(module)
                 if hit:
                     findings.append(Finding(ERROR, f"{hit}: no credential may be rendered", STATE_MODULE))
-        if script is not None and "StrictHostKeyChecking=yes" not in script:
-            findings.append(Finding(ERROR, "the agent must connect with StrictHostKeyChecking=yes", STATE_SCRIPT))
+        if script is not None and script != agent_script():
+            findings.append(Finding(ERROR, "differs from the agent this prov renders; run prov render", STATE_SCRIPT))
+        subdirs = sorted(p.name for p in rendered_dir.iterdir() if p.is_dir() and not p.is_symlink())
+        if subdirs:
+            findings.append(Finding(ERROR, f"rendered/ holds a subdirectory ({esc(subdirs[0])}); the module's digest covers top-level files only", STATE_MODULE))
         if conf is not None and f"./{STATE_MODULE}" not in _code(conf):
             findings.append(Finding(ERROR, f"does not import ./{STATE_MODULE}", "configuration.nix"))
         if inst is not None:
@@ -1783,8 +1810,9 @@ def plan(spec: Dict[str, Any], ctx: Any) -> List[str]:
             f"# 8. [state.report]: the state agent reports {q(f'{KIND}/{ctx.name}')} to {q(report['repo'])}",
             "#    (docs/state.md). Until its deploy key exists the agent fails and reports nothing.",
             "#    ON THE HOST, create the key there (the private key never leaves the host):",
-            f"sudo install -d -m 700 {q(str(Path(key).parent))}",
-            f"sudo ssh-keygen -t ed25519 -N '' -C {q(f'prov-state {KIND}/{ctx.name}')} -f {q(key)}",
+            "#    (as the agent's own user prov-state, which owns /var/lib/prov-state):",
+            "sudo install -d -m 700 -o prov-state -g prov-state /var/lib/prov-state",
+            f"sudo -u prov-state ssh-keygen -t ed25519 -N '' -C {q(f'prov-state {KIND}/{ctx.name}')} -f {q(key)}",
             f"sudo cat {q(key + '.pub')}",
             "#    Add that public key to the STATE repository as a deploy key with write access (never",
             "#    to the infrastructure repository), then run the agent once and check it:",

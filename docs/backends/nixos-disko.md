@@ -412,23 +412,29 @@ files (the output of `nixos-generate-config` already is).
 With `[state.report]` in `spec.toml` ([state.md](../state.md#reporting-state-statereport)) the
 render gains two files, and `configuration.nix` imports the first:
 
-- **`prov-state.nix`** — a NixOS module: the `prov-state-agent` service (oneshot, root,
-  `ProtectSystem=strict`, `ProtectHome=read-only`, state in `/var/lib/prov-state`, mode
-  0700) and its timer (`OnBootSec=2min`, then every `interval`, up to 1 minute random
-  delay); `/etc/prov/state-known-hosts` with the spec's `known_hosts` lines; and
+- **`prov-state.nix`** — a NixOS module: the system user `prov-state`; the
+  `prov-state-agent` service (oneshot, as `prov-state`, no capabilities,
+  `ProtectSystem=strict`, `ProtectHome=read-only`, `PrivateDevices`, address families
+  limited to IP, Unix and netlink, a 5-minute start timeout so a hung connection cannot
+  stop the timer, state in `/var/lib/prov-state` with mode 0700, after `network-online` and
+  `time-sync`) and its timer (`OnBootSec=2min`, then every `interval`, up to 1 minute
+  random delay); `/etc/prov/state-known-hosts` with the spec's `known_hosts` lines; and
   `/etc/prov/render-digest`.
 - **`prov-state-agent.sh`** — the agent, built with `writeShellApplication` (which runs
   shellcheck at build time) with git, openssh, jq, coreutils and iproute2. It is the same
   for every host: its settings come from the service's environment.
 
 **The render digest is computed by Nix at evaluation time**, not by prov: the module reads
-its own directory (`builtins.readDir ./.`) and hashes every regular file with the manifest
-of `prov digest`, skipping the installer's `*.installer-copy.nix` files. The stick's flat
+its own directory (`builtins.readDir ./.`, top level only: `validate` refuses a subdirectory
+in `rendered/`) and hashes every regular file with the manifest of `prov digest`, skipping the installer's `*.installer-copy.nix` files. The stick's flat
 copy and a checkout therefore yield the same value and the same system (the offline install
 needs both to evaluate identically). Nix sees only git-tracked files, so the value equals
 `prov digest` when `rendered/` is committed as `prov render` wrote it, `flake.lock` included.
 Checked with Nix 2.24 on the synthetic example: `nix eval` of the locked flake from a git
-subdirectory gives the `prov digest` value. No host has run the agent yet.
+subdirectory gives the `prov digest` value, and the agent and its unit build. No host has
+run the agent yet. A file you add to `rendered/` yourself (other than `flake.lock`) is not
+copied onto the stick, so a host installed from it reports a different digest (pending)
+until its first switch from the checkout.
 
 The target system still gets no `self` (no git revision), so the record has no
 `applied_rev`: adding the revision would change the system on every commit to the
@@ -439,13 +445,15 @@ What the agent reports (one record, `<kind>/<name>.json` in the state repository
 | Field | Source |
 |---|---|
 | `render_digest` | `/run/current-system/etc/prov/render-digest` |
-| `generation` | the `system-<N>-link` the system profile points to |
-| `drift` | `drifted` when `/run/current-system` is not the system profile (`nixos-rebuild test`, a manual activation) or the profile is older than the newest generation (a rollback); `unknown` without a digest; else `clean` |
-| `facts` | `hostname`, `kernel`, `nixos_version`, `reboot_pending` (booted kernel, initrd or modules differ from the current system's), `addresses` (global, at most 64) |
+| `generation` | the `system-<N>-link` of the running system |
+| `drift` | `drifted` when `/run/current-system` is not the system profile (`nixos-rebuild test`, a manual activation) or the profile is older than the newest generation (a rollback); `unknown` without a digest; else `clean`. A newest generation waiting for the next boot (`nixos-rebuild boot`) is not drift |
+| `facts` | `hostname`, `kernel`, `nixos_version`, `reboot_pending` (a staged generation, or the booted kernel, initrd or modules differ from the current system's), `staged_generation` (with `nixos-rebuild boot`), `addresses` (global, at most 64) |
 
 Every string is reduced to printable ASCII (anything else becomes `?`). The agent pushes
 when the record changed apart from `last_seen`, or when the last push is older than
-`heartbeat`; it retries a rejected push three times on top of the current branch. It
+`heartbeat`; it retries a rejected push three times on top of the current branch. Every run
+starts from a fresh shallow checkout of the branch, so a crash or a stale lock never stops
+it for good, and ssh gives up on an unresponsive server after 30 seconds. It
 connects with `StrictHostKeyChecking=yes` against the pinned keys only, and with the deploy
 key at `identity_file`, which `prov plan` (step 8) tells you to create on the host and add to
 the state repository with write access. It never builds, switches or rolls back anything.

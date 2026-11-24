@@ -92,7 +92,11 @@ def test_report_is_refused_for_a_backend_without_an_agent():
         ({"interval": "0m"}, "interval"),
         ({"interval": "15 m"}, "interval"),
         ({"identity_file": "relative/key"}, "identity_file"),
-        ({"identity_file": "/var/lib/a key"}, "identity_file"),
+        ({"identity_file": "/var/lib/prov-state/a key"}, "identity_file"),
+        ({"identity_file": "/etc/prov_key"}, "identity_file"),
+        ({"identity_file": "/key"}, "identity_file"),
+        ({"identity_file": "/var/lib/prov-state/repo"}, "identity_file"),
+        ({"identity_file": "/var/lib/prov-state/../shadow"}, "identity_file"),
         ({"unknown": 1}, "unknown"),
     ],
 )
@@ -105,6 +109,24 @@ def test_schema_refuses_bad_report_values(edit, needle):
 def test_heartbeat_shorter_than_interval_is_an_error():
     _, findings = check(nixos_raw(report(interval="1h", heartbeat="30m")))
     assert any("heartbeat 30m is shorter than interval 1h" in m for m in messages(findings))
+
+
+def test_heartbeat_close_to_interval_warns():
+    spec, findings = check(nixos_raw(report(interval="1h", heartbeat="90m")))
+    assert spec is not None
+    assert any("less than twice interval" in m for m in messages(findings, WARNING))
+
+
+@pytest.mark.parametrize("branch", ["main.lock", "a/.b", ".hidden"])
+def test_branch_names_git_refuses_are_errors(branch):
+    spec, findings = check(nixos_raw(report(branch=branch)))
+    assert spec is None
+    assert any("branch" in m for m in messages(findings)), findings
+
+
+def test_scp_url_with_an_absolute_path_is_accepted():
+    spec, findings = check(nixos_raw(report(repo="git@git.example.com:/srv/hosts-state.git")))
+    assert spec is not None, findings
 
 
 def test_heartbeat_at_the_stale_threshold_warns():
@@ -209,12 +231,24 @@ def test_validate_flags_an_import_without_the_module(tmp_path):
 def test_validate_flags_a_relaxed_host_key_check(rendered):
     script = rendered / nixos.STATE_SCRIPT
     script.write_text(script.read_text().replace("StrictHostKeyChecking=yes", "StrictHostKeyChecking=accept-new"))
-    assert any("StrictHostKeyChecking=yes" in m for m in messages(nixos.validate(rendered)))
+    assert any("differs from the agent" in m for m in messages(nixos.validate(rendered)))
+
+
+def test_validate_refuses_subdirectories(rendered):
+    (rendered / "extra").mkdir()
+    assert any("subdirectory" in m for m in messages(nixos.validate(rendered)))
+
+
+def test_module_runs_the_agent_unprivileged_with_a_timeout(spec):
+    module = nixos.render(spec, Context("demo"))[nixos.STATE_MODULE]
+    for needle in ('User = "prov-state";', 'TimeoutStartSec = "5min";', 'CapabilityBoundingSet = "";', '"time-sync.target"'):
+        assert needle in module
 
 
 def test_plan_prints_the_deploy_key_step(spec):
     lines = nixos.plan(spec, Context("demo"))
-    assert "sudo ssh-keygen -t ed25519 -N '' -C 'prov-state os-install/demo' -f /var/lib/prov-state/id_ed25519" in lines
+    assert "sudo -u prov-state ssh-keygen -t ed25519 -N '' -C 'prov-state os-install/demo' -f /var/lib/prov-state/id_ed25519" in lines
+    assert "sudo install -d -m 700 -o prov-state -g prov-state /var/lib/prov-state" in lines
     assert "sudo systemctl start prov-state-agent" in lines
     plain, _ = check(nixos_raw())
     assert not any("prov-state" in line for line in nixos.plan(plain, Context("demo")))
@@ -259,14 +293,15 @@ class Host:
         kernel.mkdir(parents=True)
         (kernel / "hostname").write_text("demo\n")
         (kernel / "osrelease").write_text("6.12.0\n")
-        for gen in (1, 2):
+        for gen in (1, 2, 3):
             system = self.store / f"system-{gen}"
             (system / "etc/prov").mkdir(parents=True)
             (system / "etc/prov/render-digest").write_text(DIGEST + "\n")
             (system / "nixos-version").write_text("26.05.20261122.0dc498b (Example)\n")
             for part in ("kernel", "initrd", "kernel-modules"):
                 (system / part).write_text(f"{part}-{gen}\n")
-            (self.profiles / f"system-{gen}-link").symlink_to(system)
+            if gen < 3:  # system-3 is built but in no profile (nixos-rebuild test)
+                (self.profiles / f"system-{gen}-link").symlink_to(system)
         self.bin = tmp / "bin"
         self.bin.mkdir()
         ip = self.bin / "ip"
@@ -378,16 +413,62 @@ def test_agent_pushes_a_change_at_once(host_):
 @pytest.mark.parametrize(
     "profile, current, status, detail",
     [
-        (2, 1, "drifted", "not the system profile"),
+        (2, 3, "drifted", "not the system profile"),
         (1, 1, "drifted", "rolled back: generation 1 is active, generation 2 is the newest"),
     ],
 )
 def test_agent_reports_drift(host_, profile, current, status, detail):
-    host_.set_generation(profile, current=current, booted=current)
+    host_.set_generation(profile, current=current, booted=2)
     assert host_.run().returncode == 0
     record, _ = host_.record()
     assert record["drift"]["status"] == status
     assert detail in record["drift"]["detail"]
+
+
+@needs_tools
+def test_staged_boot_generation_is_not_drift(host_):
+    host_.set_generation(2, current=1, booted=1)  # nixos-rebuild boot: 2 waits for the next boot
+    assert host_.run().returncode == 0
+    record, _ = host_.record()
+    assert record["drift"] == {"status": "clean"}
+    assert record["generation"] == "1"
+    assert record["facts"]["staged_generation"] == "2"
+    assert record["facts"]["reboot_pending"] is True
+
+
+@needs_tools
+def test_agent_recovers_from_a_broken_checkout(host_):
+    assert host_.run().returncode == 0
+    git_dir = host_.state_dir / "repo/.git"
+    (git_dir / "index.lock").write_text("")
+    (git_dir / "HEAD").write_text("")
+    out = host_.run(PROV_STATE_HEARTBEAT="1s")
+    time.sleep(1.1)
+    out = host_.run(PROV_STATE_HEARTBEAT="1s")
+    assert out.returncode == 0 and "pushed" in out.stdout, out.stderr
+
+
+@needs_tools
+def test_agent_never_writes_through_a_symlink_in_the_state_repository(host_, tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    seed = tmp_path / "seed"
+    subprocess.run([GIT, "clone", "-q", str(host_.remote), str(seed)], check=True, capture_output=True)
+    (seed / "os-install").symlink_to(outside)
+    git = [GIT, "-C", str(seed), "-c", "user.name=t", "-c", "user.email=t@example.com"]
+    subprocess.run(git + ["add", "-A"], check=True)
+    subprocess.run(git + ["commit", "-qm", "hostile"], check=True)
+    subprocess.run(git + ["push", "-q", "origin", "HEAD:main"], check=True)
+    out = host_.run()
+    assert out.returncode == 1 and "refusing to touch it" in out.stderr
+    assert not any(outside.iterdir())
+
+
+@needs_tools
+@pytest.mark.parametrize("var", ["PROV_STATE_IDENTITY", "PROV_STATE_KNOWN_HOSTS"])
+def test_agent_refuses_unsafe_paths(host_, var):
+    out = host_.run(**{var: "/tmp/a b;touch x"})
+    assert out.returncode == 1 and "unsafe path" in out.stderr
 
 
 @needs_tools

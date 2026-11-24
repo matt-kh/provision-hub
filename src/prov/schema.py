@@ -63,12 +63,12 @@ KNOWN_HOSTS_PATTERN = (
     "(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256|ecdsa-sha2-nistp384|ecdsa-sha2-nistp521|"
     "sk-ssh-ed25519@openssh\\.com|sk-ecdsa-sha2-nistp256@openssh\\.com) [A-Za-z0-9+/]+={0,2}$"
 )
-# An ssh git URL: ``ssh://user@host[:port]/path`` or scp-like ``user@host:path``. No part may
-# start with ``-`` (it would become an ssh or git option), and nothing outside these
+# An ssh git URL: ``ssh://user@host[:port]/path`` or scp-like ``user@host:path`` (the path may
+# be absolute). No part may start with ``-`` (it would become an ssh or git option), and nothing outside these
 # characters (no spaces, quotes or shell syntax).
 SSH_REPO_PATTERN = (
     "^(ssh://[A-Za-z0-9_][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]{1,5})?/[A-Za-z0-9._~][A-Za-z0-9._~/-]*"
-    "|[A-Za-z0-9_][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9.-]*:[A-Za-z0-9._~][A-Za-z0-9._~/-]*)$"
+    "|[A-Za-z0-9_][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9.-]*:[A-Za-z0-9._~/][A-Za-z0-9._~/-]*)$"
 )
 # ``[state.report]``: the host reports its observed state (docs/state.md). Rendered by a
 # backend that declares ``STATE_AGENT = True``; core checks it (``prov.state.report_findings``).
@@ -105,10 +105,10 @@ STATE_REPORT_TABLE: Dict[str, Any] = {
         },
         "identity_file": {
             "type": "string",
-            "pattern": "^/[A-Za-z0-9._/-]+$",
-            "maxLength": 256,
+            "pattern": "^/var/lib/prov-state/(?!repo$)[A-Za-z0-9_][A-Za-z0-9._-]*$",
+            "maxLength": 128,
             "default": "/var/lib/prov-state/id_ed25519",
-            "description": "Path ON THE HOST of the ssh deploy key; a human places it there, prov never renders a key.",
+            "description": "Path ON THE HOST of the ssh deploy key, in the agent's /var/lib/prov-state (not repo, its checkout); a human creates it there, prov never renders a key.",
         },
         "known_hosts": {
             "type": "array",

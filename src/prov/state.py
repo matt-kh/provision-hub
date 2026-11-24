@@ -231,6 +231,17 @@ def report_findings(spec: Mapping[str, Any], backend: Any) -> List[Finding]:
     stale = parse_duration(DEFAULT_STALE_AFTER)
     if heartbeat < interval:
         out.append(Finding(ERROR, f"heartbeat {report['heartbeat']} is shorter than interval {report['interval']}", f"{where}.heartbeat"))
+    if interval <= heartbeat < 2 * interval:
+        out.append(
+            Finding(
+                WARNING,
+                f"heartbeat {report['heartbeat']} is less than twice interval {report['interval']}: "
+                "with the timer's random delay an idle host pushes only every second check",
+                f"{where}.heartbeat",
+            )
+        )
+    if report["branch"].endswith(".lock") or "/." in report["branch"] or report["branch"].startswith("."):
+        out.append(Finding(ERROR, f"branch {short_repr(report['branch'])} is not a valid git branch name", f"{where}.branch"))
     if heartbeat >= stale:
         out.append(
             Finding(

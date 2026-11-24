@@ -112,12 +112,12 @@ known_hosts = ["git.example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLE"]  
 
 | Key | Default | Meaning |
 |---|---|---|
-| `repo` | required | `ssh://user@host[:port]/path` or `user@host:path`; no part may start with `-` |
+| `repo` | required | `ssh://user@host[:port]/path` or `user@host:path` (the path may be absolute); no part may start with `-` |
 | `known_hosts` | required | 1–16 known_hosts lines (no `@cert-authority`/`@revoked` markers); one must name the repository's host (`[host]:port` for a port other than 22; hashed lines are not checked) |
-| `branch` | `main` | branch the agent writes to |
+| `branch` | `main` | branch the agent writes to (a valid git branch name; no `.lock` suffix) |
 | `interval` | `15m` | how often the agent checks, `<n>` plus `s`, `m`, `h` or `d` |
-| `heartbeat` | `6h` | the agent pushes when the record changed apart from `last_seen`, or when the last push is older than this; must not be shorter than `interval`; a warning from `72h` (`prov status`'s default `--stale-after`), when an idle host would show as stale |
-| `identity_file` | `/var/lib/prov-state/id_ed25519` | path of the ssh deploy key on the host; prov never renders a key, `prov plan` prints how to create one there |
+| `heartbeat` | `6h` | the agent pushes when the record changed apart from `last_seen`, or when the last push is older than this; must not be shorter than `interval` (a warning below twice `interval`, since the timer's random delay would skip every other push); a warning from `72h` (`prov status`'s default `--stale-after`), when an idle host would show as stale |
+| `identity_file` | `/var/lib/prov-state/id_ed25519` | path of the ssh deploy key on the host, a file directly in `/var/lib/prov-state` (the agent's own directory; not `repo`, its checkout); prov never renders a key, `prov plan` prints how to create one there |
 
 Core checks these for every kind; a backend renders the agent only when it declares
 `STATE_AGENT = True` ([adding-a-backend.md](adding-a-backend.md)), and any other backend
@@ -130,6 +130,18 @@ repository only. The infrastructure repository never needs a writable key on a h
 host that could push there could push to the branch every host applies from. Host keys are
 pinned from the spec (`StrictHostKeyChecking=yes`), so a host never trusts a server on
 first use.
+
+**Trust model.** Hosts that share a state repository and branch trust each other: a host
+whose key can push can also rewrite or delete another host's record, and `prov status`
+believes what it reads. Protect the branch against force pushes and deletion where the
+server allows it, and use a repository (or branch) per host where hosts do not trust each
+other. The agent itself never follows a symlink in the state repository (it checks out
+with `core.symlinks=false` and refuses a record path that is not a plain file), starts each
+run from a fresh shallow checkout, and never reads another host's record.
+
+**What the digest covers.** `render_digest` identifies `rendered/` only. Host-owned files
+outside it (nixos-disko's `../local.nix` and `../hardware-configuration.nix`) change the
+system but not the digest, so `prov status` does not show them as pending.
 
 ## `prov status`
 
