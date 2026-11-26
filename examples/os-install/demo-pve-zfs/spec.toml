@@ -1,0 +1,35 @@
+# Synthetic example: Proxmox VE on a ZFS mirror over two disks, DHCP, German keyboard.
+# example.org is reserved (RFC 2606).
+api_version = "prov/v1alpha1"
+kind = "os-install"
+backend = "proxmox-answer"
+hostname = "demo-pve-zfs"
+domain = "example.org"
+timezone = "Europe/Berlin"
+keyboard = "ch"
+
+[[users]]
+name = "ops"
+sudo = true
+ssh_authorized_keys = [
+  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE ops@example.org",
+]
+
+[[network.interfaces]]
+name = "enp1s0"
+dhcp4 = true
+
+[storage]
+# Kernel device names: rendered as disk-list.
+disks = ["/dev/sda", "/dev/sdb"]
+
+[proxmox-answer]
+country = "ch"
+mailto = "ops@example.org"
+keyboard = "de-ch"
+reboot_on_error = true
+root_password_hash = "$y$EXAMPLEsalt$EXAMPLEhashEXAMPLEhashEXAMPLEhashEXAMPLEhash01"
+
+[proxmox-answer.storage]
+filesystem = "zfs"
+raid = "raid1"

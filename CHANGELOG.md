@@ -8,6 +8,15 @@ may change incompatibly; every such change has a Migration paragraph. See
 
 ### Added
 
+- Backend `proxmox-answer` (kind `os-install`): renders `answer.toml` for the Proxmox VE
+  automated installer (ISO 8.4-1 or later, kebab-case keys). The ssh keys of `sudo` users
+  become root's (the installer creates only root), root's password hash is
+  `[proxmox-answer] root_password_hash`, one NIC (DHCP or one static address), kernel disks
+  as `disk-list` or one `/dev/disk/...` link as a `DEVLINKS` filter (unverified on a real
+  install), `ext4`/`xfs` on one disk or `zfs`/`btrfs` with a raid level. `validate` runs
+  `proxmox-auto-install-assistant validate-answer` when installed; `plan` prints the
+  `prepare-iso` and USB steps. Static validation only. Examples `demo-pve-ext4` and
+  `demo-pve-zfs`; [docs/backends/proxmox-answer.md](docs/backends/proxmox-answer.md).
 - Observed state ([docs/state.md](docs/state.md)), read-only and from local files only:
   - `prov digest <ref> [--json]` prints `sha256:<hex>`, the identity of `rendered/`: sha256
     over a `sha256sum` manifest of every regular file (`PRESERVE` files included, modes not),

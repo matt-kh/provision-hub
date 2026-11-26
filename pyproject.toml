@@ -44,6 +44,7 @@ os-install = "prov.kinds.os_install"
 # (see docs/adding-a-backend.md).
 [project.entry-points."prov.backends"]
 nixos-disko = "prov.backends.nixos_disko"
+proxmox-answer = "prov.backends.proxmox_answer"
 ubuntu-autoinstall = "prov.backends.ubuntu_autoinstall"
 
 [dependency-groups]

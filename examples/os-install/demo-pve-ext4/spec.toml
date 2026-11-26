@@ -1,0 +1,39 @@
+# Synthetic example: Proxmox VE on one disk (ext4 on LVM), static IPv4, NIC matched by MAC.
+# Documentation addresses only (RFC 5737); example.com is reserved (RFC 2606).
+api_version = "prov/v1alpha1"
+kind = "os-install"
+backend = "proxmox-answer"
+hostname = "demo-pve-ext4"
+domain = "example.com"
+timezone = "Etc/UTC"
+keyboard = "us"
+
+# The installer creates only root: the ssh keys of sudo users are given to root.
+[[users]]
+name = "ops"
+sudo = true
+ssh_authorized_keys = [
+  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE ops@example.com",
+]
+
+[network.dns]
+nameservers = ["192.0.2.53"]
+search = ["example.com"]
+
+[[network.interfaces]]
+name = "eno1"
+macaddress = "02:00:5e:00:53:01"
+addresses = ["192.0.2.30/24"]
+gateway4 = "192.0.2.1"
+
+[storage]
+# A single /dev/disk/by-id link: rendered as a DEVLINKS udev filter.
+disks = ["/dev/disk/by-id/nvme-EXAMPLE_SSD_SERIAL_0001"]
+
+[proxmox-answer]
+country = "us"
+mailto = "ops@example.com"
+root_password_hash = "$6$EXAMPLEsalt$EXAMPLEhashEXAMPLEhashEXAMPLEhashEXAMPLEhashEXAMPLEhashEXAMPLEhash0123456789"
+
+[proxmox-answer.storage]
+filesystem = "ext4"

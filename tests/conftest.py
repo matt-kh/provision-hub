@@ -24,10 +24,11 @@ def example_items():
 @pytest.fixture(autouse=True)
 def _no_external_tools(monkeypatch):
     """External validators are optional; keep test results independent of the machine."""
-    from prov.backends import nixos_disko, ubuntu_autoinstall
+    from prov.backends import nixos_disko, proxmox_answer, ubuntu_autoinstall
 
     monkeypatch.setattr(ubuntu_autoinstall.shutil, "which", lambda name: None)
     monkeypatch.setattr(nixos_disko.shutil, "which", lambda name: None)
+    monkeypatch.setattr(proxmox_answer.shutil, "which", lambda name: None)
 
 
 # The distribution whose entry points are prov's built-ins; only its kinds may use bare names.

@@ -154,8 +154,8 @@ def test_kinds_backends_and_schema(capsys):
     assert code == 0 and out.startswith("os-install\tprov/v1alpha1\tOne machine's operating-system install")
     code, out, _ = run(capsys, "backends")
     lines = out.splitlines()
-    assert code == 0 and [line.split("\t")[:2] for line in lines] == [["nixos-disko", "os-install"], ["ubuntu-autoinstall", "os-install"]]
-    assert lines[1].startswith("ubuntu-autoinstall\tos-install\tUbuntu Server autoinstall")
+    assert code == 0 and [line.split("\t")[:2] for line in lines] == [["nixos-disko", "os-install"], ["proxmox-answer", "os-install"], ["ubuntu-autoinstall", "os-install"]]
+    assert lines[2].startswith("ubuntu-autoinstall\tos-install\tUbuntu Server autoinstall")
     code, out2, _ = run(capsys, "backends", "--kind", "os-install")
     assert code == 0 and out2 == out
     code, out, _ = run(capsys, "schema", "os-install")
@@ -193,6 +193,8 @@ def test_list_examples(capsys):
         "os-install/demo-nixos-ext4\tnixos-disko",
         "os-install/demo-nixos-gnome-luks\tnixos-disko",
         "os-install/demo-nixos-local-module\tnixos-disko",
+        "os-install/demo-pve-ext4\tproxmox-answer",
+        "os-install/demo-pve-zfs\tproxmox-answer",
         "os-install/demo-zfs\tubuntu-autoinstall",
     ]
 

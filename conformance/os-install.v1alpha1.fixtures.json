@@ -220,6 +220,119 @@
         "conf-two-disks": "layouts ext4 and ext4-luks install to exactly one disk; a spec with more than one disk in storage.disks is refused"
       }
     },
+    "proxmox-answer": {
+      "fixtures": {
+        "conf-bad-gateway-family": {
+          "country": "us",
+          "mailto": "ops@example.net",
+          "root_password_hash": "$6$EXAMPLEsalt$EXAMPLEhashEXAMPLEhashEXAMPLEhashEXAMPLEhashEXAMPLEhashEXAMPLEhash0123456789",
+          "storage": {
+            "filesystem": "ext4"
+          }
+        },
+        "conf-duplicate-user": {
+          "country": "us",
+          "mailto": "ops@example.net",
+          "root_password_hash": "$6$EXAMPLEsalt$EXAMPLEhashEXAMPLEhashEXAMPLEhashEXAMPLEhashEXAMPLEhashEXAMPLEhash0123456789",
+          "storage": {
+            "filesystem": "ext4"
+          }
+        }
+      },
+      "specs": {
+        "conf-bad-gateway-family": {
+          "api_version": "prov/v1alpha1",
+          "backend": "proxmox-answer",
+          "hostname": "conf-bad-gateway-family",
+          "kind": "os-install",
+          "network": {
+            "interfaces": [
+              {
+                "addresses": [
+                  "192.0.2.10/24"
+                ],
+                "gateway4": "2001:db8::1",
+                "name": "enp1s0"
+              }
+            ]
+          },
+          "proxmox-answer": {
+            "country": "us",
+            "mailto": "ops@example.net",
+            "root_password_hash": "$6$EXAMPLEsalt$EXAMPLEhashEXAMPLEhashEXAMPLEhashEXAMPLEhashEXAMPLEhashEXAMPLEhash0123456789",
+            "storage": {
+              "filesystem": "ext4"
+            }
+          },
+          "storage": {
+            "disks": [
+              "/dev/disk/by-id/virtio-EXAMPLE_DISK_SERIAL_0000"
+            ]
+          },
+          "users": [
+            {
+              "groups": [],
+              "name": "ops",
+              "ssh_authorized_keys": [
+                "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE ops@example.net"
+              ],
+              "sudo": true
+            }
+          ]
+        },
+        "conf-duplicate-user": {
+          "api_version": "prov/v1alpha1",
+          "backend": "proxmox-answer",
+          "hostname": "conf-duplicate-user",
+          "kind": "os-install",
+          "network": {
+            "interfaces": [
+              {
+                "dhcp4": true,
+                "name": "enp1s0"
+              }
+            ]
+          },
+          "proxmox-answer": {
+            "country": "us",
+            "mailto": "ops@example.net",
+            "root_password_hash": "$6$EXAMPLEsalt$EXAMPLEhashEXAMPLEhashEXAMPLEhashEXAMPLEhashEXAMPLEhashEXAMPLEhash0123456789",
+            "storage": {
+              "filesystem": "ext4"
+            }
+          },
+          "storage": {
+            "disks": [
+              "/dev/disk/by-id/virtio-EXAMPLE_DISK_SERIAL_0000"
+            ]
+          },
+          "users": [
+            {
+              "groups": [],
+              "name": "ops",
+              "ssh_authorized_keys": [
+                "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE ops@example.net"
+              ],
+              "sudo": true
+            },
+            {
+              "groups": [],
+              "name": "ops",
+              "ssh_authorized_keys": [
+                "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE ops@example.net"
+              ],
+              "sudo": true
+            }
+          ]
+        }
+      },
+      "unsupported": {
+        "conf-bios-dhcp": "the installer needs an FQDN; the fixture has no domain",
+        "conf-two-disks": "the installer needs an FQDN, and several /dev/disk/... paths cannot be selected (one udev filter key per property)",
+        "conf-uefi-dhcp": "the installer needs an FQDN; the fixture has no domain",
+        "conf-uefi-static": "the installer derives the DNS search domain from the FQDN; a search domain other than the spec's domain cannot be expressed"
+      }
+    },
     "ubuntu-autoinstall": {
       "fixtures": {
         "conf-bad-gateway-family": {

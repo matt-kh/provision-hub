@@ -1,0 +1,23 @@
+# Proxmox VE automated installation answer file, rendered by prov (proxmox-answer).
+# Every disk it selects is wiped. Validate: proxmox-auto-install-assistant validate-answer answer.toml
+
+[global]
+country = "us"
+fqdn = "demo-pve-ext4.example.com"
+keyboard = "en-us"
+mailto = "ops@example.com"
+reboot-on-error = false
+root-password-hashed = "$6$EXAMPLEsalt$EXAMPLEhashEXAMPLEhashEXAMPLEhashEXAMPLEhashEXAMPLEhashEXAMPLEhash0123456789"
+root-ssh-keys = ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE ops@example.com"]
+timezone = "Etc/UTC"
+
+[network]
+source = "from-answer"
+cidr = "192.0.2.30/24"
+dns = "192.0.2.53"
+gateway = "192.0.2.1"
+filter.ID_NET_NAME_MAC = "*02005e005301"
+
+[disk-setup]
+filesystem = "ext4"
+filter.DEVLINKS = "*/dev/disk/by-id/nvme-EXAMPLE_SSD_SERIAL_0001*"
