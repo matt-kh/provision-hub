@@ -121,7 +121,11 @@ def _edit(path, value):
         (("arch",), "arm64", "error: arch: Proxmox VE installs on amd64 only"),
         (("users",), [{"name": "backup", "ssh_authorized_keys": [KEY2]}], "error: users[0]: the installer creates only root; 'backup' has no sudo"),
         (("storage", "disks"), ["/dev/sda", "/dev/sdb"], "error: storage.disks: ext4 installs to exactly one disk, got 2"),
-        (("storage", "disks"), ["/dev/mapper/vg-root"], "is neither a kernel device"),
+        (("storage", "disks"), ["/dev/mapper/vg-root"], "is neither a whole-disk kernel device"),
+        (("storage", "disks"), ["/dev/sda1"], "is neither a whole-disk kernel device"),
+        (("storage", "disks"), ["/dev/nvme0n1p2"], "is neither a whole-disk kernel device"),
+        (("storage", "disks"), ["/dev/disk/by-uuid/EXAMPLE-0001"], "is neither a whole-disk kernel device"),
+        (("domain",), "a" * 63 + "." + "b" * 63 + "." + "c" * 63 + "." + "d" * 60 + ".com", "longer than 253 characters"),
         (("storage", "disks"), ["/dev/disk/by-id/a-EXAMPLE", "/dev/disk/by-id/b-EXAMPLE"], "cannot name several disks"),
         (("proxmox-answer", "storage"), {"filesystem": "ext4", "raid": "raid1"}, "raid applies to zfs and btrfs only, not ext4"),
         (("proxmox-answer", "storage"), {"filesystem": "zfs"}, "error: proxmox-answer.storage.raid: zfs needs raid"),
@@ -160,7 +164,9 @@ def test_warnings():
     raw["users"][0]["password_hash"] = raw["proxmox-answer"]["root_password_hash"]
     raw["network"] = {"interfaces": [{"name": "eno1", "macaddress": "02:00:5e:00:53:01", "dhcp4": True}]}
     assert errors(raw) == []
-    assert len(errors(raw, WARNING)) == 3
+    found = errors(raw, WARNING)
+    assert len(found) == 4, found
+    assert any("'ops' is not created, its ssh keys are given to root" in w for w in found)
 
 
 def test_clean_render_validates(rendered):
@@ -180,6 +186,13 @@ def test_clean_render_validates(rendered):
         (lambda t: t.replace('disk-list = ["sda"]', ""), "exactly one of disk-list and filter"),
         (lambda t: t.replace('filesystem = "ext4"', 'filesystem = "zfs"'), "disk-setup.zfs.raid must be one of"),
         (lambda t: t + "[global\n", "invalid TOML"),
+        (lambda t: t.replace('filesystem = "ext4"', 'filesystem = ["zfs"]'), "disk-setup.filesystem must be one of"),
+        (lambda t: t.replace('filesystem = "ext4"', "filesystem = {a = 1}"), "disk-setup.filesystem must be one of"),
+        (lambda t: t.replace('filesystem = "ext4"', 'filesystem = "zfs"\nzfs.raid = ["raid1"]'), "disk-setup.zfs.raid must be one of"),
+        (lambda t: t.replace('filesystem = "ext4"', 'filesystem = "zfs"\nzfs = {raid = {a = 1}}'), "disk-setup.zfs.raid must be one of"),
+        (lambda t: t.replace('disk-list = ["sda"]', "disk-list = [1]"), "non-empty list of disk names"),
+        (lambda t: t.replace('disk-list = ["sda"]', 'filter = "sda"'), "disk-setup.filter must be a non-empty table"),
+        (lambda t: t.replace("root-ssh-keys = [", "root-ssh-keys = [1, "), "root-ssh-keys must be a list of strings"),
     ],
 )
 def test_broken_answer(rendered, edit, needle):

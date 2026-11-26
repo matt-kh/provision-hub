@@ -12,8 +12,8 @@ may change incompatibly; every such change has a Migration paragraph. See
   automated installer (ISO 8.4-1 or later, kebab-case keys). The ssh keys of `sudo` users
   become root's (the installer creates only root), root's password hash is
   `[proxmox-answer] root_password_hash`, one NIC (DHCP or one static address), kernel disks
-  as `disk-list` or one `/dev/disk/...` link as a `DEVLINKS` filter (unverified on a real
-  install), `ext4`/`xfs` on one disk or `zfs`/`btrfs` with a raid level. `validate` runs
+  as `disk-list` or one `/dev/disk/by-id|by-path` link as a `DEVLINKS` prefix filter
+  (unverified on a real install), `ext4`/`xfs` on one disk or `zfs`/`btrfs` with a raid level. `validate` runs
   `proxmox-auto-install-assistant validate-answer` when installed; `plan` prints the
   `prepare-iso` and USB steps. Static validation only. Examples `demo-pve-ext4` and
   `demo-pve-zfs`; [docs/backends/proxmox-answer.md](docs/backends/proxmox-answer.md).

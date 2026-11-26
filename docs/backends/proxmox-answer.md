@@ -11,7 +11,9 @@ from it. prov never prepares the ISO, writes media or installs anything.
 > reports `skipped`). No answer file of this backend has been run through the installer.
 > The **DEVLINKS disk filter** (below) is the least proven part: the installer's
 > documentation does not say how globs are matched against udev's space-separated
-> `DEVLINKS`, so check the match on the target before installing.
+> `DEVLINKS`, and the glob is a prefix match (another disk whose link starts with the same
+> text matches too), so check the match on the target before installing. Matching the static
+> NIC by `ID_NET_NAME` (udev's predictable name) is likewise unproven on the installer.
 
 Reference: the Proxmox VE wiki page *Automated Installation* (answer file format, the
 `proxmox-auto-install-assistant` tool, and which ISO release added which key). Keys are
@@ -68,15 +70,15 @@ keyboard override).
 
 | Core key | answer.toml | Rule (`check`) |
 |---|---|---|
-| `hostname`, `domain` | `global.fqdn = "<hostname>.<domain>"` | `domain` is required. |
+| `hostname`, `domain` | `global.fqdn = "<hostname>.<domain>"` | `domain` is required; the FQDN is at most 253 characters. |
 | `timezone` | `global.timezone` | |
 | `keyboard` | `global.keyboard` | Mapped (`us` → `en-us`, `gb` → `en-gb`, `br` → `pt-br`, same-name ids as is); anything else (`ch`, `be`, `ca`, ...) needs `[proxmox-answer] keyboard`. |
 | `locale` | — | The installer has no locale key (it follows `country`); a non-default locale is a warning. |
 | `arch` | — | `amd64` only. |
 | `firmware` | — | The installer detects UEFI or BIOS itself. |
-| `users` | `global.root-ssh-keys` | The installer creates only root. The ssh keys of `sudo = true` users become root's keys, in spec order, without duplicates; their `groups`, `shell` and `gecos` are not used, and a `password_hash` there is a warning (root's password is `root_password_hash`). A user without `sudo` is an error. |
+| `users` | `global.root-ssh-keys` | The installer creates only root. The ssh keys of `sudo = true` users become root's keys, in spec order, without duplicates. Each sudo user is a warning (the user itself, its `groups`, `shell` and `gecos` are not created), and so is a `password_hash` there (root's password is `root_password_hash`). A user without `sudo` is an error. |
 | `network` | `[network]` | Required, with exactly one interface (the installer configures one NIC; add the others after the install). DHCP (`dhcp4` or `dhcp6`) → `source = "from-dhcp"`, with no static values (a `macaddress` is a warning: the installer picks the NIC). Static → `source = "from-answer"` with exactly one address, the gateway of its family, and exactly one nameserver; the NIC is matched by `filter.ID_NET_NAME_MAC` when `macaddress` is set, else by `filter.ID_NET_NAME` (the predictable name). `mtu` is an error. `dns.search` may only repeat `domain` (the installer derives the search domain from the FQDN). |
-| `storage.disks` | `[disk-setup]` | Kernel devices (`/dev/sda`, `/dev/nvme0n1`) → `disk-list = ["sda", ...]`. One `/dev/disk/...` link → `filter.DEVLINKS = "*<path>*"`. Several links, or a link mixed with others, are an error (one filter key per udev property); other paths (`/dev/mapper/...`) too. |
+| `storage.disks` | `[disk-setup]` | Whole-disk kernel devices (`/dev/sda`, `/dev/vdb`, `/dev/xvda`, `/dev/nvme0n1`, `/dev/mmcblk0`) → `disk-list = ["sda", ...]`. One `/dev/disk/by-id/...` or `/dev/disk/by-path/...` link → `filter.DEVLINKS = "*<path>*"` (a prefix glob). Several links, or a link mixed with others, are an error (one filter key per udev property); so are partitions (`/dev/sda1`), `by-uuid`/`by-partuuid`/`by-label` links (they never appear in a disk's DEVLINKS) and other paths (`/dev/mapper/...`). |
 
 Storage rules: `ext4` and `xfs` install to exactly one disk (LVM, the installer's default
 sizes) and take no `raid`. `zfs` and `btrfs` need `raid`, with these minimum disk counts:

@@ -46,9 +46,13 @@ RAID_LEVELS = {
     "zfs": {"raid0": 1, "raid1": 2, "raid10": 4, "raidz-1": 3, "raidz-2": 4, "raidz-3": 5},
     "btrfs": {"raid0": 1, "raid1": 2, "raid10": 4},
 }
-# A kernel device name the installer's disk-list takes (sda, vda, nvme0n1, mmcblk0).
-KERNEL_DISK = re.compile(r"/dev/([a-z][a-z0-9]*)")
-LINK_DISK = re.compile(r"/dev/disk/[a-z-]+/[A-Za-z0-9._:+-]+")
+# A whole-disk kernel name the installer's disk-list takes (sda, vdb, xvda, nvme0n1, mmcblk0);
+# partitions (sda1, nvme0n1p2) and other devices are refused.
+KERNEL_DISK = re.compile(r"/dev/((?:[shv]d|xvd)[a-z]+|nvme[0-9]+n[0-9]+|mmcblk[0-9]+)")
+# A disk's own udev links (by-id, by-path); by-uuid/by-partuuid/by-label name filesystems or
+# partitions and never appear in a disk's DEVLINKS.
+LINK_DISK = re.compile(r"/dev/disk/by-(?:id|path)/[A-Za-z0-9._:+-]+")
+FQDN_MAX = 253
 DEFAULT_LOCALE = "en_US.UTF-8"
 
 SCHEMA: Dict[str, Any] = {
@@ -118,7 +122,11 @@ def _disks(disks: List[str]) -> List[Finding]:
     for n, disk in enumerate(disks):
         if disk not in links and disk not in names:
             out.append(
-                Finding(ERROR, f"{short_repr(disk)} is neither a kernel device (/dev/sda, /dev/nvme0n1) nor a /dev/disk/... link", f"storage.disks[{n}]")
+                Finding(
+                    ERROR,
+                    f"{short_repr(disk)} is neither a whole-disk kernel device (/dev/sda, /dev/nvme0n1) nor a /dev/disk/by-id or by-path link",
+                    f"storage.disks[{n}]",
+                )
             )
     if links and (len(disks) > 1):
         out.append(
@@ -203,6 +211,8 @@ def check(spec: Dict[str, Any], ctx: Any) -> List[Finding]:
     out: List[Finding] = []
     if "domain" not in spec:
         out.append(Finding(ERROR, "the installer needs an FQDN; set domain", "domain"))
+    elif len(spec["hostname"]) + 1 + len(spec["domain"]) > FQDN_MAX:
+        out.append(Finding(ERROR, f"hostname.domain is longer than {FQDN_MAX} characters", "domain"))
     if spec["arch"] != "amd64":
         out.append(Finding(ERROR, "Proxmox VE installs on amd64 only", "arch"))
     if "keyboard" not in spec[NAME] and spec["keyboard"] not in KEYBOARD_MAP:
@@ -214,8 +224,17 @@ def check(spec: Dict[str, Any], ctx: Any) -> List[Finding]:
             out.append(
                 Finding(ERROR, f"the installer creates only root; {short_repr(user['name'])} has no sudo, so its keys cannot be given to root", f"users[{n}]")
             )
-        elif "password_hash" in user:
-            out.append(Finding(WARNING, f"password_hash of {short_repr(user['name'])} is not used; root's password is {NAME}.root_password_hash", f"users[{n}].password_hash"))
+        else:
+            out.append(
+                Finding(
+                    WARNING,
+                    f"the installer creates only root: {short_repr(user['name'])} is not created, its ssh keys are given to root "
+                    "(its groups, shell and gecos are not used)",
+                    f"users[{n}]",
+                )
+            )
+            if "password_hash" in user:
+                out.append(Finding(WARNING, f"password_hash of {short_repr(user['name'])} is not used; root's password is {NAME}.root_password_hash", f"users[{n}].password_hash"))
     out += _disks(spec["storage"]["disks"])
     out += _storage(spec)
     out += _network(spec)
@@ -276,7 +295,9 @@ def answer(spec: Dict[str, Any]) -> str:
     disks = spec["storage"]["disks"]
     disk = [("filesystem", fs)]
     if LINK_DISK.fullmatch(disks[0]):
-        # One /dev/disk/... link: match it among the disk's udev DEVLINKS (space separated).
+        # One /dev/disk/by-id|by-path link: match it among the disk's udev DEVLINKS (space
+        # separated). A prefix glob: another disk whose link starts with this one also matches,
+        # which is why the plan prints a device-match check.
         disk.append(("filter.DEVLINKS", f"*{disks[0]}*"))
     else:
         disk.append(("disk-list", [KERNEL_DISK.fullmatch(d).group(1) for d in disks]))  # type: ignore[union-attr]
@@ -330,6 +351,12 @@ def _shape(data: Dict[str, Any]) -> List[str]:
                 problems.append(f"global.{key} must be a non-empty string")
         if ("root-password" in glob) == ("root-password-hashed" in glob):
             problems.append("global needs exactly one of root-password and root-password-hashed")
+        for key in ("root-password", "root-password-hashed"):
+            if key in glob and not (isinstance(glob[key], str) and glob[key]):
+                problems.append(f"global.{key} must be a non-empty string")
+        keys = glob.get("root-ssh-keys", [])
+        if not (isinstance(keys, list) and all(isinstance(k, str) for k in keys)):
+            problems.append("global.root-ssh-keys must be a list of strings")
         if isinstance(glob.get("keyboard"), str) and glob["keyboard"] not in KEYBOARDS:
             problems.append(f"global.keyboard {short_repr(glob['keyboard'])} is not an installer keyboard id")
     net = data.get("network")
@@ -343,6 +370,8 @@ def _shape(data: Dict[str, Any]) -> List[str]:
         for key in ("cidr", "dns", "gateway"):
             if not isinstance(net.get(key), str):
                 problems.append(f"network.{key} must be a string with source = 'from-answer'")
+        if "filter" in net and not isinstance(net["filter"], dict):
+            problems.append("network.filter must be a table")
     else:
         problems.append("network.source must be 'from-dhcp' or 'from-answer'")
     disk = data.get("disk-setup")
@@ -350,15 +379,21 @@ def _shape(data: Dict[str, Any]) -> List[str]:
         problems.append("[disk-setup] is missing")
     else:
         fs = disk.get("filesystem")
-        if fs not in FILESYSTEMS:
+        if not (isinstance(fs, str) and fs in FILESYSTEMS):
             problems.append(f"disk-setup.filesystem must be one of {', '.join(FILESYSTEMS)}")
+            fs = None
         if ("disk-list" in disk) == ("filter" in disk):
             problems.append("disk-setup needs exactly one of disk-list and filter")
-        if "disk-list" in disk and not (isinstance(disk["disk-list"], list) and disk["disk-list"]):
-            problems.append("disk-setup.disk-list must be a non-empty list")
+        if "disk-list" in disk:
+            names = disk["disk-list"]
+            if not (isinstance(names, list) and names and all(isinstance(d, str) and d for d in names)):
+                problems.append("disk-setup.disk-list must be a non-empty list of disk names")
+        if "filter" in disk and not (isinstance(disk["filter"], dict) and disk["filter"]):
+            problems.append("disk-setup.filter must be a non-empty table")
         if fs in RAID_LEVELS:
             sub = disk.get(fs)
-            if not (isinstance(sub, dict) and sub.get("raid") in RAID_LEVELS[fs]):
+            raid = sub.get("raid") if isinstance(sub, dict) else None
+            if not (isinstance(raid, str) and raid in RAID_LEVELS[fs]):
                 problems.append(f"disk-setup.{fs}.raid must be one of {', '.join(RAID_LEVELS[fs])}")
     return problems
 
@@ -433,7 +468,7 @@ def plan(spec: Dict[str, Any], ctx: Any) -> List[str]:
         "dd if=proxmox-ve-auto.iso of=/dev/sdX bs=4M conv=fsync status=progress",
         f"#    then boot {fqdn} from it; the prepared ISO's boot menu selects the automated installation.",
         "",
-        f"# 4. The installer partitions, installs and reboots; remove the stick, then log in as root",
+        "# 4. The installer partitions, installs and reboots; remove the stick, then log in as root",
         f"#    at https://{fqdn}:8006 or over ssh.",
     ]
 

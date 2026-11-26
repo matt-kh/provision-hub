@@ -88,8 +88,8 @@ stay minimal (pyyaml; tomli on 3.10 only) — justify any new one in the PR.
   regenerate `schema/<kind>.<version>.schema.json` (below); a test fails if it drifts.
 - **Static validation only so far.** No layout has been installed in a VM; ZFS is the least
   proven; nixos-disko has been locked and `nix eval`-ed only (not built, not installed);
-  proxmox-answer has never been through the installer (its DEVLINKS disk filter is the least
-  proven part). Say
+  proxmox-answer has never been through the installer (its DEVLINKS disk filter and the
+  ID_NET_NAME NIC match are the least proven parts). Say
   so when changing layouts, and never claim an artefact "works" without an install.
 - **No writes through symlinks** (`<kind>/`, `<name>/`, `rendered/`, `build/`); plan output
   shell-quotes every spec value, comments included (`tests/test_render_safety.py`,
