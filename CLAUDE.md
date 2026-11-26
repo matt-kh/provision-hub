@@ -19,7 +19,7 @@ uv run prov --root <dir> render os-install/demo && uv run prov --root <dir> vali
 uv run prov --root <dir> plan os-install/demo && uv run prov --root <dir> list
 uv run prov --root examples validate os-install/demo-lvm
 uv run prov --root examples plan os-install/demo-nixos-ext4   # nixos-disko USB steps
-uv run prov conformance ubuntu-autoinstall && uv run prov conformance nixos-disko   # os-install FIXTURES, static only
+uv run prov conformance ubuntu-autoinstall && uv run prov conformance nixos-disko && uv run prov conformance proxmox-answer   # os-install FIXTURES, static only
 uv run prov --root examples digest os-install/demo-lvm && uv run prov --root examples status   # observed state (docs/state.md)
 pre-commit run --all-files               # same hooks as the CI lint job
 ```
@@ -35,7 +35,7 @@ stay minimal (pyyaml; tomli on 3.10 only) — justify any new one in the PR.
   `pyproject.toml` (entry-point name = `NAME`, `PLUGIN_API = 1`); bare names only for this
   distribution, third-party kinds are dotted (`registry.example.org`, api group
   `example.org`). See `docs/kinds.md` "Kind plugins".
-- `src/prov/backends/` — built-in backends (`ubuntu_autoinstall.py`, `nixos_disko.py`),
+- `src/prov/backends/` — built-in backends (`ubuntu_autoinstall.py`, `nixos_disko.py`, `proxmox_answer.py`),
   registered through the `prov.backends` entry-point group in `pyproject.toml` (entry-point
   name = `NAME`); `prov.registry.builtin()` and `prov.kinds.builtin()` are the entry points of
   the `provision-hub` distribution, never a list of imports. Per-backend docs:
@@ -87,7 +87,9 @@ stay minimal (pyyaml; tomli on 3.10 only) — justify any new one in the PR.
   anything breaking becomes `prov/v2` with a reader for v1. After any schema change
   regenerate `schema/<kind>.<version>.schema.json` (below); a test fails if it drifts.
 - **Static validation only so far.** No layout has been installed in a VM; ZFS is the least
-  proven; nixos-disko has been locked and `nix eval`-ed only (not built, not installed). Say
+  proven; nixos-disko has been locked and `nix eval`-ed only (not built, not installed);
+  proxmox-answer has never been through the installer (its DEVLINKS disk filter and the
+  ID_NET_NAME NIC match are the least proven parts). Say
   so when changing layouts, and never claim an artefact "works" without an install.
 - **No writes through symlinks** (`<kind>/`, `<name>/`, `rendered/`, `build/`); plan output
   shell-quotes every spec value, comments included (`tests/test_render_safety.py`,

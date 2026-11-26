@@ -128,6 +128,23 @@
       "if": {
         "properties": {
           "backend": {
+            "const": "proxmox-answer"
+          }
+        },
+        "required": [
+          "backend"
+        ]
+      },
+      "then": {
+        "required": [
+          "proxmox-answer"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "backend": {
             "const": "ubuntu-autoinstall"
           }
         },
@@ -159,6 +176,7 @@
       "description": "Backend that renders this spec; names the backend table.",
       "enum": [
         "nixos-disko",
+        "proxmox-answer",
         "ubuntu-autoinstall"
       ],
       "type": "string"
@@ -383,6 +401,98 @@
       "required": [
         "release",
         "state_version"
+      ],
+      "type": "object"
+    },
+    "proxmox-answer": {
+      "additionalProperties": false,
+      "description": "Proxmox VE automated-installer settings (answer.toml, ISO 8.4-1 or later).",
+      "properties": {
+        "country": {
+          "description": "Two-letter country code (mirror and locale defaults).",
+          "pattern": "^[a-z]{2}$",
+          "type": "string"
+        },
+        "keyboard": {
+          "description": "Installer keyboard id; default: mapped from the core keyboard.",
+          "enum": [
+            "de",
+            "de-ch",
+            "dk",
+            "en-gb",
+            "en-us",
+            "es",
+            "fi",
+            "fr",
+            "fr-be",
+            "fr-ca",
+            "fr-ch",
+            "hu",
+            "is",
+            "it",
+            "jp",
+            "lt",
+            "mk",
+            "nl",
+            "no",
+            "pl",
+            "pt",
+            "pt-br",
+            "se",
+            "si",
+            "tr"
+          ]
+        },
+        "mailto": {
+          "description": "Address root's mail is sent to.",
+          "pattern": "^[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\\.[A-Za-z0-9-]+)+$",
+          "type": "string"
+        },
+        "reboot_on_error": {
+          "default": false,
+          "description": "Reboot instead of dropping to a shell when the install fails.",
+          "type": "boolean"
+        },
+        "root_password_hash": {
+          "description": "crypt(3) hash of root's password (root-password-hashed); the installer requires one. Plain passwords are never accepted.",
+          "pattern": "^\\$(y|gy|6|5)\\$[./0-9A-Za-z$=,]+$",
+          "type": "string"
+        },
+        "storage": {
+          "additionalProperties": false,
+          "properties": {
+            "filesystem": {
+              "description": "ext4 and xfs: LVM on one disk; zfs and btrfs: raid over all disks.",
+              "enum": [
+                "ext4",
+                "xfs",
+                "zfs",
+                "btrfs"
+              ]
+            },
+            "raid": {
+              "description": "zfs and btrfs only (btrfs: raid0, raid1, raid10).",
+              "enum": [
+                "raid0",
+                "raid1",
+                "raid10",
+                "raidz-1",
+                "raidz-2",
+                "raidz-3"
+              ]
+            }
+          },
+          "required": [
+            "filesystem"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "country",
+        "mailto",
+        "root_password_hash",
+        "storage"
       ],
       "type": "object"
     },

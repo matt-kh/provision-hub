@@ -269,7 +269,7 @@ def test_other_distributions_are_third_party(dist):
 
 def test_builtins_come_from_the_provision_hub_distribution(registry_kind):
     assert list(kinds.builtin()) == ["os-install"]
-    assert list(registry.builtin()) == ["nixos-disko", "ubuntu-autoinstall"]
+    assert list(registry.builtin()) == ["nixos-disko", "proxmox-answer", "ubuntu-autoinstall"]
     assert KIND in kinds.discover() and BACKEND in discover()
 
 

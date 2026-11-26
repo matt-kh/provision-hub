@@ -22,6 +22,7 @@ and OS images (`image`, planned). See [docs/kinds.md](docs/kinds.md).
 |---|---|---|---|
 | `os-install` | `ubuntu-autoinstall` (22.04, 24.04) | NoCloud seed: autoinstall `user-data`, `meta-data`, `kernel-cmdline` | storage layouts `lvm`, `zfs`, `mdraid` |
 | `os-install` | `nixos-disko` (nixpkgs `nixos-YY.MM`) | pinned flake: `flake.nix`, `configuration.nix`, `disko.nix`, `installer.nix` (offline USB installer ISO) | layouts `ext4`, `ext4-luks` (LVM on LUKS); systemd-networkd or NetworkManager, optional GNOME desktop; see [docs/backends/nixos-disko.md](docs/backends/nixos-disko.md) |
+| `os-install` | `proxmox-answer` (Proxmox VE ISO 8.4-1 or later) | `answer.toml` for the automated installer (`prepare-iso --fetch-from iso`) | root only (sudo users' keys), one NIC, `ext4`/`xfs` on one disk or `zfs`/`btrfs` raid; see [docs/backends/proxmox-answer.md](docs/backends/proxmox-answer.md) |
 
 New backends follow [docs/adding-a-backend.md](docs/adding-a-backend.md); new kinds are
 plugins too, dotted for third parties (`registry.example.org`,

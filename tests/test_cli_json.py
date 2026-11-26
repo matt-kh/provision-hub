@@ -132,6 +132,7 @@ def test_text_goldens_kinds_and_backends(capsys):
     assert run(capsys, "kinds") == (0, "os-install\tprov/v1alpha1\tOne machine's operating-system install: host identity, users, network and whole disks.\n", "")
     expected = (
         "nixos-disko\tos-install\tNixOS with disko: a pinned flake holding the target system and an offline USB installer.\n"
+        "proxmox-answer\tos-install\tProxmox VE automated installation: answer.toml for an os-install spec.\n"
         "ubuntu-autoinstall\tos-install\tUbuntu Server autoinstall (subiquity): NoCloud seed for an os-install spec.\n"
     )
     assert run(capsys, "backends") == (0, expected, "")

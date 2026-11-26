@@ -656,8 +656,9 @@ are consistent and pass the backend's `validate`, not that an install works.
 Backends: `ubuntu-autoinstall` (Ubuntu Server 22.04/24.04 NoCloud seed; layouts `lvm`,
 `zfs`, `mdraid`), `nixos-disko` (NixOS flake with disko and an offline USB installer; layout
 `ext4`, `ext4-luks`; systemd-networkd or NetworkManager, optional GNOME;
-[backends/nixos-disko.md](backends/nixos-disko.md)). Candidates: Proxmox VE answer
-files, Talos machine configs.
+[backends/nixos-disko.md](backends/nixos-disko.md)), `proxmox-answer` (Proxmox VE automated
+installer `answer.toml`; root only, one NIC, `ext4`/`xfs`/`zfs`/`btrfs`;
+[backends/proxmox-answer.md](backends/proxmox-answer.md)). Candidate: Talos machine configs.
 
 ## Planned kinds (sketches, not implemented)
 

@@ -11,6 +11,7 @@ from conftest import EXAMPLES, REPO
 
 from prov import kinds, registry
 from prov.backends import nixos_disko as nixos
+from prov.backends import proxmox_answer as proxmox
 from prov.backends import ubuntu_autoinstall as ubuntu
 
 DOC_NETS = [
@@ -26,6 +27,7 @@ PUBLIC_REFERENCES = (
     "ghcr.io",
     "openssh.com",  # part of the sk-* key type names
     "nixos.org",  # NixOS downloads and manuals, linked from docs
+    "proxmox.com",  # Proxmox VE downloads and wiki, linked from docs and plans
 )
 SCANNED = [EXAMPLES, REPO / "tests", REPO / "docs", REPO / "schema", REPO / "conformance", REPO / "README.md", REPO / "CLAUDE.md", REPO / "CHANGELOG.md"]
 SELF = Path(__file__).resolve()
@@ -45,6 +47,7 @@ def _files():
     # The `prov init` starter is synthetic data too.
     yield REPO / "src/prov/backends/ubuntu_autoinstall.py", ubuntu.starter("demo")
     yield REPO / "src/prov/backends/nixos_disko.py", nixos.starter("demo")
+    yield REPO / "src/prov/backends/proxmox_answer.py", proxmox.starter("demo")
     # Conformance fixtures of the built-in kinds and the built-in backends' tables and reasons
     # (also exported to conformance/, scanned above). ensure_ascii=False keeps the text as written.
     for name, kind in kinds.builtin().items():

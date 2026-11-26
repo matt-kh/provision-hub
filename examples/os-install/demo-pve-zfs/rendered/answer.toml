@@ -1,0 +1,20 @@
+# Proxmox VE automated installation answer file, rendered by prov (proxmox-answer).
+# Every disk it selects is wiped. Validate: proxmox-auto-install-assistant validate-answer answer.toml
+
+[global]
+country = "ch"
+fqdn = "demo-pve-zfs.example.org"
+keyboard = "de-ch"
+mailto = "ops@example.org"
+reboot-on-error = true
+root-password-hashed = "$y$EXAMPLEsalt$EXAMPLEhashEXAMPLEhashEXAMPLEhashEXAMPLEhash01"
+root-ssh-keys = ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE ops@example.org"]
+timezone = "Europe/Berlin"
+
+[network]
+source = "from-dhcp"
+
+[disk-setup]
+filesystem = "zfs"
+disk-list = ["sda", "sdb"]
+zfs.raid = "raid1"

@@ -119,15 +119,15 @@ def test_refs_must_be_a_dict():
 
 def test_discover_orders_by_kind_then_name(extra_backends):
     extra_backends(fake_entry_point(fake_backend("aaa")), fake_entry_point(fake_backend("zzz")))
-    assert list(discover()) == ["aaa", "nixos-disko", "ubuntu-autoinstall", "zzz"]
+    assert list(discover()) == ["aaa", "nixos-disko", "proxmox-answer", "ubuntu-autoinstall", "zzz"]
 
 
 def test_lookup_and_for_kind():
     backends = discover()
-    assert list(for_kind(backends, "os-install")) == ["nixos-disko", "ubuntu-autoinstall"]
+    assert list(for_kind(backends, "os-install")) == ["nixos-disko", "proxmox-answer", "ubuntu-autoinstall"]
     assert for_kind(backends, "image") == {}
     assert lookup(backends, "os-install", "ubuntu-autoinstall") is builtin()["ubuntu-autoinstall"]
-    with pytest.raises(ConfigError, match="unknown backend 'plan9' for kind 'os-install' \\(registered: nixos-disko, ubuntu-autoinstall\\)"):
+    with pytest.raises(ConfigError, match="unknown backend 'plan9' for kind 'os-install' \\(registered: nixos-disko, proxmox-answer, ubuntu-autoinstall\\)"):
         lookup(backends, "os-install", "plan9")
     with pytest.raises(ConfigError, match="unknown backend"):
         lookup(backends, "os-install", ["not", "a", "name"])
